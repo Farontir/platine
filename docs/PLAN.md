@@ -63,9 +63,9 @@ Tout est en Rust avec wgpu : une seule base de code pour Vulkan, DirectX 12, Met
 | Fenêtre et entrées | winit | Standard de l'écosystème |
 | Interface | egui, egui-wgpu, egui\_dock | Rapide à écrire, panneaux ancrables |
 | Maths | glam | Types SIMD, standard du gamedev Rust |
-| Import glTF / OBJ | gltf, tobj | Crates matures |
-| Import FBX | ufbx (bindings Rust) | Parser open source sous licence MIT, sans SDK Autodesk |
-| Tangentes | mikktspace | Normal maps identiques à Blender, Unity et Unreal |
+| Import glTF | gltf | Crate mature |
+| Import FBX et OBJ | ufbx (bindings Rust) | Parser open source sous licence MIT, sans SDK Autodesk ; triangule les n-gones concaves et lit les .mtl (remplace tobj, décidé au M1) |
+| Tangentes | bevy\_mikktspace | Normal maps identiques à Blender, Unity et Unreal ; mikktspace en Rust sûr |
 | Images | image, exr | PNG, TGA, TIFF, JPEG, HDR et OpenEXR |
 | Tablette graphique | octotablet (à valider au M9) | Pression et inclinaison du stylet |
 | Parallélisme CPU | rayon | Baker CPU, encodage d'export |
