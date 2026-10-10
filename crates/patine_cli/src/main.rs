@@ -3,7 +3,11 @@
 //! Commands:
 //! - `patine_cli inspect <mesh> [--allow-missing-uvs]`: import a mesh and print its
 //!   statistics and the duration of each step.
+//! - `patine_cli bench viewport [--triangles N] [--frames N] [--size WxH] [--no-shadows]`:
+//!   frames per second of the viewport on the hardware adapter.
 //! - `patine_cli --version`
+
+mod bench;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -13,8 +17,9 @@ use patine_mesh::bvh::Bvh;
 use patine_mesh::topology::MeshTopology;
 use patine_mesh::{BuildOptions, import};
 
-const USAGE: &str =
-    "usage: patine_cli inspect <mesh> [--allow-missing-uvs]\n       patine_cli --version";
+const USAGE: &str = "usage: patine_cli inspect <mesh> [--allow-missing-uvs]
+       patine_cli bench viewport [--triangles N] [--frames N] [--size WxH] [--no-shadows]
+       patine_cli --version";
 
 fn ms(duration: Duration) -> String {
     format!("{:.1} ms", duration.as_secs_f64() * 1e3)
@@ -102,6 +107,9 @@ fn main() -> anyhow::Result<()> {
         Some("--version") => {
             println!("patine_cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
+        }
+        Some("bench") if args.get(1).map(String::as_str) == Some("viewport") => {
+            bench::ViewportBench::parse(&args[2..])?.run()
         }
         Some("inspect") => {
             let Some(path) = args.get(1) else {
