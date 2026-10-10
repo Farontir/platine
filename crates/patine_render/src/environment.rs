@@ -144,7 +144,9 @@ pub fn studio_sky(width: u32) -> EquirectImage {
         // extracted shadow-casting light comes from it.
         radiance += Vec3::new(1.0, 0.92, 0.82) * 120.0 * lobe(key, 0.995, 0.985);
         radiance += Vec3::new(0.75, 0.85, 1.0) * 3.0 * lobe(fill, 0.97, 0.9);
-        radiance.to_array()
+        // Overall level: a mid-gray diffuse surface facing the key light lands around the
+        // middle of the display range at 0 EV.
+        (radiance * 0.4).to_array()
     })
 }
 

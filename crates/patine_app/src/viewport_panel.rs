@@ -6,6 +6,8 @@ use egui::{PointerButton, Sense, Ui};
 use patine_render::camera::OrbitCamera;
 use patine_render::settings::ViewSettings;
 
+use crate::display_panel::EnvironmentState;
+
 /// Radians of orbit per pixel dragged.
 const ORBIT_SPEED: f32 = 0.008;
 /// Zoom factor exponent per pixel dragged (Alt + right button).
@@ -16,12 +18,14 @@ const WHEEL_ZOOM_SPEED: f32 = 0.0015;
 const ENVIRONMENT_SPEED: f32 = 0.006;
 
 /// State of the 3D view.
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct ViewState {
     /// Camera.
     pub camera: OrbitCamera,
     /// Display settings.
     pub settings: ViewSettings,
+    /// Environment choice and loading.
+    pub environment: EnvironmentState,
     /// Size of the panel in physical pixels, measured during the last layout.
     pub size: [u32; 2],
     /// egui texture showing the rendered image, registered by the application.
@@ -35,6 +39,7 @@ impl Default for ViewState {
         Self {
             camera: OrbitCamera::default(),
             settings: ViewSettings::default(),
+            environment: EnvironmentState::default(),
             size: [1, 1],
             texture: None,
             hover_pixel: None,

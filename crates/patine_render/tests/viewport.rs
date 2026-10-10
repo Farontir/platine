@@ -4,7 +4,7 @@ use patine_gpu::{GpuContext, gpu_test, readback};
 use patine_mesh::primitives;
 use patine_render::camera::OrbitCamera;
 use patine_render::mesh_gpu::GpuMesh;
-use patine_render::settings::{Background, ViewSettings};
+use patine_render::settings::{Background, ToneMapper, ViewSettings};
 use patine_render::viewport::{Scene, Viewport, ViewportOptions};
 
 const SIZE: u32 = 64;
@@ -34,8 +34,10 @@ fn pixel(pixels: &[[u8; 4]], x: u32, y: u32) -> [u8; 4] {
 
 gpu_test!(
     fn empty_scene_shows_the_background(ctx) {
+        // Linear display: the default AgX look slightly desaturates pure colors.
         let settings = ViewSettings {
             background: Background::Solid([0.5, 0.0, 0.0]),
+            tone_mapper: ToneMapper::Linear,
             ..ViewSettings::default()
         };
         let pixels = render(&ctx, None, &settings);

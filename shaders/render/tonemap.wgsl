@@ -1,7 +1,8 @@
-// Display pass: linear HDR (resolved) to sRGB-encoded 8-bit for egui.
+// Display pass: exposure, tone mapping, sRGB encoding into 8 bits for egui.
 
 // #import render/frame
 // #import render/color
+// #import render/tonemap_ops
 // #import render/fullscreen
 
 @group(0) @binding(0) var<uniform> frame: Frame;
@@ -10,6 +11,7 @@
 @fragment
 fn fs_main(in: FullscreenOutput) -> @location(0) vec4<f32> {
     let pixel = vec2<i32>(in.clip.xy);
-    let linear = textureLoad(hdr, pixel, 0).rgb * frame.material.z;
-    return vec4<f32>(srgb_encode(linear), 1.0);
+    let exposed = textureLoad(hdr, pixel, 0).rgb * frame.material.z;
+    let display = tone_map(exposed, u32(frame.material.w));
+    return vec4<f32>(srgb_encode(display), 1.0);
 }

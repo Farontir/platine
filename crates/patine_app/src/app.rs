@@ -276,6 +276,22 @@ impl App {
             return;
         };
         let view = &mut self.ui.view;
+        if let Some(image) = view.environment.pending.take() {
+            puffin::profile_scope!("environment");
+            let start = Instant::now();
+            match gfx.viewport.set_environment(&gfx.gpu, &image) {
+                Ok(()) => tracing::info!(
+                    width = image.width,
+                    height = image.height,
+                    ms = start.elapsed().as_millis() as u64,
+                    "environment processed"
+                ),
+                Err(error) => {
+                    tracing::error!(%error, "environment processing failed");
+                    view.environment.error = Some(error.to_string());
+                }
+            }
+        }
         let scene = Scene {
             mesh: gfx.gpu_mesh.as_ref(),
             camera: &view.camera,

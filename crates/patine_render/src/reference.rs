@@ -6,9 +6,10 @@
 
 use std::f32::consts::{PI, TAU};
 
-use glam::{Vec2, Vec3};
+use glam::{Mat3, Vec2, Vec3};
 
 use crate::environment::EquirectImage;
+use crate::settings::ToneMapper;
 
 /// Direction of the cube face `face` at face coordinates `s`, `t` in [-1, 1] (t down).
 pub fn cube_direction(face: u32, s: f32, t: f32) -> Vec3 {
@@ -184,9 +185,140 @@ pub fn prefilter_brute_force(cube: &CubeImage, n: Vec3, roughness: f32) -> Vec3 
     sum / weight_sum.max(1e-12)
 }
 
+/// Linear to sRGB transfer function, input clamped to [0, 1].
+pub fn srgb_encode(linear: Vec3) -> Vec3 {
+    linear.clamp(Vec3::ZERO, Vec3::ONE).map(|c| {
+        if c <= 0.003_130_8 {
+            c * 12.92
+        } else {
+            1.055 * c.powf(1.0 / 2.4) - 0.055
+        }
+    })
+}
+
+/// Display operator `operator` on linear radiance, returning linear display values in
+/// [0, 1]. Same formulas as `shaders/render/tonemap_ops.wgsl`.
+pub fn tone_map(operator: ToneMapper, color: Vec3) -> Vec3 {
+    match operator {
+        ToneMapper::AgX => agx(color),
+        ToneMapper::Aces => aces(color),
+        ToneMapper::PbrNeutral => pbr_neutral(color),
+        ToneMapper::Linear => color.clamp(Vec3::ZERO, Vec3::ONE),
+    }
+}
+
+fn agx(color: Vec3) -> Vec3 {
+    let inset = Mat3::from_cols_array(&[
+        0.842_479_06,
+        0.042_328_24,
+        0.042_375_655,
+        0.078_433_6,
+        0.878_468_6,
+        0.078_433_6,
+        0.079_223_745,
+        0.079_166_13,
+        0.879_143,
+    ]);
+    let outset = Mat3::from_cols_array(&[
+        1.196_879,
+        -0.052_896_85,
+        -0.052_971_635,
+        -0.098_020_88,
+        1.151_903_1,
+        -0.098_043_45,
+        -0.099_029_74,
+        -0.098_961_18,
+        1.151_073_7,
+    ]);
+    let (min_ev, max_ev) = (-12.473_93_f32, 4.026_069_f32);
+    let v = inset * color.max(Vec3::splat(1e-10));
+    let v = (v
+        .map(f32::log2)
+        .clamp(Vec3::splat(min_ev), Vec3::splat(max_ev))
+        - min_ev)
+        / (max_ev - min_ev);
+    let v2 = v * v;
+    let v4 = v2 * v2;
+    let v =
+        15.5 * v4 * v2 - 40.14 * v4 * v + 31.96 * v4 - 6.868 * v2 * v + 0.4298 * v2 + 0.1191 * v
+            - Vec3::splat(0.00232);
+    (outset * v)
+        .clamp(Vec3::ZERO, Vec3::ONE)
+        .map(|c| c.powf(2.2))
+}
+
+fn aces(color: Vec3) -> Vec3 {
+    let input = Mat3::from_cols_array(&[
+        0.597_19, 0.076, 0.028_4, 0.354_58, 0.908_34, 0.133_83, 0.048_23, 0.015_66, 0.837_77,
+    ]);
+    let output = Mat3::from_cols_array(&[
+        1.604_75, -0.102_08, -0.003_27, -0.531_08, 1.108_13, -0.072_76, -0.073_67, -0.006_05,
+        1.076_02,
+    ]);
+    let v = input * color;
+    let a = v * (v + 0.024_578_6) - Vec3::splat(0.000_090_537);
+    let b = v * (0.983_729 * v + 0.432_951) + Vec3::splat(0.238_081);
+    (output * (a / b)).clamp(Vec3::ZERO, Vec3::ONE)
+}
+
+fn pbr_neutral(input: Vec3) -> Vec3 {
+    let start_compression = 0.8 - 0.04;
+    let desaturation = 0.15;
+    let mut color = input.max(Vec3::ZERO);
+    let x = color.min_element();
+    let offset = if x < 0.08 { x - 6.25 * x * x } else { 0.04 };
+    color -= Vec3::splat(offset);
+    let peak = color.max_element();
+    if peak < start_compression {
+        return color.clamp(Vec3::ZERO, Vec3::ONE);
+    }
+    let d = 1.0 - start_compression;
+    let new_peak = 1.0 - d * d / (peak + d - start_compression);
+    color *= new_peak / peak;
+    let g = 1.0 - 1.0 / (desaturation * (peak - new_peak) + 1.0);
+    color
+        .lerp(Vec3::splat(new_peak), g)
+        .clamp(Vec3::ZERO, Vec3::ONE)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tone_mappers_are_monotonic_and_bounded() {
+        for operator in ToneMapper::ALL {
+            let mut previous = -1.0;
+            for i in 0..200 {
+                let x = (i as f32 * 0.1 - 12.0).exp2();
+                let y = tone_map(operator, Vec3::splat(x)).x;
+                assert!((0.0..=1.0).contains(&y), "{operator:?}({x}) = {y}");
+                assert!(y >= previous - 1e-6, "{operator:?} decreases at {x}");
+                previous = y;
+            }
+        }
+        // Black stays black, very bright saturates.
+        for operator in ToneMapper::ALL {
+            assert!(
+                tone_map(operator, Vec3::ZERO).max_element() < 0.01,
+                "{operator:?}"
+            );
+            assert!(
+                tone_map(operator, Vec3::splat(1e4)).min_element() > 0.95,
+                "{operator:?}"
+            );
+        }
+        // PBR Neutral leaves dark-to-mid colors almost unchanged (its purpose).
+        let mid = Vec3::new(0.5, 0.3, 0.2);
+        assert!((tone_map(ToneMapper::PbrNeutral, mid) - (mid - 0.04)).length() < 1e-5);
+    }
+
+    #[test]
+    fn srgb_encoding_known_values() {
+        assert!((srgb_encode(Vec3::splat(0.5)).x - 0.735_357).abs() < 1e-5);
+        assert_eq!(srgb_encode(Vec3::ZERO), Vec3::ZERO);
+        assert!((srgb_encode(Vec3::ONE).x - 1.0).abs() < 1e-6);
+    }
 
     #[test]
     fn cube_faces_point_along_their_axis() {

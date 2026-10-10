@@ -12,6 +12,7 @@ use tracing::Level;
 use patine_core::project::Project;
 
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
+use crate::display_panel;
 use crate::i18n::I18n;
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, DialogOutcome, NewProjectDialog};
@@ -313,6 +314,7 @@ impl TabViewer for PanelViewer<'_, '_> {
             Panel::Viewport3D => viewport_panel::show(ui, self.view),
             Panel::Console => console(ui, self.info, self.console_level),
             Panel::TextureSets => texture_sets(ui, self.info),
+            Panel::Display => display_panel::show(ui, self.view, self.info.i18n),
             _ => {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new(self.info.i18n.tr("panel-empty")).weak());

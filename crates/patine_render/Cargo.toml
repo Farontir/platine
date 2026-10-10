@@ -19,6 +19,7 @@ image = { workspace = true, features = ["hdr", "exr"] }
 
 [dev-dependencies]
 patine_gpu = { workspace = true, features = ["testing"] }
+image = { workspace = true, features = ["png"] }
 
 [lints]
 workspace = true
