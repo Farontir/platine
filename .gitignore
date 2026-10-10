@@ -1,0 +1,7 @@
+/target
+**/*.rs.bk
+*.pdb
+/.vscode/
+/.idea/
+.DS_Store
+# Golden-image failures are written under target/, nothing else to ignore.
