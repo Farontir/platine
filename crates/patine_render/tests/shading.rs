@@ -1,5 +1,7 @@
 //! Physically based shading checks on the test adapter.
 
+use glam::Vec3;
+use patine_core::mesh::MeshAsset;
 use patine_gpu::{GpuContext, gpu_test, readback};
 use patine_mesh::primitives;
 use patine_render::camera::OrbitCamera;
@@ -116,6 +118,95 @@ gpu_test!(
         let (top, bottom) = (SIZE / 2 - SIZE / 5, SIZE / 2 + SIZE / 5);
         let at = |y: u32| pixels[(y * SIZE + column) as usize][0];
         assert!(at(top) > 2.0 * at(bottom), "top {} bottom {}", at(top), at(bottom));
+    }
+);
+
+/// A unit cube resting on a 10 × 10 floor at y = -1.
+fn cube_on_floor() -> MeshAsset {
+    let cube = primitives::cube();
+    let floor = primitives::plane(1);
+    let mut mesh = cube.clone();
+    let offset = mesh.positions.len() as u32;
+    mesh.positions.extend(
+        floor
+            .positions
+            .iter()
+            .map(|p| [p[0] * 5.0, -1.0, p[2] * 5.0]),
+    );
+    mesh.normals.extend(&floor.normals);
+    mesh.uv0
+        .as_mut()
+        .expect("the cube has UVs")
+        .extend(floor.uv0.as_ref().expect("the plane has UVs"));
+    mesh.tangents
+        .as_mut()
+        .expect("the cube has tangents")
+        .extend(floor.tangents.as_ref().expect("the plane has tangents"));
+    mesh.triangles
+        .extend(floor.triangles.iter().map(|t| t.map(|v| v + offset)));
+    mesh.triangle_polygon
+        .extend(floor.triangle_polygon.iter().map(|p| p + 100));
+    mesh.triangle_object.extend(&floor.triangle_object);
+    mesh.submeshes[0].triangles.end = mesh.triangles.len() as u32;
+    mesh.validate().expect("merged mesh is valid");
+    mesh
+}
+
+gpu_test!(
+    /// A cube on a floor, lit from the +X side: with shadows, the floor darkens on the -X
+    /// side of the cube and nowhere gets brighter.
+    fn cube_casts_a_shadow_on_the_floor(ctx) {
+        let mut viewport = Viewport::with_options(&ctx, ViewportOptions::small()).unwrap();
+        let light = Vec3::new(0.7, 0.7, 0.0).normalize();
+        let sky = EquirectImage::from_fn(128, 64, |d| {
+            let sun = if d.dot(light) > 0.995 { 300.0 } else { 0.0 };
+            [0.05 + sun; 3]
+        });
+        viewport.set_environment(&ctx, &sky).unwrap();
+        let mesh = GpuMesh::new(&ctx, &cube_on_floor()).unwrap();
+        let mut camera = OrbitCamera {
+            yaw: 0.0,
+            // Looking almost straight down: only the floor and the cube's top face show,
+            // both well lit, so only the cast shadow can darken them (faces near the
+            // terminator differ between harmonics and the exact cosine).
+            pitch: 1.35,
+            ..OrbitCamera::default()
+        };
+        camera.frame(&mesh.bounds, 1.0);
+        let render = |viewport: &mut Viewport, shadows: bool| {
+            let settings = ViewSettings {
+                background: Background::Solid([0.0; 3]),
+                tone_mapper: ToneMapper::Linear,
+                shadows,
+                material: white(0.0, 0.8),
+                ..ViewSettings::default()
+            };
+            let scene = Scene {
+                mesh: Some(&mesh),
+                camera: &camera,
+                settings: &settings,
+            };
+            viewport.render(&ctx, &scene, 96, 96);
+            readback::read_rgba16f(&ctx, viewport.hdr_output().unwrap()).unwrap()
+        };
+        let off = render(&mut viewport, false);
+        let on = render(&mut viewport, true);
+        let luma = |p: &[f32; 4]| 0.2126 * p[0] + 0.7152 * p[1] + 0.0722 * p[2];
+        // Pixels losing at least 40% of their light are in the cast shadow; it falls on the
+        // -X side of the cube (left half of the image), away from the light.
+        let (mut left, mut right) = (0, 0);
+        for (i, (a, b)) in off.iter().zip(&on).enumerate() {
+            if luma(a) > 0.01 && luma(b) < 0.6 * luma(a) {
+                if i % 96 < 48 {
+                    left += 1;
+                } else {
+                    right += 1;
+                }
+            }
+        }
+        eprintln!("shadowed pixels: left {left}, right {right}");
+        assert!(left >= 50, "no cast shadow: {left} darkened pixels");
+        assert!(left >= 9 * right, "shadow on the wrong side: left {left}, right {right}");
     }
 );
 

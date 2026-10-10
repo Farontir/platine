@@ -2,10 +2,11 @@
 //! sRGB-encoded `Rgba8Unorm` image, the format egui displays as is.
 
 use bytemuck::{Pod, Zeroable};
-use glam::Vec3;
+use glam::{Mat4, Vec3};
+use patine_core::mesh::BoundingBox;
 use patine_gpu::{GpuContext, GpuError, wgpu};
 
-use crate::camera::OrbitCamera;
+use crate::camera::{OrbitCamera, look_at_rh, orthographic_rh};
 use crate::environment::{EquirectImage, studio_sky};
 use crate::environment_gpu::{BrdfLut, EnvironmentSizes, GpuEnvironment, linear_sampler};
 use crate::mesh_gpu::{GpuMesh, VERTEX_LAYOUTS};
@@ -33,10 +34,50 @@ pub struct FrameUniforms {
     viewport: [f32; 4],
     background: [f32; 4],
     environment: [f32; 4],
+    light_view_proj: [[f32; 4]; 4],
+}
+
+/// Shadow projection of the dominant light, fitted to the mesh bounds.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LightProjection {
+    /// World to shadow clip space (standard depth: 0 near, 1 far).
+    pub view_proj: Mat4,
+    /// World size of a shadow map texel.
+    pub texel_world: f32,
+}
+
+impl LightProjection {
+    /// Orthographic projection along `direction` (towards the light) enclosing the
+    /// bounding sphere of `bounds`, for a `size`² shadow map.
+    pub fn new(direction: Vec3, bounds: &BoundingBox, size: u32) -> Self {
+        let min = Vec3::from(bounds.min);
+        let max = Vec3::from(bounds.max);
+        let center = (min + max) * 0.5;
+        let radius = ((max - min).length() * 0.5).max(1e-3);
+        let direction = direction.try_normalize().unwrap_or(Vec3::Y);
+        let up = if direction.y.abs() > 0.99 {
+            Vec3::Z
+        } else {
+            Vec3::Y
+        };
+        let eye = center + direction * (2.0 * radius);
+        let view = look_at_rh(eye, center, up);
+        let projection = orthographic_rh(-radius, radius, -radius, radius, 0.0, 4.0 * radius);
+        Self {
+            view_proj: projection * view,
+            texel_world: 2.0 * radius / size as f32,
+        }
+    }
 }
 
 impl FrameUniforms {
-    fn new(camera: &OrbitCamera, settings: &ViewSettings, width: u32, height: u32) -> Self {
+    fn new(
+        camera: &OrbitCamera,
+        settings: &ViewSettings,
+        light: LightProjection,
+        width: u32,
+        height: u32,
+    ) -> Self {
         let aspect = width as f32 / height as f32;
         let view_proj = camera.view_projection(aspect);
         let material = &settings.material;
@@ -72,8 +113,9 @@ impl FrameUniforms {
                 settings.environment_rotation,
                 blur,
                 if settings.shadows { 1.0 } else { 0.0 },
-                0.0,
+                light.texel_world,
             ],
+            light_view_proj: light.view_proj.to_cols_array_2d(),
         }
     }
 }
@@ -89,15 +131,20 @@ struct EnvironmentUniforms {
     mips: [f32; 4],
 }
 
+/// Direction towards the dominant light of `environment` rotated by `rotation`, like
+/// `Sh9::project(_, rotation)`: the light turns with the environment.
+fn light_direction(environment: &GpuEnvironment, rotation: f32) -> Vec3 {
+    let d = environment.light.direction;
+    let (sin, cos) = rotation.sin_cos();
+    Vec3::new(cos * d.x + sin * d.z, d.y, -sin * d.x + cos * d.z)
+}
+
 impl EnvironmentUniforms {
     fn new(environment: &GpuEnvironment, rotation: f32) -> Self {
         let pack = |c: Vec3| c.extend(0.0).to_array();
         let sh = environment.sh.diffuse_coefficients().map(pack);
         let residual = environment.residual.diffuse_coefficients().map(pack);
-        // Same rotation as Sh9::project(…, rotation): the light turns with the environment.
-        let d = environment.light.direction;
-        let (sin, cos) = rotation.sin_cos();
-        let direction = Vec3::new(cos * d.x + sin * d.z, d.y, -sin * d.x + cos * d.z);
+        let direction = light_direction(environment, rotation);
         Self {
             sh,
             residual,
@@ -124,6 +171,8 @@ pub struct ViewportOptions {
     pub environment: EnvironmentSizes,
     /// Width of the default procedural sky.
     pub sky_width: u32,
+    /// Size of the shadow map.
+    pub shadow_map_size: u32,
 }
 
 impl Default for ViewportOptions {
@@ -133,6 +182,7 @@ impl Default for ViewportOptions {
             lut_samples: 512,
             environment: EnvironmentSizes::default(),
             sky_width: 1024,
+            shadow_map_size: 2048,
         }
     }
 }
@@ -150,8 +200,18 @@ impl ViewportOptions {
                 samples: 256,
             },
             sky_width: 128,
+            shadow_map_size: 256,
         }
     }
+}
+
+/// Resources bound in the environment bind group.
+struct EnvironmentResources<'a> {
+    environment: &'a GpuEnvironment,
+    lut: &'a BrdfLut,
+    sampler: &'a wgpu::Sampler,
+    shadow_map: &'a wgpu::TextureView,
+    shadow_sampler: &'a wgpu::Sampler,
 }
 
 /// Size-dependent render targets.
@@ -188,6 +248,9 @@ pub struct Viewport {
     environment: GpuEnvironment,
     lut: BrdfLut,
     sampler: wgpu::Sampler,
+    shadow_map: wgpu::TextureView,
+    shadow_sampler: wgpu::Sampler,
+    shadow_pipeline: wgpu::RenderPipeline,
     display_layout: wgpu::BindGroupLayout,
     background_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
@@ -338,6 +401,22 @@ impl Viewport {
                         ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
                         count: None,
                     },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 5,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Texture {
+                            sample_type: wgpu::TextureSampleType::Depth,
+                            view_dimension: wgpu::TextureViewDimension::D2,
+                            multisampled: false,
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 6,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Comparison),
+                        count: None,
+                    },
                 ],
             });
         let display_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -370,15 +449,35 @@ impl Viewport {
 
         let lut = BrdfLut::new(ctx, options.lut_size, options.lut_samples)?;
         let sampler = linear_sampler(ctx);
+        let shadow_map = texture(
+            ctx,
+            "viewport shadow map",
+            (options.shadow_map_size, options.shadow_map_size),
+            DEPTH_FORMAT,
+            1,
+            wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        )
+        .create_view(&Default::default());
+        let shadow_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("viewport shadow"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            compare: Some(wgpu::CompareFunction::LessEqual),
+            ..Default::default()
+        });
         let environment =
             GpuEnvironment::new(ctx, &studio_sky(options.sky_width), options.environment)?;
         let environment_bind_group = Self::environment_bind_group(
             ctx,
             &environment_layout,
             &environment_buffer,
-            &environment,
-            &lut,
-            &sampler,
+            EnvironmentResources {
+                environment: &environment,
+                lut: &lut,
+                sampler: &sampler,
+                shadow_map: &shadow_map,
+                shadow_sampler: &shadow_sampler,
+            },
         );
 
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -445,6 +544,44 @@ impl Viewport {
                 format: HDR_FORMAT,
             },
         )?;
+        let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("viewport shadow"),
+            bind_group_layouts: &[Some(&frame_layout)],
+            immediate_size: 0,
+        });
+        let shadow_module = ctx.create_shader_module("render/shadow")?;
+        let shadow_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("viewport shadow"),
+            layout: Some(&shadow_layout),
+            vertex: wgpu::VertexState {
+                module: &shadow_module,
+                entry_point: Some("vs_main"),
+                compilation_options: Default::default(),
+                buffers: &[Some(VERTEX_LAYOUTS[0].clone())],
+            },
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                front_face: wgpu::FrontFace::Ccw,
+                cull_mode: Some(wgpu::Face::Back),
+                ..Default::default()
+            },
+            depth_stencil: Some(wgpu::DepthStencilState {
+                format: DEPTH_FORMAT,
+                depth_write_enabled: Some(true),
+                depth_compare: Some(wgpu::CompareFunction::LessEqual),
+                stencil: wgpu::StencilState::default(),
+                // Slope-scaled bias against acne on surfaces grazing the light.
+                bias: wgpu::DepthBiasState {
+                    constant: 2,
+                    slope_scale: 2.0,
+                    clamp: 0.0,
+                },
+            }),
+            multisample: wgpu::MultisampleState::default(),
+            fragment: None,
+            multiview_mask: None,
+            cache: None,
+        });
         let display_pipeline = render_pipeline(
             ctx,
             PipelineDesc {
@@ -470,6 +607,9 @@ impl Viewport {
             environment,
             lut,
             sampler,
+            shadow_map,
+            shadow_sampler,
+            shadow_pipeline,
             display_layout,
             background_pipeline,
             mesh_pipeline,
@@ -483,10 +623,15 @@ impl Viewport {
         ctx: &GpuContext,
         layout: &wgpu::BindGroupLayout,
         buffer: &wgpu::Buffer,
-        environment: &GpuEnvironment,
-        lut: &BrdfLut,
-        sampler: &wgpu::Sampler,
+        resources: EnvironmentResources<'_>,
     ) -> wgpu::BindGroup {
+        let EnvironmentResources {
+            environment,
+            lut,
+            sampler,
+            shadow_map,
+            shadow_sampler,
+        } = resources;
         ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("viewport environment"),
             layout,
@@ -511,6 +656,14 @@ impl Viewport {
                     binding: 4,
                     resource: wgpu::BindingResource::Sampler(sampler),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: wgpu::BindingResource::TextureView(shadow_map),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: wgpu::BindingResource::Sampler(shadow_sampler),
+                },
             ],
         })
     }
@@ -526,9 +679,13 @@ impl Viewport {
             ctx,
             &self.environment_layout,
             &self.environment_buffer,
-            &self.environment,
-            &self.lut,
-            &self.sampler,
+            EnvironmentResources {
+                environment: &self.environment,
+                lut: &self.lut,
+                sampler: &self.sampler,
+                shadow_map: &self.shadow_map,
+                shadow_sampler: &self.shadow_sampler,
+            },
         );
         Ok(())
     }
@@ -617,7 +774,20 @@ impl Viewport {
         puffin::profile_function!();
         let (width, height) = (width.max(1), height.max(1));
         let reallocated = self.ensure_targets(ctx, width, height);
-        let frame = FrameUniforms::new(scene.camera, scene.settings, width, height);
+        let rotation = scene.settings.environment_rotation;
+        let shadows = scene.settings.shadows && scene.mesh.is_some();
+        let light = match scene.mesh {
+            Some(mesh) => LightProjection::new(
+                light_direction(&self.environment, rotation),
+                &mesh.bounds,
+                self.options.shadow_map_size,
+            ),
+            None => LightProjection {
+                view_proj: Mat4::IDENTITY,
+                texel_world: 0.0,
+            },
+        };
+        let frame = FrameUniforms::new(scene.camera, scene.settings, light, width, height);
         ctx.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
         let environment =
@@ -637,6 +807,28 @@ impl Viewport {
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
                 label: Some("viewport"),
             });
+        if shadows && let Some(mesh) = scene.mesh {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("viewport shadow"),
+                color_attachments: &[],
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: &self.shadow_map,
+                    depth_ops: Some(wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(1.0),
+                        store: wgpu::StoreOp::Store,
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.shadow_pipeline);
+            pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            pass.set_vertex_buffer(0, mesh.positions.slice(..));
+            pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+        }
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewport scene"),

@@ -19,6 +19,8 @@ struct Environment {
 @group(1) @binding(2) var source_cube: texture_cube<f32>;
 @group(1) @binding(3) var brdf_lut: texture_2d<f32>;
 @group(1) @binding(4) var environment_sampler: sampler;
+@group(1) @binding(5) var shadow_map: texture_depth_2d;
+@group(1) @binding(6) var shadow_sampler: sampler_comparison;
 
 // World direction to environment direction: the environment is rotated by `angle`
 // around +Y, so lookups use the inverse rotation.

@@ -16,6 +16,9 @@ struct Frame {
     viewport: vec4<f32>,
     // rgb: background color (linear); a: background mode (0 solid, 1 environment).
     background: vec4<f32>,
-    // x: environment rotation (radians); y: background blur (mip); z: shadows on; w: unused.
+    // x: environment rotation (radians); y: background blur (mip); z: shadows on;
+    // w: world size of a shadow map texel.
     environment: vec4<f32>,
+    // World to shadow map clip space of the dominant light (standard depth, 0 near).
+    light_view_proj: mat4x4<f32>,
 }
