@@ -14,6 +14,8 @@ patine_mesh.workspace = true
 glam.workspace = true
 bytemuck.workspace = true
 puffin.workspace = true
+tracing.workspace = true
+pollster.workspace = true
 thiserror.workspace = true
 image = { workspace = true, features = ["hdr", "exr"] }
 

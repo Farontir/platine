@@ -32,6 +32,8 @@ pub struct ViewState {
     pub texture: Option<egui::TextureId>,
     /// Cursor position in the image, in physical pixels, while hovered.
     pub hover_pixel: Option<[u32; 2]>,
+    /// Triangle under the cursor, from the last finished pick.
+    pub hovered: Option<u32>,
 }
 
 impl Default for ViewState {
@@ -43,6 +45,7 @@ impl Default for ViewState {
             size: [1, 1],
             texture: None,
             hover_pixel: None,
+            hovered: None,
         }
     }
 }

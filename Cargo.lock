@@ -2404,8 +2404,10 @@ dependencies = [
  "patine_core",
  "patine_gpu",
  "patine_mesh",
+ "pollster 1.0.1",
  "puffin",
  "thiserror 2.0.21",
+ "tracing",
 ]
 
 [[package]]

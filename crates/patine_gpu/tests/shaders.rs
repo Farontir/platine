@@ -15,7 +15,13 @@ fn wgsl_files(dir: &Path, out: &mut Vec<PathBuf>) {
 
 /// Shaders allowed to use capabilities beyond the WebGPU baseline. The code that creates
 /// their pipelines must check the matching device feature first.
-const EXTRA_CAPABILITIES: &[(&str, naga::valid::Capabilities)] = &[];
+const EXTRA_CAPABILITIES: &[(&str, naga::valid::Capabilities)] = &[
+    // Features::PRIMITIVE_INDEX, checked by patine_render before building the pipeline.
+    (
+        "render/picking_indexed",
+        naga::valid::Capabilities::PRIMITIVE_INDEX,
+    ),
+];
 
 #[test]
 fn all_shaders_validate_with_naga() {

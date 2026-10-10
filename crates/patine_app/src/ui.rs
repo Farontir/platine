@@ -147,6 +147,8 @@ pub struct FrameInfo<'a> {
     pub gpu_backend: &'a str,
     /// The open project, if any.
     pub project: Option<&'a Project>,
+    /// Triangle of the project mesh under the cursor.
+    pub hovered: Option<u32>,
 }
 
 /// What the interface asks the application to do after a frame.
@@ -192,6 +194,22 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> UiOutput 
                 let mut args = FluentArgs::new();
                 args.set("name", project.mesh.name.clone());
                 ui.label(RichText::new(info.i18n.tr_args("status-project", &args)).small());
+                if let Some(triangle) = info.hovered {
+                    let mesh = &project.mesh;
+                    if let (Some(polygon), Some(object)) = (
+                        mesh.triangle_polygon.get(triangle as usize),
+                        mesh.triangle_object
+                            .get(triangle as usize)
+                            .and_then(|o| mesh.objects.get(*o as usize)),
+                    ) {
+                        ui.separator();
+                        let mut args = FluentArgs::new();
+                        args.set("triangle", triangle);
+                        args.set("polygon", *polygon);
+                        args.set("object", object.clone());
+                        ui.label(RichText::new(info.i18n.tr_args("status-hover", &args)).small());
+                    }
+                }
             }
         });
     });
@@ -512,6 +530,7 @@ mod tests {
                 gpu_name: "test adapter",
                 gpu_backend: "none",
                 project: Some(&project),
+                hovered: Some(3),
             };
             for _ in 0..3 {
                 let input = egui::RawInput {

@@ -53,6 +53,7 @@ about-close = Close
 ## Status bar
 status-gpu = GPU: { $name } ({ $backend })
 status-project = Project: { $name }
+status-hover = Triangle { $triangle } · polygon { $polygon } · { $object }
 
 ## New project
 new-project-title = New project

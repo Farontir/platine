@@ -14,7 +14,7 @@ use winit::window::{Window, WindowId};
 
 use patine_core::project::{Project, ProjectSettings};
 use patine_mesh::BuildOptions;
-use patine_render::camera::Projection;
+use patine_render::camera::{OrbitCamera, Projection};
 use patine_render::mesh_gpu::GpuMesh;
 use patine_render::viewport::{Scene, Viewport};
 
@@ -38,6 +38,9 @@ struct Graphics {
     viewport: Viewport,
     /// GPU copy of the project mesh.
     gpu_mesh: Option<GpuMesh>,
+    /// What the last pick request looked at (pixel, image size, camera): a new request is
+    /// only sent when it changes, so hovering does not redraw continuously.
+    last_pick: Option<([u32; 2], [u32; 2], OrbitCamera)>,
 }
 
 /// Application state.
@@ -156,7 +159,7 @@ impl App {
         let gpu_mesh = self
             .project
             .as_ref()
-            .and_then(|project| GpuMesh::new(&gpu, &project.mesh));
+            .and_then(|project| upload_mesh(&gpu, &viewport, &project.mesh));
 
         Ok(Graphics {
             window,
@@ -169,6 +172,7 @@ impl App {
             renderer,
             viewport,
             gpu_mesh,
+            last_pick: None,
         })
     }
 
@@ -217,7 +221,9 @@ impl App {
             tracing::warn!("{warning}");
         }
         if let Some(gfx) = self.graphics.as_mut() {
-            gfx.gpu_mesh = GpuMesh::new(&gfx.gpu, &project.mesh);
+            gfx.gpu_mesh = upload_mesh(&gfx.gpu, &gfx.viewport, &project.mesh);
+            gfx.last_pick = None;
+            self.ui.view.hovered = None;
         }
         if let Some(bounds) = project.mesh.bounds() {
             let aspect = self.ui.view.aspect();
@@ -300,6 +306,37 @@ impl App {
         let reallocated = gfx
             .viewport
             .render(&gfx.gpu, &scene, view.size[0], view.size[1]);
+
+        // Picking under the cursor: the result of the previous request arrives now, and a
+        // new one is sent for the current cursor position.
+        if let Some(result) = gfx.viewport.poll_pick(&gfx.gpu) {
+            view.hovered = result.triangle;
+        }
+        match view.hover_pixel {
+            Some(pixel) if scene.mesh.is_some() => {
+                let key = (pixel, view.size, view.camera);
+                if gfx.last_pick != Some(key)
+                    && gfx.viewport.request_pick(
+                        &gfx.gpu,
+                        &scene,
+                        view.size[0],
+                        view.size[1],
+                        pixel,
+                    )
+                {
+                    gfx.last_pick = Some(key);
+                }
+                if gfx.last_pick != Some(key) || gfx.viewport.pick_pending() {
+                    // Retry next frame, or show the result as soon as it is read back.
+                    gfx.window.request_redraw();
+                }
+            }
+            _ => {
+                view.hovered = None;
+                gfx.last_pick = None;
+            }
+        }
+
         if !reallocated && view.texture.is_some() {
             return;
         }
@@ -341,6 +378,7 @@ impl App {
             gpu_name: &gfx.gpu_name,
             gpu_backend: &gfx.gpu_backend,
             project: self.project.as_ref(),
+            hovered: self.ui.view.hovered,
         };
         let ui_state = &mut self.ui;
         let actions = &self.actions;
@@ -531,5 +569,18 @@ impl ApplicationHandler for App {
                 gfx.window.request_redraw();
             }
         }
+    }
+}
+
+/// Uploads `mesh` with the picking buffers the viewport needs on this device.
+fn upload_mesh(
+    gpu: &GpuContext,
+    viewport: &Viewport,
+    mesh: &patine_core::mesh::MeshAsset,
+) -> Option<GpuMesh> {
+    if viewport.needs_flat_pick_buffers() {
+        GpuMesh::with_flat_picking(gpu, mesh)
+    } else {
+        GpuMesh::new(gpu, mesh)
     }
 }

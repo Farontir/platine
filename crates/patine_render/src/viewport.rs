@@ -10,6 +10,7 @@ use crate::camera::{OrbitCamera, look_at_rh, orthographic_rh};
 use crate::environment::{EquirectImage, studio_sky};
 use crate::environment_gpu::{BrdfLut, EnvironmentSizes, GpuEnvironment, linear_sampler};
 use crate::mesh_gpu::{GpuMesh, VERTEX_LAYOUTS};
+use crate::picking::{PickImage, PickResult, Picker};
 use crate::settings::{Background, ViewSettings};
 
 /// Linear HDR format of the scene.
@@ -173,6 +174,8 @@ pub struct ViewportOptions {
     pub sky_width: u32,
     /// Size of the shadow map.
     pub shadow_map_size: u32,
+    /// Use the picking fallback even when PRIMITIVE_INDEX is available (tests).
+    pub force_flat_picking: bool,
 }
 
 impl Default for ViewportOptions {
@@ -183,6 +186,7 @@ impl Default for ViewportOptions {
             environment: EnvironmentSizes::default(),
             sky_width: 1024,
             shadow_map_size: 2048,
+            force_flat_picking: false,
         }
     }
 }
@@ -201,6 +205,7 @@ impl ViewportOptions {
             },
             sky_width: 128,
             shadow_map_size: 256,
+            force_flat_picking: false,
         }
     }
 }
@@ -257,6 +262,7 @@ pub struct Viewport {
     wire_pipeline: wgpu::RenderPipeline,
     display_pipeline: wgpu::RenderPipeline,
     targets: Option<Targets>,
+    picker: Picker,
 }
 
 fn texture(
@@ -544,6 +550,7 @@ impl Viewport {
                 format: HDR_FORMAT,
             },
         )?;
+        let picker = Picker::new(ctx, &frame_layout, options.force_flat_picking)?;
         let shadow_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport shadow"),
             bind_group_layouts: &[Some(&frame_layout)],
@@ -616,6 +623,7 @@ impl Viewport {
             wire_pipeline,
             display_pipeline,
             targets: None,
+            picker,
         })
     }
 
@@ -768,14 +776,9 @@ impl Viewport {
         true
     }
 
-    /// Renders `scene` at `width` × `height` (clamped to at least 1) and submits the work.
-    /// Returns `true` when the output texture was reallocated.
-    pub fn render(&mut self, ctx: &GpuContext, scene: &Scene<'_>, width: u32, height: u32) -> bool {
-        puffin::profile_function!();
-        let (width, height) = (width.max(1), height.max(1));
-        let reallocated = self.ensure_targets(ctx, width, height);
+    /// Writes the frame uniforms of `scene` for a `width` × `height` image.
+    fn write_frame(&self, ctx: &GpuContext, scene: &Scene<'_>, width: u32, height: u32) {
         let rotation = scene.settings.environment_rotation;
-        let shadows = scene.settings.shadows && scene.mesh.is_some();
         let light = match scene.mesh {
             Some(mesh) => LightProjection::new(
                 light_direction(&self.environment, rotation),
@@ -790,6 +793,75 @@ impl Viewport {
         let frame = FrameUniforms::new(scene.camera, scene.settings, light, width, height);
         ctx.queue
             .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
+    }
+
+    /// Renders the picking buffer of `scene` at `width` × `height` and reads it back.
+    /// Blocks; meant for tests and tools. Returns `None` without a mesh.
+    pub fn pick_image(
+        &mut self,
+        ctx: &GpuContext,
+        scene: &Scene<'_>,
+        width: u32,
+        height: u32,
+    ) -> Result<Option<PickImage>, GpuError> {
+        let Some(mesh) = scene.mesh else {
+            return Ok(None);
+        };
+        self.write_frame(ctx, scene, width, height);
+        self.picker
+            .pick_image(ctx, &self.frame_bind_group, mesh, width, height)
+            .map(Some)
+    }
+
+    /// Starts picking `pixel` of a `width` × `height` image of `scene`; the result comes
+    /// from [`Viewport::poll_pick`], usually at the next frame. Returns `false` when the
+    /// request is not sent (previous request in flight, no mesh, pixel outside).
+    pub fn request_pick(
+        &mut self,
+        ctx: &GpuContext,
+        scene: &Scene<'_>,
+        width: u32,
+        height: u32,
+        pixel: [u32; 2],
+    ) -> bool {
+        let Some(mesh) = scene.mesh else {
+            return false;
+        };
+        self.write_frame(ctx, scene, width, height);
+        let view_proj = scene.camera.view_projection(width as f32 / height as f32);
+        self.picker.request(
+            ctx,
+            &self.frame_bind_group,
+            mesh,
+            [width, height],
+            pixel,
+            view_proj,
+        )
+    }
+
+    /// Result of the last [`Viewport::request_pick`], once the GPU has finished it.
+    pub fn poll_pick(&mut self, ctx: &GpuContext) -> Option<PickResult> {
+        self.picker.poll(ctx)
+    }
+
+    /// Whether a pick request is waiting for the GPU.
+    pub fn pick_pending(&self) -> bool {
+        self.picker.is_pending()
+    }
+
+    /// Whether meshes must be uploaded with [`GpuMesh::with_flat_picking`] for picking.
+    pub fn needs_flat_pick_buffers(&self) -> bool {
+        self.picker.needs_flat_buffers()
+    }
+
+    /// Renders `scene` at `width` × `height` (clamped to at least 1) and submits the work.
+    /// Returns `true` when the output texture was reallocated.
+    pub fn render(&mut self, ctx: &GpuContext, scene: &Scene<'_>, width: u32, height: u32) -> bool {
+        puffin::profile_function!();
+        let (width, height) = (width.max(1), height.max(1));
+        let reallocated = self.ensure_targets(ctx, width, height);
+        let shadows = scene.settings.shadows && scene.mesh.is_some();
+        self.write_frame(ctx, scene, width, height);
         let environment =
             EnvironmentUniforms::new(&self.environment, scene.settings.environment_rotation);
         ctx.queue.write_buffer(

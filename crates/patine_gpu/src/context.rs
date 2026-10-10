@@ -40,11 +40,14 @@ pub struct GpuCapabilities {
     pub r16float_storage: bool,
     /// 32-bit float textures can be sampled with linear filtering.
     pub float32_filterable: bool,
+    /// Fragment shaders can read `@builtin(primitive_index)` (triangle picking).
+    pub primitive_index: bool,
 }
 
 /// Optional features requested whenever the adapter supports them.
 const OPTIONAL_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_ADAPTER_SPECIFIC_FORMAT_FEATURES
-    .union(wgpu::Features::FLOAT32_FILTERABLE);
+    .union(wgpu::Features::FLOAT32_FILTERABLE)
+    .union(wgpu::Features::PRIMITIVE_INDEX);
 
 /// A wgpu instance, adapter, device and queue, shared by every GPU subsystem.
 #[derive(Debug)]
@@ -142,6 +145,7 @@ impl GpuContext {
                     .flags
                     .contains(wgpu::TextureFormatFeatureFlags::STORAGE_WRITE_ONLY),
             float32_filterable: features.contains(wgpu::Features::FLOAT32_FILTERABLE),
+            primitive_index: features.contains(wgpu::Features::PRIMITIVE_INDEX),
         }
     }
 

@@ -25,6 +25,44 @@ pub struct GpuMesh {
     pub wire_index_count: u32,
     /// Bounds of the mesh.
     pub bounds: BoundingBox,
+    /// De-indexed picking buffers, only on devices without `PRIMITIVE_INDEX`.
+    pub flat_pick: Option<FlatPickBuffers>,
+}
+
+/// De-indexed positions and per-vertex triangle ids for picking without
+/// `@builtin(primitive_index)`.
+#[derive(Debug)]
+pub struct FlatPickBuffers {
+    /// Three positions per triangle.
+    pub positions: wgpu::Buffer,
+    /// Triangle index of each vertex.
+    pub ids: wgpu::Buffer,
+    /// Number of vertices (3 per triangle).
+    pub vertex_count: u32,
+}
+
+impl FlatPickBuffers {
+    fn new(ctx: &GpuContext, mesh: &MeshAsset) -> Self {
+        let positions: Vec<[f32; 3]> = mesh
+            .triangles
+            .iter()
+            .flat_map(|t| t.map(|v| mesh.positions[v as usize]))
+            .collect();
+        let ids: Vec<u32> = (0..mesh.triangles.len() as u32)
+            .flat_map(|t| [t; 3])
+            .collect();
+        let vertex = wgpu::BufferUsages::VERTEX;
+        Self {
+            positions: buffer(
+                ctx,
+                "pick positions",
+                bytemuck::cast_slice(&positions),
+                vertex,
+            ),
+            ids: buffer(ctx, "pick ids", bytemuck::cast_slice(&ids), vertex),
+            vertex_count: positions.len() as u32,
+        }
+    }
 }
 
 /// Vertex buffer layouts matching [`GpuMesh`], for the mesh pipelines.
@@ -83,8 +121,19 @@ fn buffer(
 }
 
 impl GpuMesh {
-    /// Uploads `mesh`. Returns `None` for a mesh without triangles.
+    /// Uploads `mesh`. Returns `None` for a mesh without triangles. Picking buffers are
+    /// added when the device lacks `PRIMITIVE_INDEX`.
     pub fn new(ctx: &GpuContext, mesh: &MeshAsset) -> Option<Self> {
+        Self::upload(ctx, mesh, !ctx.capabilities().primitive_index)
+    }
+
+    /// Uploads `mesh` with the picking buffers of the `PRIMITIVE_INDEX` fallback, to
+    /// exercise that path on any device.
+    pub fn with_flat_picking(ctx: &GpuContext, mesh: &MeshAsset) -> Option<Self> {
+        Self::upload(ctx, mesh, true)
+    }
+
+    fn upload(ctx: &GpuContext, mesh: &MeshAsset, flat_picking: bool) -> Option<Self> {
         let bounds = mesh.bounds()?;
         if mesh.triangles.is_empty() {
             return None;
@@ -139,6 +188,7 @@ impl GpuMesh {
             ),
             wire_index_count: (edges.len() * 2) as u32,
             bounds,
+            flat_pick: flat_picking.then(|| FlatPickBuffers::new(ctx, mesh)),
         })
     }
 
