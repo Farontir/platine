@@ -7,15 +7,21 @@ all-features = true
 [advisories]
 version = 2
 yanked = "deny"
+ignore = [
+    # bincode is unmaintained (no vulnerability). It only reaches us through puffin, which
+    # encodes its profiler frames with it for puffin_http. Patine's own formats never use
+    # it (see the bincode ban below). Revisit when puffin drops it.
+    { id = "RUSTSEC-2025-0141", reason = "bincode only used by the opt-in puffin profiler" },
+]
 
 [licenses]
 version = 2
 confidence-threshold = 0.9
 allow = [
     "MIT",
-    "MIT-0",
     "Apache-2.0",
-    "Apache-2.0 WITH LLVM-exception",
+    # ISC is functionally identical to MIT (libloading, through wgpu-hal).
+    "ISC",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "Zlib",
@@ -59,8 +65,9 @@ deny = [
         "egui-phosphor",
     ] },
     { crate = "winit", wrappers = ["patine_app", "egui-winit"] },
-    # Tombstone release (compile_error!), and the 2.x line is unmaintained.
-    { crate = "bincode" },
+    # Unmaintained (3.0 is a compile_error! tombstone). Never used by Patine's own
+    # formats (postcard is); tolerated only as puffin's internal frame encoding.
+    { crate = "bincode", wrappers = ["puffin"] },
 ]
 
 [sources]

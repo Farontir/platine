@@ -13,6 +13,7 @@ Note de conception du milestone M0. Objectif : une application qui s'ouvre, une 
 
 - **bincode → postcard.** bincode 3.0.0 est une version « tombstone » (`compile_error!`) et la 2.x est déclarée non maintenue. postcard est basé sur serde, avec un format binaire stable et spécifié. Concerne M3.
 - **puffin_egui → puffin_http.** puffin_egui 0.30 dépend d'egui 0.33 ; mélanger deux versions d'egui est impossible dans la même UI. Le profileur s'active depuis l'application, qui démarre un serveur `puffin_http` ; on l'observe avec `puffin_viewer`. À réévaluer quand puffin_egui suivra egui.
+  puffin 0.20 encode ses trames avec bincode 1.3 (non maintenu, RUSTSEC-2025-0141, sans vulnérabilité). `deny.toml` l'accepte uniquement comme dépendance de puffin ; les formats de Patine ne l'utilisent jamais.
 - **Licences.** En plus de MIT, Apache-2.0, BSD et zlib, `deny.toml` autorise Unicode-3.0 (tables Unicode des crates ICU) et ce que le graphe réel exige, chaque ajout étant commenté. Les polices par défaut d'egui (OFL-1.1, Ubuntu Font Licence) sont tolérées par une exception limitée à `epaint_default_fonts`. Ces licences permettent la redistribution commerciale ; une police maison pourra les remplacer plus tard.
 
 ## Structure
