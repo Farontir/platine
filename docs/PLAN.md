@@ -529,12 +529,12 @@ Critères d'acceptation : les trois formats chargent les fixtures ; le nombre d'
 
 Objectif : un viewport dont le rendu correspond à celui des moteurs cibles.
 
-- [ ] Caméra : orbite, panoramique, zoom, cadrage, perspective ou orthographique
-- [ ] Shading GGX metal/roughness avec un matériau constant
-- [ ] HDRI : cubemap, irradiance SH, préfiltrage spéculaire, LUT de BRDF
-- [ ] Tone mapping AgX, ACES et PBR Neutral ; exposition ; rotation de l'environnement
-- [ ] Shadow map directionnelle, MSAA 4x, wireframe
-- [ ] Buffer de picking (triangle + profondeur)
+- [x] Caméra : orbite, panoramique, zoom, cadrage, perspective ou orthographique
+- [x] Shading GGX metal/roughness avec un matériau constant
+- [x] HDRI : cubemap, irradiance SH, préfiltrage spéculaire, LUT de BRDF
+- [x] Tone mapping AgX, ACES et PBR Neutral ; exposition ; rotation de l'environnement
+- [x] Shadow map directionnelle, MSAA 4x, wireframe
+- [x] Buffer de picking (triangle + profondeur)
 
 Critères d'acceptation : l'image de référence d'une grille de sphères roughness × metallic passe ; le budget du viewport est tenu ; le picking renvoie le bon triangle sur les meshes de test.
 

@@ -13,6 +13,8 @@ Le plan complet est dans `docs/PLAN.md` : c'est la source de vérité pour la st
 - Tests GPU sur la vraie carte (WARP/lavapipe par défaut) : `PATINE_TEST_ADAPTER=hardware cargo test -p <crate>`
 - Contenus interdits : `bash scripts/check-forbidden.sh`
 - Profileur : `PATINE_PROFILE=1 cargo run -p patine_app`, puis `puffin_viewer`
+- Ouvrir un mesh au lancement : `cargo run -p patine_app -- <mesh>`
+- Mesurer : `cargo run --release -p patine_cli -- bench viewport` ; `cargo run --release -p patine_cli -- inspect <mesh>`
 
 ## Méthode de travail
 1. Avant un milestone, relis sa section dans `docs/PLAN.md` et les sections d'architecture qu'il touche.

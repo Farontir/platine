@@ -110,3 +110,30 @@ Le test compare le triangle GPU à `Bvh::closest_hit` (M1) pour le rayon caméra
 - [ ] Survol : la barre d'état affiche le triangle sous le curseur.
 - [ ] Redimensionner et détacher le panneau Vue 3D.
 - [ ] `cargo run --release -p patine_cli -- bench viewport` sur la RTX A2000 : au moins 60 i/s.
+
+## Mesures (11/10/2026, RTX 3080 Ti, build release)
+
+`cargo run --release -p patine_cli -- bench viewport` : sphère générée de 499 848 triangles, 1920 × 1080, MSAA 4x, IBL, AgX.
+
+| Configuration | Images/s | ms/image |
+| --- | --- | --- |
+| Ombres activées | 3 372 | 0,30 |
+| Ombres désactivées | 5 166 | 0,19 |
+
+Création du viewport (LUT 256², ciel 1K, cube 512² et mips, préfiltrage 256² × 6 mips à 512 échantillons) : 176 ms. Le budget de PLAN.md (≥ 120 i/s) est tenu avec une large marge sur la RTX 3080 Ti. La mesure sur la RTX A2000 reste à faire (checklist), et sera refaite au M4 avec les textures 4K.
+
+## Écarts constatés pendant l'implémentation
+
+- **Harmoniques sphériques sur le CPU** (voir la section Environnement).
+- **Image de référence** réalisée en T6 plutôt qu'en T5 : elle utilise AgX, qui n'existait pas encore en T5.
+- **Picking sur WARP** : WARP annonce `PRIMITIVE_INDEX` mais refuse le pipeline (erreur interne). Le pipeline indexé est créé dans des scopes d'erreur, et le viewport passe seul sur le chemin de repli ; `Viewport::needs_flat_pick_buffers` indique aux appelants quels buffers téléverser. Les deux chemins sont testés sur la RTX ; la CI logicielle teste le repli.
+- **Ciel de studio** mis à l'échelle (× 0,4) pour qu'une surface grise moyenne tombe au milieu de la plage d'affichage à 0 EV ; sa lumière principale domine le dôme pour que l'ombre vienne d'elle.
+- **Environnement par défaut** : ciel procédural, plus deux HDRI CC0 de Poly Haven dans `assets/environments` (métadonnées dans `LICENSE.md`).
+
+## État à la clôture (11/10/2026)
+
+- Critère 1 : l'image de référence de la grille de sphères 5 × 5 (`tests/golden/patine_render/sphere_grid.png`) passe sur WARP, et sur la RTX avec la tolérance « matériel ».
+- Critère 2 : 3 372 i/s sur la RTX 3080 Ti pour 500 k triangles (budget 120). **À mesurer sur la RTX A2000.**
+- Critère 3 : sur le cube, la sphère et les deux cubes, plus de 99,7 % des pixels touchés donnent exactement le triangle de `Bvh::closest_hit` ; les autres sont des voisins touchés à la même distance (arêtes) ou sont sur une frontière de l'image d'IDs (≤ 1 %). Les positions reconstruites depuis la profondeur concordent.
+- Références CPU testées contre le GPU : équirect → cube et mips, LUT BRDF, préfiltrage, opérateurs de tone mapping. Furnace test, ombres sans occultant (écart moyen 0,09 %), ombre portée d'un cube.
+- Tous les tests passent sur WARP et sur la RTX 3080 Ti.
