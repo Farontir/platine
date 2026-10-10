@@ -33,6 +33,11 @@ panel-empty = Rien ici pour l'instant.
 console-clear = Effacer
 console-level = Niveau minimal
 console-empty = Aucun message.
+console-level-error = Erreurs
+console-level-warn = Avertissements
+console-level-info = Informations
+console-level-debug = Débogage
+console-level-trace = Trace
 console-profiler-on = Profileur actif : connectez puffin_viewer à 127.0.0.1:{ $port }
 
 ## About

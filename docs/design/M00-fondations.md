@@ -15,6 +15,7 @@ Note de conception du milestone M0. Objectif : une application qui s'ouvre, une 
 - **puffin_egui → puffin_http.** puffin_egui 0.30 dépend d'egui 0.33 ; mélanger deux versions d'egui est impossible dans la même UI. Le profileur s'active depuis l'application, qui démarre un serveur `puffin_http` ; on l'observe avec `puffin_viewer`. À réévaluer quand puffin_egui suivra egui.
   puffin 0.20 encode ses trames avec bincode 1.3 (non maintenu, RUSTSEC-2025-0141, sans vulnérabilité). `deny.toml` l'accepte uniquement comme dépendance de puffin ; les formats de Patine ne l'utilisent jamais.
 - **Licences.** En plus de MIT, Apache-2.0, BSD et zlib, `deny.toml` autorise Unicode-3.0 (tables Unicode des crates ICU) et ce que le graphe réel exige, chaque ajout étant commenté. Les polices par défaut d'egui (OFL-1.1, Ubuntu Font Licence) sont tolérées par une exception limitée à `epaint_default_fonts`. Ces licences permettent la redistribution commerciale ; une police maison pourra les remplacer plus tard.
+  Ajouts imposés par le graphe réel : ISC (libloading via wgpu) et BSL-1.0 (presse-papiers d'egui-winit). Avis « non maintenu » acceptés, sans vulnérabilité : bincode (via puffin), paste (macro de compilation d'egui_dock), ttf-parser (polices d'egui). Chacun est justifié dans `deny.toml`.
 
 ## Structure
 
@@ -68,6 +69,7 @@ Note de conception du milestone M0. Objectif : une application qui s'ouvre, une 
   - À droite : Texture Sets, Calques, Propriétés, Affichage, Historique.
   - En bas : Bibliothèque et Console.
 - Thème sombre, icônes Phosphor (MIT).
+- Surface d'affichage en format non-sRGB (`Bgra8Unorm`), comme l'attend egui-wgpu. Le viewport 3D calcule en linéaire et encodera lui-même en sRGB après le tone mapping (M2) : le principe « tout en linéaire, affichage en sRGB » du plan est respecté.
 - Gestion du redimensionnement, de la minimisation et de la perte de surface (`SurfaceError::Lost/Outdated` → reconfiguration).
 
 ## Risques

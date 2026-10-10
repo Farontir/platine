@@ -12,6 +12,11 @@ ignore = [
     # encodes its profiler frames with it for puffin_http. Patine's own formats never use
     # it (see the bincode ban below). Revisit when puffin drops it.
     { id = "RUSTSEC-2025-0141", reason = "bincode only used by the opt-in puffin profiler" },
+    # Unmaintained, no vulnerability: compile-time proc-macro used by egui_dock.
+    { id = "RUSTSEC-2024-0436", reason = "paste is a build-time macro of egui_dock" },
+    # Unmaintained, no vulnerability: font parser of egui's text stack (ab_glyph). Only
+    # parses the fonts embedded in the binary. Revisit with the next egui release.
+    { id = "RUSTSEC-2026-0192", reason = "ttf-parser only parses egui's embedded fonts" },
 ]
 
 [licenses]
@@ -22,6 +27,9 @@ allow = [
     "Apache-2.0",
     # ISC is functionally identical to MIT (libloading, through wgpu-hal).
     "ISC",
+    # Boost Software License: permissive, no attribution required in binaries
+    # (clipboard-win and error-code, through egui-winit's clipboard support).
+    "BSL-1.0",
     "BSD-2-Clause",
     "BSD-3-Clause",
     "Zlib",
