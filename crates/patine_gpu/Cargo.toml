@@ -26,6 +26,8 @@ image = { workspace = true, features = ["png"], optional = true }
 [dev-dependencies]
 patine_gpu = { path = ".", features = ["testing"] }
 naga = { workspace = true, features = ["wgsl-in"] }
+image = { workspace = true, features = ["png"] }
+pollster.workspace = true
 
 [lints]
 workspace = true

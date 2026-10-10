@@ -9,8 +9,8 @@ mod error;
 pub mod fill;
 pub mod readback;
 pub mod shaders;
-// T3: #[cfg(feature = "testing")]
-// T3: pub mod testing;
+#[cfg(feature = "testing")]
+pub mod testing;
 
 pub use context::{AdapterChoice, GpuCapabilities, GpuContext};
 pub use error::GpuError;
