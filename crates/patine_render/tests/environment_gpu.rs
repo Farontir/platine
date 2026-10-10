@@ -98,6 +98,30 @@ gpu_test!(
 );
 
 gpu_test!(
+    /// The HDRIs shipped in assets/environments load, process to finite values and have
+    /// a dominant light above the horizon (both are lit from the sky).
+    fn bundled_environments_process(ctx) {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../assets/environments");
+        let mut count = 0;
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.extension().is_none_or(|e| e != "hdr") {
+                continue;
+            }
+            count += 1;
+            let image = EquirectImage::load(&path).unwrap();
+            assert_eq!((image.width, image.height), (1024, 512), "{}", path.display());
+            assert!(image.texels.iter().flatten().all(|c| c.is_finite() && *c >= 0.0));
+            let environment = GpuEnvironment::new(&ctx, &image, SIZES).unwrap();
+            assert!(environment.light.direction.y > 0.0, "{}", path.display());
+            let specular = read_cube(&ctx, &environment.specular, SIZES.specular_mips - 1);
+            assert!(specular.faces.iter().flatten().all(|t| t.is_finite()));
+        }
+        assert_eq!(count, 2, "expected the two bundled HDRIs");
+    }
+);
+
+gpu_test!(
     fn cube_faces_follow_the_hardware_convention(ctx) {
         // Bright only towards +X: the +X face (0) must hold it, whatever the sampling API.
         let image = EquirectImage::from_fn(64, 32, |d| [d.x.max(0.0) * 10.0, 0.0, 0.0]);

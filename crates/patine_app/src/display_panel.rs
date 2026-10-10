@@ -34,6 +34,48 @@ pub struct EnvironmentState {
     pub error: Option<String>,
     /// Decoded image waiting for the application to process it on the GPU.
     pub pending: Option<EquirectImage>,
+    /// HDRIs shipped in `assets/environments`, found on first display.
+    bundled: Option<Vec<PathBuf>>,
+}
+
+/// The `assets/environments` directory: `PATINE_ASSETS`, next to the executable, or the
+/// source tree during development.
+pub fn environments_dir() -> Option<PathBuf> {
+    let candidates = [
+        std::env::var_os("PATINE_ASSETS").map(PathBuf::from),
+        std::env::current_exe()
+            .ok()
+            .and_then(|exe| exe.parent().map(|dir| dir.join("assets"))),
+        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets")),
+    ];
+    candidates
+        .into_iter()
+        .flatten()
+        .map(|assets| assets.join("environments"))
+        .find(|dir| dir.is_dir())
+}
+
+/// `.hdr` and `.exr` files of `dir`, sorted by name.
+fn list_environments(dir: &std::path::Path) -> Vec<PathBuf> {
+    let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| e.eq_ignore_ascii_case("hdr") || e.eq_ignore_ascii_case("exr"))
+        })
+        .collect();
+    files.sort();
+    files
+}
+
+fn file_name(path: &std::path::Path) -> String {
+    path.file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default()
 }
 
 impl std::fmt::Debug for EnvironmentState {
@@ -68,28 +110,36 @@ impl EnvironmentState {
         }
     }
 
-    fn load_file(&mut self, ctx: &egui::Context, filter_name: String) {
+    /// Decodes `path`, or a file picked in a native dialog when `path` is `None`, on a
+    /// worker thread.
+    fn load(&mut self, ctx: &egui::Context, path: Option<PathBuf>, filter_name: String) {
         let (sender, receiver) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let result = rfd::FileDialog::new()
-                .add_filter(filter_name, &["hdr", "exr"])
-                .pick_file()
-                .map(|path: PathBuf| {
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default();
-                    tracing::info!(path = %path.display(), "loading environment");
-                    EquirectImage::load(&path)
-                        .map(|image| (name, image))
-                        .map_err(|error| error.to_string())
-                });
+            let path = path.or_else(|| {
+                rfd::FileDialog::new()
+                    .add_filter(filter_name, &["hdr", "exr"])
+                    .pick_file()
+            });
+            let result = path.map(|path| {
+                tracing::info!(path = %path.display(), "loading environment");
+                EquirectImage::load(&path)
+                    .map(|image| (file_name(&path), image))
+                    .map_err(|error| error.to_string())
+            });
             // The panel may be gone; nobody listens then.
             let _ = sender.send(result);
             ctx.request_repaint();
         });
         self.task = Some(receiver);
+    }
+
+    fn bundled(&mut self) -> &[PathBuf] {
+        self.bundled.get_or_insert_with(|| {
+            environments_dir()
+                .map(|dir| list_environments(&dir))
+                .unwrap_or_default()
+        })
     }
 }
 
@@ -157,13 +207,22 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, i18n: &I18n) {
                     view.environment.name = None;
                     view.environment.pending = Some(studio_sky(STUDIO_SKY_WIDTH));
                 }
+                let bundled = view.environment.bundled().to_vec();
+                for path in bundled {
+                    let name = file_name(&path);
+                    let selected = view.environment.name.as_deref() == Some(name.as_str());
+                    if ui.selectable_label(selected, &name).clicked() && !selected {
+                        let filter = i18n.tr("display-hdri-filter").into_owned();
+                        view.environment.load(ui.ctx(), Some(path), filter);
+                    }
+                }
             });
         if view.environment.task.is_some() {
             ui.spinner();
             ui.label(i18n.tr("display-loading"));
         } else if ui.button(i18n.tr("display-load-hdri")).clicked() {
             let filter = i18n.tr("display-hdri-filter").into_owned();
-            view.environment.load_file(ui.ctx(), filter);
+            view.environment.load(ui.ctx(), None, filter);
         }
     });
     if let Some(error) = &view.environment.error {
@@ -296,6 +355,24 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, i18n: &I18n) {
 mod tests {
     use super::*;
     use crate::i18n::Language;
+
+    #[test]
+    fn bundled_environments_are_found() {
+        let dir = environments_dir().expect("assets/environments exists in the source tree");
+        let names: Vec<String> = list_environments(&dir)
+            .iter()
+            .map(|p| file_name(p))
+            .collect();
+        assert!(
+            names.contains(&"studio_small_08_1k.hdr".to_owned()),
+            "{names:?}"
+        );
+        assert!(
+            names
+                .iter()
+                .all(|n| n.ends_with(".hdr") || n.ends_with(".exr"))
+        );
+    }
 
     #[test]
     fn every_key_is_translated() {
