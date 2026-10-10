@@ -516,12 +516,12 @@ Critères d'acceptation : l'application démarre sous Windows ; la CI est verte 
 
 Objectif : charger un mesh et en extraire tout ce dont les autres sous-systèmes ont besoin.
 
-- [ ] Import glTF, OBJ et FBX vers `MeshAsset` : positions, normales, UV0, couleurs de vertex, sous-meshes par matériau
-- [ ] Triangulation, normales manquantes, tangentes mikktspace
-- [ ] Adjacence : polygones d'origine, îlots UV, parties connexes
-- [ ] BVH SAH aplati, réutilisé par le picking, la peinture et le baker
-- [ ] Générateurs de meshes de test : cube, sphère, cylindre, paire low/high
-- [ ] Dialogue Nouveau projet, avec un texture set par matériau
+- [x] Import glTF, OBJ et FBX vers `MeshAsset` : positions, normales, UV0, couleurs de vertex, sous-meshes par matériau
+- [x] Triangulation, normales manquantes, tangentes mikktspace
+- [x] Adjacence : polygones d'origine, îlots UV, parties connexes
+- [x] BVH SAH aplati, réutilisé par le picking, la peinture et le baker
+- [x] Générateurs de meshes de test : cube, sphère, cylindre, paire low/high
+- [x] Dialogue Nouveau projet, avec un texture set par matériau
 
 Critères d'acceptation : les trois formats chargent les fixtures ; le nombre d'îlots UV est exact sur les meshes générés ; un mesh sans UV est refusé avec un message clair.
 

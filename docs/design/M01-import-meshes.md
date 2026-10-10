@@ -123,3 +123,34 @@ Les tests vérifient que les trois formats d'une même scène donnent les mêmes
 - [ ] Un FBX et un glTF personnels (exportés de Blender, Maya ou autre) se chargent, avec des comptes plausibles dans la Console.
 - [ ] Un gros mesh (plus d'un million de triangles) se charge sans figer l'interface.
 - [ ] `cargo run -p patine_cli -- inspect <fichier>` affiche des statistiques cohérentes avec la Console.
+
+## Mesures (10/10/2026, RTX 3080 Ti, build release)
+
+Sphère UV de Blender, 1024 × 1024 segments : 2 095 104 triangles, environ 4,2 M sommets (facettes plates), via `patine_cli inspect`.
+
+| Étape | FBX | glTF (.glb) |
+| --- | --- | --- |
+| Lecture | 606 ms | 490 ms |
+| Nettoyage | 19 ms | 23 ms |
+| Normales | 37 ms | 37 ms |
+| Tangentes (mikktspace) | 3 692 ms | 3 283 ms |
+| Soudure et tri | 1 383 ms | 1 364 ms |
+| **Import total** | **5,8 s** | **5,2 s** |
+| Topologie | 1 361 ms | 1 292 ms |
+| Construction du BVH | 1 691 ms | 1 909 ms (profondeur 25) |
+
+Bench criterion (`cargo bench -p patine_mesh`) sur la sphère générée de 2,1 M triangles : 10 000 rayons en 25 ms.
+
+Le plan ne fixe aucun budget pour l'import ; ces durées pèsent sur le baker (budget de 30 s pour un high poly de 2 M triangles) et sur la création d'un projet. Un low poly typique (moins de 200 000 triangles) s'importe en moins d'une demi-seconde, et l'import tourne dans un thread de travail, donc l'interface ne se fige pas. **Pas d'optimisation au M1.** Pistes mesurées, par ordre de gain :
+1. Ne pas calculer les tangentes d'une source de bake : le baker n'en a pas besoin pour le high poly (−3,5 s).
+2. Paralléliser mikktspace par partie connexe avec rayon (le résultat reste identique : mikktspace ne dépend pas de l'ordre des faces).
+3. Clé de soudure plus compacte (hachage des 64 octets en deux passes) et tri parallèle.
+
+## État à la clôture (10/10/2026)
+
+- Les 6 tâches de M1 sont faites et testées : 25 tests unitaires et 6 tests d'import dans `patine_mesh`, plus 5 tests du dialogue dans `patine_app`.
+- Critère 1 : les fixtures Blender se chargent dans les trois formats (`.glb`, `.gltf`, `.obj`, `.fbx`) et donnent les mêmes comptes, la même boîte englobante et la même aire.
+- Critère 2 : le nombre d'îlots UV est exact sur tous les meshes générés.
+- Critère 3 : la fixture sans UV est refusée (`MissingUvs`, avec le nom de l'objet) ; le message est traduit en français et en anglais.
+- Défaut trouvé et corrigé par les tests : en f32, `sin(2π)` et `sin(π)` ne valent pas zéro, ce qui laissait ouverts la couture et le pôle nord des sphères générées.
+- Le dialogue Nouveau projet est testé hors interface (import réel dans le thread de travail) ; son utilisation à la souris reste un test manuel.
