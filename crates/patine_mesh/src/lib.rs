@@ -4,6 +4,7 @@
 //! [`assemble`] turns it into the document's [`MeshAsset`](patine_core::mesh::MeshAsset).
 
 mod assemble;
+pub mod bvh;
 mod error;
 mod hash;
 pub mod primitives;
