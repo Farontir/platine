@@ -5,13 +5,14 @@ use patine_mesh::primitives;
 use patine_render::camera::OrbitCamera;
 use patine_render::mesh_gpu::GpuMesh;
 use patine_render::settings::{Background, ViewSettings};
-use patine_render::viewport::{Scene, Viewport};
+use patine_render::viewport::{Scene, Viewport, ViewportOptions};
 
 const SIZE: u32 = 64;
 
 /// Renders `mesh` framed by the default camera and returns the RGBA8 pixels.
 fn render(ctx: &GpuContext, mesh: Option<&GpuMesh>, settings: &ViewSettings) -> Vec<[u8; 4]> {
-    let mut viewport = Viewport::new(ctx).expect("viewport shaders compile");
+    let mut viewport =
+        Viewport::with_options(ctx, ViewportOptions::small()).expect("viewport shaders compile");
     let mut camera = OrbitCamera::default();
     if let Some(mesh) = mesh {
         camera.frame(&mesh.bounds, 1.0);

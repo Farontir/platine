@@ -1,10 +1,13 @@
-//! The viewport renderer: draws the mesh off screen and produces an sRGB-encoded
-//! `Rgba8Unorm` image, the format egui displays as is.
+//! The viewport renderer: draws the environment and the mesh off screen and produces an
+//! sRGB-encoded `Rgba8Unorm` image, the format egui displays as is.
 
 use bytemuck::{Pod, Zeroable};
+use glam::Vec3;
 use patine_gpu::{GpuContext, GpuError, wgpu};
 
 use crate::camera::OrbitCamera;
+use crate::environment::{EquirectImage, studio_sky};
+use crate::environment_gpu::{BrdfLut, EnvironmentSizes, GpuEnvironment, linear_sampler};
 use crate::mesh_gpu::{GpuMesh, VERTEX_LAYOUTS};
 use crate::settings::{Background, ViewSettings};
 
@@ -75,15 +78,92 @@ impl FrameUniforms {
     }
 }
 
+/// Environment uniforms. Must match `Environment` in `shaders/render/environment.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct EnvironmentUniforms {
+    sh: [[f32; 4]; 9],
+    residual: [[f32; 4]; 9],
+    light_direction: [f32; 4],
+    light_color: [f32; 4],
+    mips: [f32; 4],
+}
+
+impl EnvironmentUniforms {
+    fn new(environment: &GpuEnvironment, rotation: f32) -> Self {
+        let pack = |c: Vec3| c.extend(0.0).to_array();
+        let sh = environment.sh.diffuse_coefficients().map(pack);
+        let residual = environment.residual.diffuse_coefficients().map(pack);
+        // Same rotation as Sh9::project(…, rotation): the light turns with the environment.
+        let d = environment.light.direction;
+        let (sin, cos) = rotation.sin_cos();
+        let direction = Vec3::new(cos * d.x + sin * d.z, d.y, -sin * d.x + cos * d.z);
+        Self {
+            sh,
+            residual,
+            light_direction: pack(direction),
+            light_color: pack(environment.light.color),
+            mips: [
+                environment.sizes.specular_mips as f32,
+                environment.cube.mip_level_count() as f32,
+                0.0,
+                0.0,
+            ],
+        }
+    }
+}
+
+/// Resolutions of the viewport's precomputed resources.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ViewportOptions {
+    /// Size of the BRDF lookup table.
+    pub lut_size: u32,
+    /// Samples per texel of the lookup table.
+    pub lut_samples: u32,
+    /// Environment processing sizes.
+    pub environment: EnvironmentSizes,
+    /// Width of the default procedural sky.
+    pub sky_width: u32,
+}
+
+impl Default for ViewportOptions {
+    fn default() -> Self {
+        Self {
+            lut_size: 256,
+            lut_samples: 512,
+            environment: EnvironmentSizes::default(),
+            sky_width: 1024,
+        }
+    }
+}
+
+impl ViewportOptions {
+    /// Small resources for tests on software adapters.
+    pub fn small() -> Self {
+        Self {
+            lut_size: 32,
+            lut_samples: 256,
+            environment: EnvironmentSizes {
+                cube: 32,
+                specular: 16,
+                specular_mips: 5,
+                samples: 256,
+            },
+            sky_width: 128,
+        }
+    }
+}
+
 /// Size-dependent render targets.
 struct Targets {
     width: u32,
     height: u32,
     msaa_color: wgpu::TextureView,
     depth: wgpu::TextureView,
-    resolved: wgpu::TextureView,
     output: wgpu::Texture,
     output_view: wgpu::TextureView,
+    resolved_texture: wgpu::Texture,
+    resolved: wgpu::TextureView,
     display_bind_group: wgpu::BindGroup,
 }
 
@@ -99,10 +179,17 @@ pub struct Scene<'a> {
 
 /// Renders scenes to an off-screen image.
 pub struct Viewport {
+    options: ViewportOptions,
     frame_buffer: wgpu::Buffer,
-    frame_layout: wgpu::BindGroupLayout,
     frame_bind_group: wgpu::BindGroup,
+    environment_layout: wgpu::BindGroupLayout,
+    environment_buffer: wgpu::Buffer,
+    environment_bind_group: wgpu::BindGroup,
+    environment: GpuEnvironment,
+    lut: BrdfLut,
+    sampler: wgpu::Sampler,
     display_layout: wgpu::BindGroupLayout,
+    background_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
     wire_pipeline: wgpu::RenderPipeline,
     display_pipeline: wgpu::RenderPipeline,
@@ -133,52 +220,131 @@ fn texture(
     })
 }
 
-fn uniform_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
+fn uniform_entry(binding: u32, size: usize) -> wgpu::BindGroupLayoutEntry {
     wgpu::BindGroupLayoutEntry {
         binding,
         visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
         ty: wgpu::BindingType::Buffer {
             ty: wgpu::BufferBindingType::Uniform,
             has_dynamic_offset: false,
-            min_binding_size: wgpu::BufferSize::new(size_of::<FrameUniforms>() as u64),
+            min_binding_size: wgpu::BufferSize::new(size as u64),
         },
         count: None,
     }
 }
 
-fn scene_depth(write: bool) -> wgpu::DepthStencilState {
+fn fragment_texture_entry(
+    binding: u32,
+    dimension: wgpu::TextureViewDimension,
+    filterable: bool,
+) -> wgpu::BindGroupLayoutEntry {
+    wgpu::BindGroupLayoutEntry {
+        binding,
+        visibility: wgpu::ShaderStages::FRAGMENT,
+        ty: wgpu::BindingType::Texture {
+            sample_type: wgpu::TextureSampleType::Float { filterable },
+            view_dimension: dimension,
+            multisampled: false,
+        },
+        count: None,
+    }
+}
+
+fn scene_depth(write: bool, compare: wgpu::CompareFunction) -> wgpu::DepthStencilState {
     wgpu::DepthStencilState {
         format: DEPTH_FORMAT,
         depth_write_enabled: Some(write),
-        // Reverse-Z: closer is larger.
-        depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+        depth_compare: Some(compare),
         stencil: wgpu::StencilState::default(),
         bias: wgpu::DepthBiasState::default(),
     }
 }
 
+/// Description of a render pipeline, filled with the viewport's shared state.
+struct PipelineDesc<'a> {
+    label: &'a str,
+    shader: &'a str,
+    vertex_entry: &'a str,
+    layout: &'a wgpu::PipelineLayout,
+    buffers: &'a [Option<wgpu::VertexBufferLayout<'a>>],
+    primitive: wgpu::PrimitiveState,
+    depth: Option<wgpu::DepthStencilState>,
+    samples: u32,
+    format: wgpu::TextureFormat,
+}
+
+fn render_pipeline(
+    ctx: &GpuContext,
+    desc: PipelineDesc<'_>,
+) -> Result<wgpu::RenderPipeline, GpuError> {
+    let module = ctx.create_shader_module(desc.shader)?;
+    Ok(ctx
+        .device
+        .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some(desc.label),
+            layout: Some(desc.layout),
+            vertex: wgpu::VertexState {
+                module: &module,
+                entry_point: Some(desc.vertex_entry),
+                compilation_options: Default::default(),
+                buffers: desc.buffers,
+            },
+            primitive: desc.primitive,
+            depth_stencil: desc.depth,
+            multisample: wgpu::MultisampleState {
+                count: desc.samples,
+                mask: !0,
+                alpha_to_coverage_enabled: false,
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &module,
+                entry_point: Some("fs_main"),
+                compilation_options: Default::default(),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: desc.format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+            }),
+            multiview_mask: None,
+            cache: None,
+        }))
+}
+
 impl Viewport {
-    /// Creates the pipelines.
+    /// Creates the pipelines and precomputed resources at their default resolutions.
     pub fn new(ctx: &GpuContext) -> Result<Self, GpuError> {
+        Self::with_options(ctx, ViewportOptions::default())
+    }
+
+    /// Creates the pipelines and precomputed resources.
+    pub fn with_options(ctx: &GpuContext, options: ViewportOptions) -> Result<Self, GpuError> {
         let device = &ctx.device;
         let frame_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("viewport frame"),
-            entries: &[uniform_entry(0)],
+            entries: &[uniform_entry(0, size_of::<FrameUniforms>())],
         });
+        let environment_layout =
+            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+                label: Some("viewport environment"),
+                entries: &[
+                    uniform_entry(0, size_of::<EnvironmentUniforms>()),
+                    fragment_texture_entry(1, wgpu::TextureViewDimension::Cube, true),
+                    fragment_texture_entry(2, wgpu::TextureViewDimension::Cube, true),
+                    fragment_texture_entry(3, wgpu::TextureViewDimension::D2, true),
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 4,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
+                        count: None,
+                    },
+                ],
+            });
         let display_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("viewport display"),
             entries: &[
-                uniform_entry(0),
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: false },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
+                uniform_entry(0, size_of::<FrameUniforms>()),
+                fragment_texture_entry(1, wgpu::TextureViewDimension::D2, false),
             ],
         });
         let frame_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -195,121 +361,181 @@ impl Viewport {
                 resource: frame_buffer.as_entire_binding(),
             }],
         });
+        let environment_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("viewport environment"),
+            size: size_of::<EnvironmentUniforms>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let lut = BrdfLut::new(ctx, options.lut_size, options.lut_samples)?;
+        let sampler = linear_sampler(ctx);
+        let environment =
+            GpuEnvironment::new(ctx, &studio_sky(options.sky_width), options.environment)?;
+        let environment_bind_group = Self::environment_bind_group(
+            ctx,
+            &environment_layout,
+            &environment_buffer,
+            &environment,
+            &lut,
+            &sampler,
+        );
 
         let scene_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("viewport scene"),
-            bind_group_layouts: &[Some(&frame_layout)],
+            bind_group_layouts: &[Some(&frame_layout), Some(&environment_layout)],
             immediate_size: 0,
         });
-        let msaa = wgpu::MultisampleState {
-            count: SAMPLES,
-            mask: !0,
-            alpha_to_coverage_enabled: false,
-        };
-        let hdr_target = [Some(wgpu::ColorTargetState {
-            format: HDR_FORMAT,
-            blend: None,
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
-
-        let mesh_shader = ctx.create_shader_module("render/mesh_lit")?;
-        let vertex_layouts: Vec<_> = VERTEX_LAYOUTS.iter().cloned().map(Some).collect();
-        let mesh_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("viewport mesh"),
-            layout: Some(&scene_layout),
-            vertex: wgpu::VertexState {
-                module: &mesh_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &vertex_layouts,
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::TriangleList,
-                front_face: wgpu::FrontFace::Ccw,
-                cull_mode: Some(wgpu::Face::Back),
-                ..Default::default()
-            },
-            depth_stencil: Some(scene_depth(true)),
-            multisample: msaa,
-            fragment: Some(wgpu::FragmentState {
-                module: &mesh_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &hdr_target,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let wire_shader = ctx.create_shader_module("render/wireframe")?;
-        let wire_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("viewport wireframe"),
-            layout: Some(&scene_layout),
-            vertex: wgpu::VertexState {
-                module: &wire_shader,
-                entry_point: Some("vs_main"),
-                compilation_options: Default::default(),
-                buffers: &[Some(VERTEX_LAYOUTS[0].clone())],
-            },
-            primitive: wgpu::PrimitiveState {
-                topology: wgpu::PrimitiveTopology::LineList,
-                ..Default::default()
-            },
-            depth_stencil: Some(scene_depth(false)),
-            multisample: msaa,
-            fragment: Some(wgpu::FragmentState {
-                module: &wire_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &hdr_target,
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
-
-        let display_shader = ctx.create_shader_module("render/tonemap")?;
         let display_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("viewport display"),
                 bind_group_layouts: &[Some(&display_layout)],
                 immediate_size: 0,
             });
-        let display_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
-            label: Some("viewport display"),
-            layout: Some(&display_pipeline_layout),
-            vertex: wgpu::VertexState {
-                module: &display_shader,
-                entry_point: Some("vs_fullscreen"),
-                compilation_options: Default::default(),
+        let mesh_buffers: Vec<_> = VERTEX_LAYOUTS.iter().cloned().map(Some).collect();
+        let reverse_z = wgpu::CompareFunction::GreaterEqual;
+
+        let background_pipeline = render_pipeline(
+            ctx,
+            PipelineDesc {
+                label: "viewport background",
+                shader: "render/background",
+                vertex_entry: "vs_fullscreen",
+                layout: &scene_layout,
                 buffers: &[],
+                primitive: wgpu::PrimitiveState::default(),
+                depth: Some(scene_depth(false, wgpu::CompareFunction::Always)),
+                samples: SAMPLES,
+                format: HDR_FORMAT,
             },
-            primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: None,
-            multisample: wgpu::MultisampleState::default(),
-            fragment: Some(wgpu::FragmentState {
-                module: &display_shader,
-                entry_point: Some("fs_main"),
-                compilation_options: Default::default(),
-                targets: &[Some(wgpu::ColorTargetState {
-                    format: OUTPUT_FORMAT,
-                    blend: None,
-                    write_mask: wgpu::ColorWrites::ALL,
-                })],
-            }),
-            multiview_mask: None,
-            cache: None,
-        });
+        )?;
+        let mesh_pipeline = render_pipeline(
+            ctx,
+            PipelineDesc {
+                label: "viewport mesh",
+                shader: "render/pbr",
+                vertex_entry: "vs_main",
+                layout: &scene_layout,
+                buffers: &mesh_buffers,
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::TriangleList,
+                    front_face: wgpu::FrontFace::Ccw,
+                    cull_mode: Some(wgpu::Face::Back),
+                    ..Default::default()
+                },
+                depth: Some(scene_depth(true, reverse_z)),
+                samples: SAMPLES,
+                format: HDR_FORMAT,
+            },
+        )?;
+        let wire_pipeline = render_pipeline(
+            ctx,
+            PipelineDesc {
+                label: "viewport wireframe",
+                shader: "render/wireframe",
+                vertex_entry: "vs_main",
+                layout: &scene_layout,
+                buffers: &[Some(VERTEX_LAYOUTS[0].clone())],
+                primitive: wgpu::PrimitiveState {
+                    topology: wgpu::PrimitiveTopology::LineList,
+                    ..Default::default()
+                },
+                depth: Some(scene_depth(false, reverse_z)),
+                samples: SAMPLES,
+                format: HDR_FORMAT,
+            },
+        )?;
+        let display_pipeline = render_pipeline(
+            ctx,
+            PipelineDesc {
+                label: "viewport display",
+                shader: "render/tonemap",
+                vertex_entry: "vs_fullscreen",
+                layout: &display_pipeline_layout,
+                buffers: &[],
+                primitive: wgpu::PrimitiveState::default(),
+                depth: None,
+                samples: 1,
+                format: OUTPUT_FORMAT,
+            },
+        )?;
 
         Ok(Self {
+            options,
             frame_buffer,
-            frame_layout,
             frame_bind_group,
+            environment_layout,
+            environment_buffer,
+            environment_bind_group,
+            environment,
+            lut,
+            sampler,
             display_layout,
+            background_pipeline,
             mesh_pipeline,
             wire_pipeline,
             display_pipeline,
             targets: None,
         })
+    }
+
+    fn environment_bind_group(
+        ctx: &GpuContext,
+        layout: &wgpu::BindGroupLayout,
+        buffer: &wgpu::Buffer,
+        environment: &GpuEnvironment,
+        lut: &BrdfLut,
+        sampler: &wgpu::Sampler,
+    ) -> wgpu::BindGroup {
+        ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("viewport environment"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(&environment.specular_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(&environment.cube_view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: wgpu::BindingResource::TextureView(&lut.view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: wgpu::BindingResource::Sampler(sampler),
+                },
+            ],
+        })
+    }
+
+    /// Processes `image` and uses it as the environment.
+    pub fn set_environment(
+        &mut self,
+        ctx: &GpuContext,
+        image: &EquirectImage,
+    ) -> Result<(), GpuError> {
+        self.environment = GpuEnvironment::new(ctx, image, self.options.environment)?;
+        self.environment_bind_group = Self::environment_bind_group(
+            ctx,
+            &self.environment_layout,
+            &self.environment_buffer,
+            &self.environment,
+            &self.lut,
+            &self.sampler,
+        );
+        Ok(())
+    }
+
+    /// The current environment.
+    pub fn environment(&self) -> &GpuEnvironment {
+        &self.environment
     }
 
     /// (Re)allocates the targets for `width` × `height`. Returns whether they changed.
@@ -346,7 +572,7 @@ impl Viewport {
             size,
             HDR_FORMAT,
             1,
-            attachment | wgpu::TextureUsages::TEXTURE_BINDING,
+            attachment | wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_SRC,
         );
         let output = texture(
             ctx,
@@ -376,9 +602,10 @@ impl Viewport {
             height,
             msaa_color: view(&msaa_color),
             depth: view(&depth),
-            resolved: resolved_view,
             output_view: view(&output),
             output,
+            resolved_texture: resolved,
+            resolved: resolved_view,
             display_bind_group,
         });
         true
@@ -390,9 +617,16 @@ impl Viewport {
         puffin::profile_function!();
         let (width, height) = (width.max(1), height.max(1));
         let reallocated = self.ensure_targets(ctx, width, height);
-        let uniforms = FrameUniforms::new(scene.camera, scene.settings, width, height);
+        let frame = FrameUniforms::new(scene.camera, scene.settings, width, height);
         ctx.queue
-            .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&uniforms));
+            .write_buffer(&self.frame_buffer, 0, bytemuck::bytes_of(&frame));
+        let environment =
+            EnvironmentUniforms::new(&self.environment, scene.settings.environment_rotation);
+        ctx.queue.write_buffer(
+            &self.environment_buffer,
+            0,
+            bytemuck::bytes_of(&environment),
+        );
         let targets = self
             .targets
             .as_ref()
@@ -404,20 +638,6 @@ impl Viewport {
                 label: Some("viewport"),
             });
         {
-            let background = match scene.settings.background {
-                Background::Solid(c) => wgpu::Color {
-                    r: c[0].into(),
-                    g: c[1].into(),
-                    b: c[2].into(),
-                    a: 1.0,
-                },
-                Background::Environment { .. } => wgpu::Color {
-                    r: 0.05,
-                    g: 0.05,
-                    b: 0.05,
-                    a: 1.0,
-                },
-            };
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("viewport scene"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -425,7 +645,8 @@ impl Viewport {
                     depth_slice: None,
                     resolve_target: Some(&targets.resolved),
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(background),
+                        // The background covers every pixel.
+                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
                         store: wgpu::StoreOp::Discard,
                     },
                 })],
@@ -442,8 +663,11 @@ impl Viewport {
                 occlusion_query_set: None,
                 multiview_mask: None,
             });
+            pass.set_bind_group(0, &self.frame_bind_group, &[]);
+            pass.set_bind_group(1, &self.environment_bind_group, &[]);
+            pass.set_pipeline(&self.background_pipeline);
+            pass.draw(0..3, 0..1);
             if let Some(mesh) = scene.mesh {
-                pass.set_bind_group(0, &self.frame_bind_group, &[]);
                 pass.set_pipeline(&self.mesh_pipeline);
                 mesh.bind_vertices(&mut pass);
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
@@ -486,8 +710,8 @@ impl Viewport {
         self.targets.as_ref().map(|t| (&t.output, &t.output_view))
     }
 
-    /// The bind group layout of the frame uniforms, for passes added by other modules.
-    pub fn frame_layout(&self) -> &wgpu::BindGroupLayout {
-        &self.frame_layout
+    /// The last scene radiance before exposure and tone mapping (`Rgba16Float`, linear).
+    pub fn hdr_output(&self) -> Option<&wgpu::Texture> {
+        self.targets.as_ref().map(|t| &t.resolved_texture)
     }
 }
