@@ -18,6 +18,9 @@ pub enum GpuError {
     /// No shader with this name exists under `shaders/`.
     #[error("unknown shader `{0}`")]
     ShaderNotFound(String),
+    /// Shader imports form a cycle; the chain is listed.
+    #[error("shader import cycle: {0}")]
+    ShaderImportCycle(String),
     /// A shader file could not be read from disk (hot-reload mode).
     #[error("failed to read shader `{name}`: {source}")]
     ShaderIo {

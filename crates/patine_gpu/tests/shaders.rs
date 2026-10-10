@@ -13,32 +13,46 @@ fn wgsl_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
+/// Shaders allowed to use capabilities beyond the WebGPU baseline. The code that creates
+/// their pipelines must check the matching device feature first.
+const EXTRA_CAPABILITIES: &[(&str, naga::valid::Capabilities)] = &[];
+
 #[test]
 fn all_shaders_validate_with_naga() {
-    let mut files = Vec::new();
-    wgsl_files(&patine_gpu::shaders::source_dir(), &mut files);
-    assert!(!files.is_empty(), "no shader found under shaders/");
-
     let mut failures = Vec::new();
-    for path in &files {
-        let source = std::fs::read_to_string(path).unwrap();
-        let module = match naga::front::wgsl::parse_str(&source) {
-            Ok(module) => module,
+    let mut count = 0;
+    for name in patine_gpu::shaders::names() {
+        count += 1;
+        // Imports resolved: this is the source the device compiles.
+        let source = match patine_gpu::shaders::load(name) {
+            Ok(source) => source,
             Err(error) => {
-                failures.push(error.emit_to_string_with_path(&source, &path.to_string_lossy()));
+                failures.push(format!("{name}: {error}"));
                 continue;
             }
         };
-        // Default capabilities: what every WebGPU device supports. A shader that needs
-        // more must say so here explicitly.
+        let module = match naga::front::wgsl::parse_str(&source) {
+            Ok(module) => module,
+            Err(error) => {
+                failures.push(error.emit_to_string_with_path(&source, name));
+                continue;
+            }
+        };
+        let extra = EXTRA_CAPABILITIES
+            .iter()
+            .filter(|(shader, _)| *shader == name)
+            .fold(naga::valid::Capabilities::empty(), |caps, (_, extra)| {
+                caps | *extra
+            });
         let mut validator = naga::valid::Validator::new(
             naga::valid::ValidationFlags::all(),
-            naga::valid::Capabilities::default(),
+            naga::valid::Capabilities::default() | extra,
         );
         if let Err(error) = validator.validate(&module) {
-            failures.push(error.emit_to_string_with_path(&source, &path.to_string_lossy()));
+            failures.push(error.emit_to_string_with_path(&source, name));
         }
     }
+    assert!(count > 0, "no shader found under shaders/");
     assert!(
         failures.is_empty(),
         "invalid shaders:\n{}",
