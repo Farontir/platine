@@ -7,8 +7,25 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+# Read shaders from `shaders/` at load time instead of embedding them.
+hot-reload = []
+# `gpu_test!` macro and golden-image comparator, for the tests of every GPU crate.
+testing = ["dep:image"]
+
 [dependencies]
 patine_core.workspace = true
+wgpu.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+pollster.workspace = true
+bytemuck.workspace = true
+half.workspace = true
+image = { workspace = true, features = ["png"], optional = true }
+
+[dev-dependencies]
+patine_gpu = { path = ".", features = ["testing"] }
+naga = { workspace = true, features = ["wgsl-in"] }
 
 [lints]
 workspace = true

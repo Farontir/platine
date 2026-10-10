@@ -39,6 +39,7 @@ octotablet = "0.1.0"
 # Math, meshes, images
 glam = "0.34.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
+half = "2.7.1"
 gltf = "1.4.1"
 tobj = "4.0.5"
 ufbx = "0.11.5"
