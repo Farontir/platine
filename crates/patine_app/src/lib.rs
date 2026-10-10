@@ -6,5 +6,6 @@ pub mod actions;
 pub mod app;
 pub mod i18n;
 pub mod logging;
+pub mod new_project;
 pub mod profiling;
 pub mod ui;

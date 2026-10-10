@@ -9,9 +9,12 @@ use egui_phosphor::regular as icons;
 use fluent_bundle::FluentArgs;
 use tracing::Level;
 
+use patine_core::project::Project;
+
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
 use crate::i18n::I18n;
 use crate::logging::LogBuffer;
+use crate::new_project::{CreatedProject, DialogOutcome, NewProjectDialog};
 
 /// A dockable panel of the main window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -108,6 +111,8 @@ pub struct UiState {
     pub show_about: bool,
     /// Most verbose level shown in the Console.
     pub console_level: Level,
+    /// The New Project dialog, when open.
+    pub new_project: Option<NewProjectDialog>,
 }
 
 impl Default for UiState {
@@ -116,6 +121,7 @@ impl Default for UiState {
             dock: default_layout(),
             show_about: false,
             console_level: Level::INFO,
+            new_project: None,
         }
     }
 }
@@ -134,6 +140,17 @@ pub struct FrameInfo<'a> {
     pub gpu_name: &'a str,
     /// Backend of the GPU adapter, for the status bar.
     pub gpu_backend: &'a str,
+    /// The open project, if any.
+    pub project: Option<&'a Project>,
+}
+
+/// What the interface asks the application to do after a frame.
+#[derive(Default)]
+pub struct UiOutput {
+    /// Actions triggered from menus.
+    pub actions: Vec<ActionId>,
+    /// A project created by the New Project dialog, to replace the document.
+    pub created_project: Option<CreatedProject>,
 }
 
 /// Applies the Patine theme and adds the icon font. Call once on the egui context.
@@ -150,9 +167,10 @@ pub fn setup_style(ctx: &egui::Context) {
     });
 }
 
-/// Draws the whole interface and returns the actions triggered from menus.
-pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> Vec<ActionId> {
+/// Draws the whole interface and returns what the application must do.
+pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> UiOutput {
     let mut triggered = Vec::new();
+    let mut created_project = None;
 
     egui::Panel::top("menu_bar").show(ui, |ui| {
         egui::MenuBar::new().ui(ui, |ui| menu_bar(ui, info, &mut triggered));
@@ -164,6 +182,12 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> Vec<Actio
         args.set("backend", info.gpu_backend);
         ui.horizontal(|ui| {
             ui.label(RichText::new(info.i18n.tr_args("status-gpu", &args)).small());
+            if let Some(project) = info.project {
+                ui.separator();
+                let mut args = FluentArgs::new();
+                args.set("name", project.mesh.name.clone());
+                ui.label(RichText::new(info.i18n.tr_args("status-project", &args)).small());
+            }
         });
     });
 
@@ -186,12 +210,28 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> Vec<Actio
         state.show_about = false;
     }
 
-    triggered
+    if let Some(dialog) = &mut state.new_project {
+        match dialog.show(ui.ctx(), info.i18n) {
+            DialogOutcome::Open => {}
+            DialogOutcome::Cancelled => state.new_project = None,
+            DialogOutcome::Created(created) => {
+                state.new_project = None;
+                created_project = Some(*created);
+            }
+        }
+    }
+
+    UiOutput {
+        actions: triggered,
+        created_project,
+    }
 }
 
 fn menu_bar(ui: &mut Ui, info: &FrameInfo<'_>, triggered: &mut Vec<ActionId>) {
     let i18n = info.i18n;
     ui.menu_button(i18n.tr("menu-file"), |ui| {
+        action_item(ui, info, ActionId::NewProject, triggered);
+        ui.separator();
         action_item(ui, info, ActionId::Quit, triggered);
     });
     ui.menu_button(i18n.tr("menu-view"), |ui| {
@@ -260,6 +300,7 @@ impl TabViewer for PanelViewer<'_, '_> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Panel) {
         match tab {
             Panel::Console => console(ui, self.info, self.console_level),
+            Panel::TextureSets => texture_sets(ui, self.info),
             _ => {
                 ui.centered_and_justified(|ui| {
                     ui.label(RichText::new(self.info.i18n.tr("panel-empty")).weak());
@@ -271,6 +312,43 @@ impl TabViewer for PanelViewer<'_, '_> {
     fn is_closeable(&self, _tab: &Panel) -> bool {
         false
     }
+}
+
+fn texture_sets(ui: &mut Ui, info: &FrameInfo<'_>) {
+    let i18n = info.i18n;
+    let Some(project) = info.project else {
+        ui.centered_and_justified(|ui| {
+            ui.label(RichText::new(i18n.tr("texture-sets-empty")).weak());
+        });
+        return;
+    };
+    let mut args = FluentArgs::new();
+    args.set("name", project.mesh.name.clone());
+    args.set("triangles", project.mesh.triangle_count());
+    args.set("vertices", project.mesh.vertex_count());
+    ui.label(i18n.tr_args("texture-sets-mesh", &args));
+    ui.separator();
+    egui::Grid::new("texture_sets_grid")
+        .num_columns(3)
+        .striped(true)
+        .spacing([16.0, 4.0])
+        .show(ui, |ui| {
+            ui.strong(i18n.tr("texture-sets-name"));
+            ui.strong(i18n.tr("texture-sets-resolution"));
+            ui.strong(i18n.tr("texture-sets-triangles"));
+            ui.end_row();
+            for set in &project.texture_sets {
+                ui.label(&set.name);
+                ui.label(format!("{0} × {0}", set.resolution.pixels()));
+                ui.label(
+                    project
+                        .mesh
+                        .material_triangle_count(set.material_index)
+                        .to_string(),
+                );
+                ui.end_row();
+            }
+        });
 }
 
 const LEVELS: [(Level, &str); 5] = [
@@ -383,6 +461,11 @@ mod tests {
             target: "test".into(),
             message: "hello".into(),
         });
+        let project = Project::new(
+            patine_mesh::primitives::cube(),
+            "cube.glb".into(),
+            Default::default(),
+        );
         for language in Language::ALL {
             let ctx = egui::Context::default();
             setup_style(&ctx);
@@ -390,6 +473,7 @@ mod tests {
             let actions = ActionRegistry::default();
             let mut state = UiState {
                 show_about: true,
+                new_project: Some(NewProjectDialog::default()),
                 ..UiState::default()
             };
             let info = FrameInfo {
@@ -402,6 +486,7 @@ mod tests {
                 logs: &logs,
                 gpu_name: "test adapter",
                 gpu_backend: "none",
+                project: Some(&project),
             };
             for _ in 0..3 {
                 let input = egui::RawInput {
@@ -412,8 +497,8 @@ mod tests {
                     ..Default::default()
                 };
                 ctx.run_ui(input, |ui| {
-                    let triggered = show(ui, &mut state, &info);
-                    assert!(triggered.is_empty());
+                    let output = show(ui, &mut state, &info);
+                    assert!(output.actions.is_empty() && output.created_project.is_none());
                 })
                 .drop_without_applying_deltas();
             }

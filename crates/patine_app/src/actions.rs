@@ -8,6 +8,8 @@ use crate::i18n::Language;
 /// Identifier of an action.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum ActionId {
+    /// Open the New Project dialog.
+    NewProject,
     /// Quit the application.
     Quit,
     /// Restore the default panel layout.
@@ -62,6 +64,14 @@ impl Default for ActionRegistry {
     fn default() -> Self {
         Self {
             actions: vec![
+                Action {
+                    id: ActionId::NewProject,
+                    name: "file.new_project",
+                    label_key: "action-file-new-project",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::N)),
+                    enabled: always,
+                    checked: None,
+                },
                 Action {
                     id: ActionId::Quit,
                     name: "app.quit",
@@ -189,6 +199,7 @@ mod tests {
     fn every_id_is_registered() {
         let registry = ActionRegistry::default();
         for id in [
+            ActionId::NewProject,
             ActionId::Quit,
             ActionId::ResetLayout,
             ActionId::ToggleProfiler,

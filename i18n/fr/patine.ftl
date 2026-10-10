@@ -10,6 +10,7 @@ menu-language = Langue
 menu-help = Aide
 
 ## Actions
+action-file-new-project = Nouveau projet…
 action-app-quit = Quitter
 action-view-reset-layout = Réinitialiser la disposition
 action-debug-toggle-profiler = Profileur
@@ -47,3 +48,34 @@ about-close = Fermer
 
 ## Status bar
 status-gpu = GPU : { $name } ({ $backend })
+status-project = Projet : { $name }
+
+## New project
+new-project-title = Nouveau projet
+new-project-mesh = Mesh
+new-project-browse = Parcourir…
+new-project-filter = Meshes 3D
+new-project-resolution = Résolution
+new-project-normal-convention = Normal map
+normal-convention-opengl = OpenGL (Y+)
+normal-convention-directx = DirectX (Y−)
+new-project-create = Créer
+new-project-cancel = Annuler
+new-project-importing = Import de { $file }…
+
+## Texture sets panel
+texture-sets-empty = Aucun projet pour l'instant. Créez-en un avec Fichier > Nouveau projet (Ctrl+N).
+texture-sets-mesh = { $name } : { $triangles } triangles, { $vertices } sommets
+texture-sets-name = Texture set
+texture-sets-resolution = Résolution
+texture-sets-triangles = Triangles
+
+## Mesh import errors
+error-mesh-io = Impossible de lire { $path } : { $message }
+error-mesh-unsupported-format = Type de fichier « .{ $extension } » non pris en charge. Formats acceptés : glTF (.glb, .gltf), FBX et OBJ.
+error-mesh-parse = Le fichier { $format } est invalide : { $message }
+error-mesh-no-geometry = Le fichier ne contient aucun triangle.
+error-mesh-missing-uvs = Ces objets n'ont pas de coordonnées UV : { $objects }. Dépliez-les dans votre logiciel de modélisation, puis importez à nouveau le mesh.
+error-mesh-too-many-vertices = Le mesh a trop de sommets ({ $count }).
+error-mesh-tangents = Le calcul des tangentes a échoué : { $message }
+error-mesh-internal = Erreur interne pendant l'import du mesh : { $message }. Merci de la signaler.

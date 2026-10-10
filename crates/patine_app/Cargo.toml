@@ -34,6 +34,7 @@ egui_dock.workspace = true
 egui-phosphor.workspace = true
 winit.workspace = true
 pollster.workspace = true
+rfd.workspace = true
 fluent-bundle.workspace = true
 fluent-syntax.workspace = true
 unic-langid.workspace = true

@@ -18,6 +18,7 @@ patine_paint.workspace = true
 patine_bake.workspace = true
 patine_export.workspace = true
 patine_assets.workspace = true
+anyhow.workspace = true
 
 [lints]
 workspace = true

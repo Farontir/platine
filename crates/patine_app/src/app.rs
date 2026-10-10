@@ -11,9 +11,12 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+use patine_core::project::Project;
+
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
 use crate::i18n::{I18n, Language};
 use crate::logging::LogBuffer;
+use crate::new_project::{CreatedProject, NewProjectDialog};
 use crate::profiling::Profiler;
 use crate::ui::{self, FrameInfo, UiState};
 
@@ -36,6 +39,8 @@ pub struct App {
     i18n: I18n,
     actions: ActionRegistry,
     ui: UiState,
+    /// The document. Replaced as a whole by New Project; edited through commands (M3).
+    project: Option<Project>,
     egui_ctx: egui::Context,
     graphics: Option<Graphics>,
     /// First fatal error; the event loop exits and `run` returns it.
@@ -54,6 +59,7 @@ pub fn run(logs: LogBuffer, profiler: Profiler) -> anyhow::Result<()> {
         i18n: I18n::new(Language::system()),
         actions: ActionRegistry::default(),
         ui: UiState::default(),
+        project: None,
         egui_ctx,
         graphics: None,
         error: None,
@@ -136,9 +142,61 @@ impl App {
         })
     }
 
+    /// Replaces the document by a new project. This is not an undoable command: the
+    /// history starts over with the new document.
+    fn open_project(&mut self, created: CreatedProject) {
+        let CreatedProject { project, report } = created;
+        let mesh = &project.mesh;
+        tracing::info!(
+            name = %mesh.name,
+            format = report.format.name(),
+            triangles = mesh.triangle_count(),
+            vertices = mesh.vertex_count(),
+            materials = mesh.materials.len(),
+            objects = mesh.objects.len(),
+            "project created"
+        );
+        let build = &report.build;
+        let mut timings = format!("read {:.0} ms", report.read_time.as_secs_f64() * 1e3);
+        for (step, duration) in &build.timings {
+            timings.push_str(&format!(", {step} {:.0} ms", duration.as_secs_f64() * 1e3));
+        }
+        tracing::info!(%timings, "import timings");
+        if build.degenerate_removed > 0 {
+            tracing::warn!(
+                count = build.degenerate_removed,
+                "degenerate triangles removed"
+            );
+        }
+        if build.invalid_normals_replaced > 0 {
+            tracing::warn!(
+                count = build.invalid_normals_replaced,
+                "invalid normals replaced"
+            );
+        }
+        if build.uvs_outside_unit_square > 0 {
+            tracing::warn!(
+                vertices = build.uvs_outside_unit_square,
+                "UVs outside the unit square (UDIM tiles are not supported yet)"
+            );
+        }
+        if !build.unused_materials.is_empty() {
+            tracing::warn!(materials = ?build.unused_materials, "unused materials dropped");
+        }
+        for warning in &report.warnings {
+            tracing::warn!("{warning}");
+        }
+        self.project = Some(project);
+    }
+
     fn execute(&mut self, action: ActionId, event_loop: &ActiveEventLoop) {
         tracing::debug!(action = self.actions.get(action).name, "action");
         match action {
+            ActionId::NewProject => {
+                if self.ui.new_project.is_none() {
+                    self.ui.new_project = Some(NewProjectDialog::default());
+                }
+            }
             ActionId::Quit => event_loop.exit(),
             ActionId::ResetLayout => self.ui.dock = ui::default_layout(),
             ActionId::ToggleProfiler => {
@@ -163,6 +221,7 @@ impl App {
 
         let raw_input = gfx.egui_state.take_egui_input(&gfx.window);
         let mut triggered = Vec::new();
+        let mut created_project = None;
         let info = FrameInfo {
             i18n: &self.i18n,
             actions: &self.actions,
@@ -170,6 +229,7 @@ impl App {
             logs: &self.logs,
             gpu_name: &gfx.gpu_name,
             gpu_backend: &gfx.gpu_backend,
+            project: self.project.as_ref(),
         };
         let ui_state = &mut self.ui;
         let actions = &self.actions;
@@ -179,7 +239,9 @@ impl App {
                 ui.ctx()
                     .input_mut(|input| actions.triggered_by_shortcuts(input, &action_context)),
             );
-            triggered.extend(ui::show(ui, ui_state, &info));
+            let output = ui::show(ui, ui_state, &info);
+            triggered.extend(output.actions);
+            created_project = created_project.take().or(output.created_project);
         });
         gfx.egui_state.handle_platform_output(
             &gfx.window,
@@ -194,6 +256,9 @@ impl App {
         Self::paint(gfx, &self.egui_ctx, &mut full_output);
         self.profiler.new_frame();
 
+        if let Some(created) = created_project {
+            self.open_project(created);
+        }
         for action in triggered {
             self.execute(action, event_loop);
         }
