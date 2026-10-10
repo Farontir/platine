@@ -1,0 +1,16 @@
+[package]
+name = "patine_render"
+description = "Real-time PBR viewport: IBL, tone mapping, overlays, picking."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+patine_core.workspace = true
+patine_gpu.workspace = true
+patine_mesh.workspace = true
+
+[lints]
+workspace = true

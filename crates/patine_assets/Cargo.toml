@@ -1,0 +1,15 @@
+[package]
+name = "patine_assets"
+description = "Asset library, presets and thumbnails."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+patine_core.workspace = true
+patine_gpu.workspace = true
+
+[lints]
+workspace = true

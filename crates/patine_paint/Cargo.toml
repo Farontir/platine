@@ -1,0 +1,16 @@
+[package]
+name = "patine_paint"
+description = "Brush engine, screen-to-UV projection and stroke rasterization."
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+publish.workspace = true
+
+[dependencies]
+patine_core.workspace = true
+patine_gpu.workspace = true
+patine_mesh.workspace = true
+
+[lints]
+workspace = true

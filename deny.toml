@@ -1,0 +1,68 @@
+# cargo-deny configuration: `cargo deny check`.
+# Every license or exception added here must be justified by a comment.
+
+[graph]
+all-features = true
+
+[advisories]
+version = 2
+yanked = "deny"
+
+[licenses]
+version = 2
+confidence-threshold = 0.9
+allow = [
+    "MIT",
+    "MIT-0",
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "Zlib",
+    # Unicode data tables shipped by the ICU crates (unicode-ident, icu_*): permissive.
+    "Unicode-3.0",
+]
+exceptions = [
+    # egui's default fonts (Ubuntu-Light, NotoEmoji, emoji-icon-font). Both licenses
+    # allow commercial redistribution of the embedded fonts. Restricted to this crate.
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "LicenseRef-UFL-1.0"] },
+]
+
+[licenses.private]
+ignore = true
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+# Architecture rule: GPU and UI crates may only be direct dependencies of the crates
+# listed in `wrappers`. In particular, patine_core never depends on wgpu, egui or winit.
+deny = [
+    { crate = "wgpu", wrappers = [
+        "patine_gpu",
+        "patine_render",
+        "patine_compositor",
+        "patine_procedural",
+        "patine_paint",
+        "patine_bake",
+        "patine_export",
+        "patine_assets",
+        "patine_app",
+        "patine_cli",
+        "egui-wgpu",
+    ] },
+    { crate = "egui", wrappers = [
+        "patine_app",
+        "egui-wgpu",
+        "egui-winit",
+        "egui_dock",
+        "egui-phosphor",
+    ] },
+    { crate = "winit", wrappers = ["patine_app", "egui-winit"] },
+    # Tombstone release (compile_error!), and the 2.x line is unmaintained.
+    { crate = "bincode" },
+]
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
