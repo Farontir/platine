@@ -22,15 +22,31 @@ pub enum ActionId {
     LanguageFrench,
     /// Show the About dialog.
     About,
+    /// Frame the mesh in the viewport.
+    FrameMesh,
+    /// Switch between perspective and orthographic projection.
+    ToggleProjection,
+    /// Show or hide the wireframe overlay.
+    ToggleWireframe,
+    /// Enable or disable shadows.
+    ToggleShadows,
 }
 
 /// Application state that actions read to decide whether they are enabled or checked.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct ActionContext {
     /// Whether the profiler is recording.
     pub profiler_enabled: bool,
     /// Current interface language.
     pub language: Language,
+    /// Whether a project is open.
+    pub has_project: bool,
+    /// Whether the viewport uses an orthographic projection.
+    pub orthographic: bool,
+    /// Whether the wireframe overlay is shown.
+    pub wireframe: bool,
+    /// Whether shadows are enabled.
+    pub shadows: bool,
 }
 
 /// Declaration of an action.
@@ -123,6 +139,38 @@ impl Default for ActionRegistry {
                     enabled: always,
                     checked: None,
                 },
+                Action {
+                    id: ActionId::FrameMesh,
+                    name: "view.frame",
+                    label_key: "action-view-frame",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::F)),
+                    enabled: |ctx| ctx.has_project,
+                    checked: None,
+                },
+                Action {
+                    id: ActionId::ToggleProjection,
+                    name: "view.toggle_projection",
+                    label_key: "action-view-orthographic",
+                    shortcut: None,
+                    enabled: always,
+                    checked: Some(|ctx| ctx.orthographic),
+                },
+                Action {
+                    id: ActionId::ToggleWireframe,
+                    name: "view.toggle_wireframe",
+                    label_key: "action-view-wireframe",
+                    shortcut: None,
+                    enabled: always,
+                    checked: Some(|ctx| ctx.wireframe),
+                },
+                Action {
+                    id: ActionId::ToggleShadows,
+                    name: "view.toggle_shadows",
+                    label_key: "action-view-shadows",
+                    shortcut: None,
+                    enabled: always,
+                    checked: Some(|ctx| ctx.shadows),
+                },
             ],
         }
     }
@@ -143,18 +191,22 @@ impl ActionRegistry {
     }
 
     /// Consumes the shortcuts pressed this frame and returns the enabled actions they trigger.
+    ///
+    /// While a text field has the keyboard (`text_focus`), shortcuts without a modifier are
+    /// left to the text field: typing an "f" must not frame the mesh.
     pub fn triggered_by_shortcuts(
         &self,
         input: &mut egui::InputState,
         context: &ActionContext,
+        text_focus: bool,
     ) -> Vec<ActionId> {
         self.actions
             .iter()
             .filter(|action| {
-                action
-                    .shortcut
-                    .is_some_and(|shortcut| input.consume_shortcut(&shortcut))
-                    && (action.enabled)(context)
+                action.shortcut.is_some_and(|shortcut| {
+                    !(text_focus && shortcut.modifiers.is_none())
+                        && input.consume_shortcut(&shortcut)
+                }) && (action.enabled)(context)
             })
             .map(|action| action.id)
             .collect()
@@ -206,34 +258,72 @@ mod tests {
             ActionId::LanguageEnglish,
             ActionId::LanguageFrench,
             ActionId::About,
+            ActionId::FrameMesh,
+            ActionId::ToggleProjection,
+            ActionId::ToggleWireframe,
+            ActionId::ToggleShadows,
         ] {
             assert_eq!(registry.get(id).id, id);
         }
     }
 
-    #[test]
-    fn shortcut_triggers_its_action() {
+    /// Presses `key` with `modifiers` and returns the triggered actions.
+    fn press(
+        key: Key,
+        modifiers: Modifiers,
+        context: &ActionContext,
+        text_focus: bool,
+    ) -> Vec<ActionId> {
         let registry = ActionRegistry::default();
-        let context = ActionContext {
-            profiler_enabled: false,
-            language: Language::English,
-        };
         let ctx = egui::Context::default();
         let mut input = egui::RawInput::default();
         input.events.push(egui::Event::Key {
-            key: Key::Q,
+            key,
             physical_key: None,
             pressed: true,
             repeat: false,
-            modifiers: Modifiers::COMMAND,
+            modifiers,
         });
         let mut triggered = Vec::new();
         ctx.run_ui(input, |ui| {
             triggered = ui
                 .ctx()
-                .input_mut(|input| registry.triggered_by_shortcuts(input, &context));
+                .input_mut(|input| registry.triggered_by_shortcuts(input, context, text_focus));
         })
         .drop_without_applying_deltas();
-        assert_eq!(triggered, vec![ActionId::Quit]);
+        triggered
+    }
+
+    #[test]
+    fn shortcut_triggers_its_action() {
+        let context = ActionContext::default();
+        assert_eq!(
+            press(Key::Q, Modifiers::COMMAND, &context, false),
+            [ActionId::Quit]
+        );
+        // Modified shortcuts still work while typing.
+        assert_eq!(
+            press(Key::Q, Modifiers::COMMAND, &context, true),
+            [ActionId::Quit]
+        );
+    }
+
+    #[test]
+    fn plain_keys_are_left_to_text_fields() {
+        let context = ActionContext {
+            has_project: true,
+            ..ActionContext::default()
+        };
+        assert_eq!(
+            press(Key::F, Modifiers::NONE, &context, false),
+            [ActionId::FrameMesh]
+        );
+        assert!(press(Key::F, Modifiers::NONE, &context, true).is_empty());
+    }
+
+    #[test]
+    fn disabled_actions_do_not_trigger() {
+        // Framing needs a project.
+        assert!(press(Key::F, Modifiers::NONE, &ActionContext::default(), false).is_empty());
     }
 }

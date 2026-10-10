@@ -200,12 +200,84 @@ impl MeshTopology {
     }
 }
 
+/// Edges of the source polygons, as vertex index pairs, for wireframe display.
+///
+/// A geometric edge is kept when it borders the mesh or separates two different source
+/// polygons, so quads and n-gons show without their triangulation diagonals. Each edge is
+/// returned once, using the vertices of its first triangle.
+pub fn polygon_edges(mesh: &MeshAsset) -> Vec<[u32; 2]> {
+    /// What is known about a geometric edge.
+    struct EdgeInfo {
+        vertices: [u32; 2],
+        first_polygon: u32,
+        sides: u32,
+        separates_polygons: bool,
+    }
+    let mut edges: FxHashMap<(u32, u32), EdgeInfo> = FxHashMap::default();
+    let mut position_ids: FxHashMap<[u32; 3], u32> = FxHashMap::default();
+    let position_of: Vec<u32> = mesh
+        .positions
+        .iter()
+        .map(|p| {
+            let next = position_ids.len() as u32;
+            *position_ids.entry(position_key(*p)).or_insert(next)
+        })
+        .collect();
+    let mut order = Vec::new();
+    for (triangle, corners) in mesh.triangles.iter().enumerate() {
+        let polygon = mesh.triangle_polygon[triangle];
+        for edge in 0..3 {
+            let (a, b) = (corners[edge], corners[(edge + 1) % 3]);
+            let (pa, pb) = (position_of[a as usize], position_of[b as usize]);
+            let key = (pa.min(pb), pa.max(pb));
+            match edges.get_mut(&key) {
+                Some(info) => {
+                    info.sides += 1;
+                    info.separates_polygons |= info.first_polygon != polygon;
+                }
+                None => {
+                    edges.insert(
+                        key,
+                        EdgeInfo {
+                            vertices: [a, b],
+                            first_polygon: polygon,
+                            sides: 1,
+                            separates_polygons: false,
+                        },
+                    );
+                    order.push(key);
+                }
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|key| {
+            let info = &edges[&key];
+            // A border, or a boundary between two polygons.
+            (info.sides == 1 || info.separates_polygons).then_some(info.vertices)
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use proptest::prelude::*;
 
     use super::*;
     use crate::primitives;
+
+    #[test]
+    fn polygon_edges_skip_triangulation_diagonals() {
+        // 12 cube edges, not 18 (6 diagonals hidden).
+        assert_eq!(polygon_edges(&primitives::cube()).len(), 12);
+        // 2 × 2 grid of quads: 12 edges.
+        assert_eq!(polygon_edges(&primitives::plane(2)).len(), 12);
+        // glTF-like meshes where every triangle is its own polygon keep all edges.
+        let mut mesh = primitives::plane(1);
+        mesh.triangle_polygon = vec![0, 1];
+        assert_eq!(polygon_edges(&mesh).len(), 5);
+    }
 
     /// Acceptance criterion 2 of M1: exact UV island counts on the generated meshes.
     #[test]

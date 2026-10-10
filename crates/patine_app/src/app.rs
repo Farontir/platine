@@ -1,5 +1,6 @@
 //! Main window: winit event loop, wgpu surface and egui rendering.
 
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -11,7 +12,11 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
-use patine_core::project::Project;
+use patine_core::project::{Project, ProjectSettings};
+use patine_mesh::BuildOptions;
+use patine_render::camera::Projection;
+use patine_render::mesh_gpu::GpuMesh;
+use patine_render::viewport::{Scene, Viewport};
 
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
 use crate::i18n::{I18n, Language};
@@ -30,6 +35,9 @@ struct Graphics {
     gpu_backend: String,
     egui_state: egui_winit::State,
     renderer: egui_wgpu::Renderer,
+    viewport: Viewport,
+    /// GPU copy of the project mesh.
+    gpu_mesh: Option<GpuMesh>,
 }
 
 /// Application state.
@@ -48,7 +56,9 @@ pub struct App {
 }
 
 /// Opens the main window and runs until it is closed.
-pub fn run(logs: LogBuffer, profiler: Profiler) -> anyhow::Result<()> {
+///
+/// With `mesh`, a project is created from it at startup with default settings.
+pub fn run(logs: LogBuffer, profiler: Profiler, mesh: Option<&Path>) -> anyhow::Result<()> {
     let event_loop = EventLoop::new().context("failed to create the event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let egui_ctx = egui::Context::default();
@@ -64,6 +74,14 @@ pub fn run(logs: LogBuffer, profiler: Profiler) -> anyhow::Result<()> {
         graphics: None,
         error: None,
     };
+    if let Some(path) = mesh {
+        let imported = patine_mesh::import(path, BuildOptions::default())
+            .with_context(|| format!("cannot import {}", path.display()))?;
+        app.open_project(CreatedProject {
+            project: Project::new(imported.mesh, path.to_owned(), ProjectSettings::default()),
+            report: imported.report,
+        });
+    }
     event_loop.run_app(&mut app).context("event loop failed")?;
     match app.error.take() {
         Some(error) => Err(error),
@@ -73,9 +91,14 @@ pub fn run(logs: LogBuffer, profiler: Profiler) -> anyhow::Result<()> {
 
 impl App {
     fn action_context(&self) -> ActionContext {
+        let view = &self.ui.view;
         ActionContext {
             profiler_enabled: self.profiler.is_enabled(),
             language: self.i18n.language(),
+            has_project: self.project.is_some(),
+            orthographic: view.camera.projection == Projection::Orthographic,
+            wireframe: view.settings.wireframe,
+            shadows: view.settings.shadows,
         }
     }
 
@@ -129,6 +152,11 @@ impl App {
             config.format,
             egui_wgpu::RendererOptions::default(),
         );
+        let viewport = Viewport::new(&gpu).context("failed to create the viewport")?;
+        let gpu_mesh = self
+            .project
+            .as_ref()
+            .and_then(|project| GpuMesh::new(&gpu, &project.mesh));
 
         Ok(Graphics {
             window,
@@ -139,6 +167,8 @@ impl App {
             gpu,
             egui_state,
             renderer,
+            viewport,
+            gpu_mesh,
         })
     }
 
@@ -186,6 +216,13 @@ impl App {
         for warning in &report.warnings {
             tracing::warn!("{warning}");
         }
+        if let Some(gfx) = self.graphics.as_mut() {
+            gfx.gpu_mesh = GpuMesh::new(&gfx.gpu, &project.mesh);
+        }
+        if let Some(bounds) = project.mesh.bounds() {
+            let aspect = self.ui.view.aspect();
+            self.ui.view.camera.frame(&bounds, aspect);
+        }
         self.project = Some(project);
     }
 
@@ -206,6 +243,64 @@ impl App {
             ActionId::LanguageEnglish => self.i18n = I18n::new(Language::English),
             ActionId::LanguageFrench => self.i18n = I18n::new(Language::French),
             ActionId::About => self.ui.show_about = true,
+            ActionId::FrameMesh => {
+                if let Some(bounds) = self.project.as_ref().and_then(|p| p.mesh.bounds()) {
+                    let aspect = self.ui.view.aspect();
+                    self.ui.view.camera.frame(&bounds, aspect);
+                }
+            }
+            ActionId::ToggleProjection => {
+                let camera = &mut self.ui.view.camera;
+                camera.projection = match camera.projection {
+                    Projection::Perspective => Projection::Orthographic,
+                    Projection::Orthographic => Projection::Perspective,
+                };
+            }
+            ActionId::ToggleWireframe => {
+                let settings = &mut self.ui.view.settings;
+                settings.wireframe = !settings.wireframe;
+            }
+            ActionId::ToggleShadows => {
+                let settings = &mut self.ui.view.settings;
+                settings.shadows = !settings.shadows;
+            }
+        }
+        if let Some(gfx) = &self.graphics {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// Renders the 3D viewport and keeps its egui texture registered.
+    fn render_viewport(&mut self) {
+        let Some(gfx) = self.graphics.as_mut() else {
+            return;
+        };
+        let view = &mut self.ui.view;
+        let scene = Scene {
+            mesh: gfx.gpu_mesh.as_ref(),
+            camera: &view.camera,
+            settings: &view.settings,
+        };
+        let reallocated = gfx
+            .viewport
+            .render(&gfx.gpu, &scene, view.size[0], view.size[1]);
+        if !reallocated && view.texture.is_some() {
+            return;
+        }
+        let Some((_, output)) = gfx.viewport.output() else {
+            return;
+        };
+        let device = &gfx.gpu.device;
+        let filter = wgpu::FilterMode::Linear;
+        match view.texture {
+            Some(id) => gfx
+                .renderer
+                .update_egui_texture_from_wgpu_texture(device, output, filter, id),
+            None => {
+                view.texture = Some(gfx.renderer.register_native_texture(device, output, filter));
+                // The panel only knows the texture from the next frame on.
+                gfx.window.request_redraw();
+            }
         }
     }
 
@@ -235,10 +330,10 @@ impl App {
         let actions = &self.actions;
         let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
             puffin::profile_scope!("ui");
-            triggered.extend(
-                ui.ctx()
-                    .input_mut(|input| actions.triggered_by_shortcuts(input, &action_context)),
-            );
+            let text_focus = ui.ctx().egui_wants_keyboard_input();
+            triggered.extend(ui.ctx().input_mut(|input| {
+                actions.triggered_by_shortcuts(input, &action_context, text_focus)
+            }));
             let output = ui::show(ui, ui_state, &info);
             triggered.extend(output.actions);
             created_project = created_project.take().or(output.created_project);
@@ -253,6 +348,11 @@ impl App {
             .get(&egui::ViewportId::ROOT)
             .map(|viewport| viewport.repaint_delay);
 
+        // The 3D image of this frame, with the camera moved by this frame's input.
+        self.render_viewport();
+        let Some(gfx) = self.graphics.as_mut() else {
+            return;
+        };
         Self::paint(gfx, &self.egui_ctx, &mut full_output);
         self.profiler.new_frame();
 

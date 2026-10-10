@@ -12,6 +12,11 @@ patine_core.workspace = true
 patine_gpu.workspace = true
 patine_mesh.workspace = true
 glam.workspace = true
+bytemuck.workspace = true
+puffin.workspace = true
+
+[dev-dependencies]
+patine_gpu = { workspace = true, features = ["testing"] }
 
 [lints]
 workspace = true

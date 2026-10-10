@@ -10,6 +10,10 @@ menu-language = Language
 menu-help = Help
 
 ## Actions
+action-view-frame = Frame mesh
+action-view-orthographic = Orthographic
+action-view-wireframe = Wireframe
+action-view-shadows = Shadows
 action-file-new-project = New project…
 action-app-quit = Quit
 action-view-reset-layout = Reset layout

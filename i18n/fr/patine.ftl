@@ -10,6 +10,10 @@ menu-language = Langue
 menu-help = Aide
 
 ## Actions
+action-view-frame = Cadrer le mesh
+action-view-orthographic = Orthographique
+action-view-wireframe = Fil de fer
+action-view-shadows = Ombres
 action-file-new-project = Nouveau projet…
 action-app-quit = Quitter
 action-view-reset-layout = Réinitialiser la disposition

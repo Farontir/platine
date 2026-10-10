@@ -2359,10 +2359,12 @@ dependencies = [
 name = "patine_render"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "glam",
  "patine_core",
  "patine_gpu",
  "patine_mesh",
+ "puffin",
 ]
 
 [[package]]

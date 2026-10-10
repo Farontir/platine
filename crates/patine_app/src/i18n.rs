@@ -6,9 +6,10 @@ use fluent_bundle::{FluentArgs, FluentBundle, FluentResource};
 use unic_langid::LanguageIdentifier;
 
 /// A supported interface language.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Language {
     /// English, the fallback language.
+    #[default]
     English,
     /// French.
     French,

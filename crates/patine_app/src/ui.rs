@@ -15,6 +15,7 @@ use crate::actions::{ActionContext, ActionId, ActionRegistry};
 use crate::i18n::I18n;
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, DialogOutcome, NewProjectDialog};
+use crate::viewport_panel::{self, ViewState};
 
 /// A dockable panel of the main window.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -113,6 +114,8 @@ pub struct UiState {
     pub console_level: Level,
     /// The New Project dialog, when open.
     pub new_project: Option<NewProjectDialog>,
+    /// Camera and display settings of the 3D viewport.
+    pub view: ViewState,
 }
 
 impl Default for UiState {
@@ -122,6 +125,7 @@ impl Default for UiState {
             show_about: false,
             console_level: Level::INFO,
             new_project: None,
+            view: ViewState::default(),
         }
     }
 }
@@ -196,6 +200,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> UiOutput 
         let mut viewer = PanelViewer {
             info,
             console_level: &mut state.console_level,
+            view: &mut state.view,
         };
         DockArea::new(&mut state.dock)
             .style(style)
@@ -235,6 +240,11 @@ fn menu_bar(ui: &mut Ui, info: &FrameInfo<'_>, triggered: &mut Vec<ActionId>) {
         action_item(ui, info, ActionId::Quit, triggered);
     });
     ui.menu_button(i18n.tr("menu-view"), |ui| {
+        action_item(ui, info, ActionId::FrameMesh, triggered);
+        action_item(ui, info, ActionId::ToggleProjection, triggered);
+        action_item(ui, info, ActionId::ToggleWireframe, triggered);
+        action_item(ui, info, ActionId::ToggleShadows, triggered);
+        ui.separator();
         action_item(ui, info, ActionId::ResetLayout, triggered);
         action_item(ui, info, ActionId::ToggleProfiler, triggered);
     });
@@ -284,6 +294,7 @@ fn about_dialog(ctx: &egui::Context, i18n: &I18n) -> bool {
 struct PanelViewer<'a, 'b> {
     info: &'a FrameInfo<'b>,
     console_level: &'a mut Level,
+    view: &'a mut ViewState,
 }
 
 impl TabViewer for PanelViewer<'_, '_> {
@@ -299,6 +310,7 @@ impl TabViewer for PanelViewer<'_, '_> {
 
     fn ui(&mut self, ui: &mut Ui, tab: &mut Panel) {
         match tab {
+            Panel::Viewport3D => viewport_panel::show(ui, self.view),
             Panel::Console => console(ui, self.info, self.console_level),
             Panel::TextureSets => texture_sets(ui, self.info),
             _ => {
@@ -311,6 +323,15 @@ impl TabViewer for PanelViewer<'_, '_> {
 
     fn is_closeable(&self, _tab: &Panel) -> bool {
         false
+    }
+
+    fn scroll_bars(&self, tab: &Panel) -> [bool; 2] {
+        // The viewport fills its panel exactly.
+        if *tab == Panel::Viewport3D {
+            [false, false]
+        } else {
+            [true, true]
+        }
     }
 }
 
@@ -482,6 +503,8 @@ mod tests {
                 action_context: ActionContext {
                     profiler_enabled: true,
                     language,
+                    has_project: true,
+                    ..ActionContext::default()
                 },
                 logs: &logs,
                 gpu_name: "test adapter",
