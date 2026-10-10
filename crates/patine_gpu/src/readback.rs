@@ -7,12 +7,23 @@ use crate::{GpuContext, GpuError};
 /// The texture needs `COPY_SRC` usage and an uncompressed, single-aspect format.
 /// Blocks until the GPU has finished all submitted work.
 pub fn read_texture(ctx: &GpuContext, texture: &wgpu::Texture) -> Result<Vec<u8>, GpuError> {
+    read_texture_level(ctx, texture, 0, 0)
+}
+
+/// Reads mip `mip` of array layer `layer` (a cube face for cubemaps), rows tightly packed.
+pub fn read_texture_level(
+    ctx: &GpuContext,
+    texture: &wgpu::Texture,
+    mip: u32,
+    layer: u32,
+) -> Result<Vec<u8>, GpuError> {
     let format = texture.format();
     let texel_size = format
         .block_copy_size(None)
         .filter(|_| format.block_dimensions() == (1, 1))
         .ok_or(GpuError::UnsupportedReadbackFormat(format))?;
-    let (width, height) = (texture.width(), texture.height());
+    let width = (texture.width() >> mip).max(1);
+    let height = (texture.height() >> mip).max(1);
     let row_bytes = width * texel_size;
     let padded_row_bytes = row_bytes.next_multiple_of(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT);
 
@@ -28,7 +39,16 @@ pub fn read_texture(ctx: &GpuContext, texture: &wgpu::Texture) -> Result<Vec<u8>
             label: Some("readback"),
         });
     encoder.copy_texture_to_buffer(
-        texture.as_image_copy(),
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: mip,
+            origin: wgpu::Origin3d {
+                x: 0,
+                y: 0,
+                z: layer,
+            },
+            aspect: wgpu::TextureAspect::All,
+        },
         wgpu::TexelCopyBufferInfo {
             buffer: &staging,
             layout: wgpu::TexelCopyBufferLayout {
@@ -37,7 +57,11 @@ pub fn read_texture(ctx: &GpuContext, texture: &wgpu::Texture) -> Result<Vec<u8>
                 rows_per_image: Some(height),
             },
         },
-        texture.size(),
+        wgpu::Extent3d {
+            width,
+            height,
+            depth_or_array_layers: 1,
+        },
     );
     ctx.queue.submit([encoder.finish()]);
 
@@ -67,10 +91,20 @@ pub fn read_texture(ctx: &GpuContext, texture: &wgpu::Texture) -> Result<Vec<u8>
 
 /// Reads an `Rgba16Float` texture and converts its texels to `f32`.
 pub fn read_rgba16f(ctx: &GpuContext, texture: &wgpu::Texture) -> Result<Vec<[f32; 4]>, GpuError> {
+    read_rgba16f_level(ctx, texture, 0, 0)
+}
+
+/// Reads mip `mip` of layer `layer` of an `Rgba16Float` texture as `f32`.
+pub fn read_rgba16f_level(
+    ctx: &GpuContext,
+    texture: &wgpu::Texture,
+    mip: u32,
+    layer: u32,
+) -> Result<Vec<[f32; 4]>, GpuError> {
     if texture.format() != wgpu::TextureFormat::Rgba16Float {
         return Err(GpuError::UnsupportedReadbackFormat(texture.format()));
     }
-    let bytes = read_texture(ctx, texture)?;
+    let bytes = read_texture_level(ctx, texture, mip, layer)?;
     let (texels, _) = bytes.as_chunks::<8>();
     Ok(texels
         .iter()

@@ -36,9 +36,9 @@ Les contrôles (Alt + clic gauche, milieu, droit ; molette ; Maj + clic droit po
 - Les pixels de l'HDRI sont envoyés en `Rgba32Float` et lus par `textureLoad` : la plage de f16 (65 504) ne suffit pas pour le soleil d'une HDRI.
 - Traitements GPU (compute), chacun avec sa référence CPU dans `patine_render::reference` :
   - équirect → cubemap 512² par face, `Rgba16Float`, avec mips ;
-  - irradiance en harmoniques sphériques d'ordre 2 (9 coefficients RGB) ;
   - cube spéculaire préfiltré GGX, 256², 6 mips de roughness 0 à 1, échantillonnage d'importance filtré par mip ;
-  - LUT BRDF 2D `Rg16Float` 256² (échelle et biais de F0).
+  - LUT BRDF 2D 256², stockée en `Rgba16Float` (r = échelle, g = biais de F0) : `Rg16Float` n'est pas un format de stockage garanti par WebGPU.
+- Irradiance en harmoniques sphériques d'ordre 2 (9 coefficients RGB), **calculée sur le CPU** au chargement, avec accumulation en f64. Écart au plan : quelques millisecondes pour une HDRI 1K, un résultat exact, et aucune réduction GPU ni relecture ; l'extraction de la lumière dominante s'en sert directement. Les SH sont projetées sans rotation ; le shader fait tourner la normale, et la direction de la lumière est tournée sur le CPU.
 - Les dispatches sont découpés par face, par mip et par tuile : le pilote Windows coupe les dispatches de plus de 2 s.
 
 Les réglages d'environnement (HDRI, rotation, exposition) appartiennent au document selon le plan. Les commandes n'arrivant qu'au M3, ils vivent pour l'instant dans l'état de vue de l'app et passeront dans `Project` au M3.
