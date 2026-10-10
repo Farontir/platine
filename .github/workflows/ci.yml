@@ -1,0 +1,76 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # rust-toolchain.toml selects the pinned toolchain with rustfmt and clippy.
+      - run: rustup show
+      - run: cargo fmt --all -- --check
+
+  forbidden:
+    name: Forbidden content
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: bash scripts/check-forbidden.sh
+
+  deny:
+    name: Licenses and advisories
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
+
+  test:
+    name: Clippy and tests (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # GPU tests use the software adapter: WARP (DX12) on Windows...
+          - name: Windows / WARP
+            os: windows-latest
+          # ...and lavapipe (Vulkan) on Linux.
+          - name: Linux / lavapipe
+            os: ubuntu-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install lavapipe and windowing libraries
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            mesa-vulkan-drivers libvulkan1 vulkan-tools \
+            libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxrandr-dev libxi-dev
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --locked
+      - name: Upload golden-image failures
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: golden-failures-${{ matrix.os }}
+          path: target/golden-failures/
+          if-no-files-found: ignore
