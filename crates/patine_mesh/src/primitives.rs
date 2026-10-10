@@ -237,11 +237,21 @@ pub fn two_cubes() -> MeshAsset {
     builder.finish("two_cubes")
 }
 
-/// Direction on the unit sphere for longitude `u` and latitude `v` in [0, 1].
-fn sphere_direction(u: f32, v: f32) -> Vec3 {
-    let (theta, phi) = (u * TAU, v * PI);
-    // v = 0 at the south pole, v = 1 at the north pole; U grows counter-clockwise
-    // seen from outside (towards -Z from +X).
+/// Direction on the unit sphere at meridian `i` of `segments` and parallel `j` of `rings`
+/// (`j = 0` at the south pole). U grows counter-clockwise seen from above (from +X
+/// towards -Z).
+///
+/// Computed from `i % segments` and with exact poles, so the seam and the poles weld
+/// bit for bit: in f32, `sin(2π)` and `sin(π)` are not zero.
+fn sphere_direction(i: u32, j: u32, segments: u32, rings: u32) -> Vec3 {
+    if j == 0 {
+        return Vec3::NEG_Y;
+    }
+    if j == rings {
+        return Vec3::Y;
+    }
+    let theta = (i % segments) as f32 / segments as f32 * TAU;
+    let phi = j as f32 / rings as f32 * PI;
     Vec3::new(
         phi.sin() * theta.cos(),
         -phi.cos(),
@@ -254,7 +264,7 @@ fn add_sphere(builder: &mut Builder, segments: u32, rings: u32, radius: impl Fn(
     let rings = rings.max(2);
     let vertex = |i: u32, j: u32| {
         let (u, v) = (i as f32 / segments as f32, j as f32 / rings as f32);
-        let direction = sphere_direction(u, v);
+        let direction = sphere_direction(i, j, segments, rings);
         (direction * radius(direction), direction, Vec2::new(u, v))
     };
     for j in 0..rings {
@@ -296,7 +306,8 @@ pub fn cylinder(segments: u32) -> MeshAsset {
     let segments = segments.max(3);
     let mut builder = Builder::new("cylinder", true);
     let ring = |i: u32| {
-        let angle = i as f32 / segments as f32 * TAU;
+        // Modulo: the last segment closes on the exact first position.
+        let angle = (i % segments) as f32 / segments as f32 * TAU;
         Vec3::new(angle.cos(), 0.0, -angle.sin())
     };
     // Side in the lower half of the UV square.

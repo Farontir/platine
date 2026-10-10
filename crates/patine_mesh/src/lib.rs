@@ -8,6 +8,7 @@ mod error;
 mod hash;
 pub mod primitives;
 pub mod raw;
+pub mod topology;
 
 pub use assemble::{BuildOptions, BuildReport, assemble};
 pub use error::MeshError;

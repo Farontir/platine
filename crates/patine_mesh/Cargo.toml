@@ -13,5 +13,8 @@ thiserror.workspace = true
 glam.workspace = true
 bevy_mikktspace.workspace = true
 
+[dev-dependencies]
+proptest.workspace = true
+
 [lints]
 workspace = true
