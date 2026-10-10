@@ -31,7 +31,7 @@ allow = [
 exceptions = [
     # egui's default fonts (Ubuntu-Light, NotoEmoji, emoji-icon-font). Both licenses
     # allow commercial redistribution of the embedded fonts. Restricted to this crate.
-    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "LicenseRef-UFL-1.0"] },
+    { crate = "epaint_default_fonts", allow = ["OFL-1.1", "Ubuntu-font-1.0"] },
 ]
 
 [licenses.private]

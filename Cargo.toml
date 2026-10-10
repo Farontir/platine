@@ -64,6 +64,7 @@ puffin = "0.20.0"
 puffin_http = "0.17.0"
 pollster = "1.0.1"
 fluent-bundle = "0.16.0"
+fluent-syntax = "0.12.0"
 unic-langid = "0.9.6"
 sys-locale = "0.3.2"
 
