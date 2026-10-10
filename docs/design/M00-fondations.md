@@ -89,3 +89,10 @@ Note de conception du milestone M0. Objectif : une application qui s'ouvre, une 
 - [ ] Redimensionner, minimiser puis restaurer la fenêtre : pas de crash, pas d'image figée.
 - [ ] Ctrl+Q quitte l'application.
 - [ ] Sur le portable RTX A2000 : mêmes vérifications.
+
+## État à la clôture (10/10/2026)
+
+- Vérifié localement sous Windows : `cargo fmt --check`, clippy `-D warnings`, 27 tests (dont le test d'acceptation remplir + relire sur WARP et sur la RTX 3080 Ti), `cargo deny check`, contrôle des contenus interdits.
+- L'application démarre : RTX 3080 Ti en Vulkan, interface en français détectée depuis le système, 9 panneaux, profileur démarré avec `PATINE_PROFILE=1`.
+- Capacités mesurées : `R16Float` en storage et filtrage `f32` disponibles sur WARP et sur la RTX 3080 Ti. À vérifier sur la RTX A2000 et sur lavapipe (le test `capabilities_are_consistent` l'affiche).
+- **Reste à faire** : pousser le dépôt sur GitHub et confirmer la CI verte (Windows/WARP et Linux/lavapipe). Le job Linux n'a pas pu être exécuté localement.

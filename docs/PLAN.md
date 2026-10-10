@@ -503,11 +503,11 @@ Le MVP compte 18 milestones, à réaliser dans l'ordre. Seule exception : le bak
 
 Objectif : une application qui s'ouvre, une CI verte et la structure du dépôt en place.
 
-- [ ] Workspace Cargo avec toutes les crates, vides, et leurs dépendances autorisées
-- [ ] Fenêtre winit + wgpu + egui, disposition egui\_dock avec les panneaux vides
-- [ ] Logs tracing, profileur puffin activable, panneau Console
-- [ ] Registre d'actions et fichiers de traduction FR et EN
-- [ ] Macro `gpu_test!`, test de validation des shaders, comparateur d'images de référence
+- [x] Workspace Cargo avec toutes les crates, vides, et leurs dépendances autorisées
+- [x] Fenêtre winit + wgpu + egui, disposition egui\_dock avec les panneaux vides
+- [x] Logs tracing, profileur puffin activable, panneau Console
+- [x] Registre d'actions et fichiers de traduction FR et EN
+- [x] Macro `gpu_test!`, test de validation des shaders, comparateur d'images de référence
 - [ ] CI GitHub Actions : fmt, clippy `-D warnings`, tests sur WARP et lavapipe, cargo-deny
 
 Critères d'acceptation : l'application démarre sous Windows ; la CI est verte sous Windows et Linux ; un test GPU trivial (remplir une texture et la relire) passe.

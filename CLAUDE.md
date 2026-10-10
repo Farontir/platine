@@ -10,6 +10,9 @@ Le plan complet est dans `docs/PLAN.md` : c'est la source de vérité pour la st
 - Lint : `cargo fmt --all && cargo clippy --workspace --all-targets -- -D warnings`
 - Licences : `cargo deny check`
 - Régénérer les images de référence : `PATINE_UPDATE_GOLDEN=1 cargo test -p <crate>`
+- Tests GPU sur la vraie carte (WARP/lavapipe par défaut) : `PATINE_TEST_ADAPTER=hardware cargo test -p <crate>`
+- Contenus interdits : `bash scripts/check-forbidden.sh`
+- Profileur : `PATINE_PROFILE=1 cargo run -p patine_app`, puis `puffin_viewer`
 
 ## Méthode de travail
 1. Avant un milestone, relis sa section dans `docs/PLAN.md` et les sections d'architecture qu'il touche.
