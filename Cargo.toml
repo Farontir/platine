@@ -40,8 +40,8 @@ octotablet = "0.1.0"
 glam = "0.34.1"
 bytemuck = { version = "1.25.2", features = ["derive"] }
 half = "2.7.1"
-gltf = "1.4.1"
-tobj = "4.0.5"
+# Without image decoding of its own: only buffers are imported.
+gltf = { version = "1.4.1", default-features = false, features = ["import", "names", "utils"] }
 ufbx = "0.11.5"
 bevy_mikktspace = "1.0.0"
 image = { version = "0.25.10", default-features = false }

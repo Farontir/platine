@@ -13,6 +13,8 @@ thiserror.workspace = true
 glam.workspace = true
 bevy_mikktspace.workspace = true
 bytemuck.workspace = true
+gltf.workspace = true
+ufbx.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

@@ -7,10 +7,12 @@ mod assemble;
 pub mod bvh;
 mod error;
 mod hash;
+pub mod import;
 pub mod primitives;
 pub mod raw;
 pub mod topology;
 
 pub use assemble::{BuildOptions, BuildReport, assemble};
 pub use error::MeshError;
+pub use import::{ImportReport, Imported, MeshFormat, import};
 pub use raw::RawMesh;
