@@ -11,6 +11,7 @@ publish.workspace = true
 patine_core.workspace = true
 patine_gpu.workspace = true
 patine_mesh.workspace = true
+glam.workspace = true
 
 [lints]
 workspace = true

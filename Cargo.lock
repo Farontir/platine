@@ -2359,6 +2359,7 @@ dependencies = [
 name = "patine_render"
 version = "0.1.0"
 dependencies = [
+ "glam",
  "patine_core",
  "patine_gpu",
  "patine_mesh",
