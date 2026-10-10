@@ -6,6 +6,7 @@
 mod assemble;
 mod error;
 mod hash;
+pub mod primitives;
 pub mod raw;
 
 pub use assemble::{BuildOptions, BuildReport, assemble};
