@@ -554,9 +554,9 @@ Critères d'acceptation : les tests de propriétés sur l'undo et la sauvegarde 
 
 Objectif : afficher les canaux d'un texture set et gérer la mémoire GPU.
 
-- [ ] `GpuDocument`, pool de textures avec comptage mémoire et éviction LRU
-- [ ] Panneau Texture Sets : résolution, canaux actifs, valeurs par défaut
-- [ ] Affichage des canaux dans le viewport, modes canal isolé, vue 2D avec wireframe UV
+- [x] `GpuDocument`, pool de textures avec comptage mémoire et éviction LRU
+- [x] Panneau Texture Sets : résolution, canaux actifs, valeurs par défaut
+- [x] Affichage des canaux dans le viewport, modes canal isolé, vue 2D avec wireframe UV
 
 Critères d'acceptation : changer de résolution réalloue sans fuite, et la mémoire mesurée revient à la valeur attendue ; la vue 2D affiche le bon wireframe UV.
 

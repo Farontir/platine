@@ -94,3 +94,34 @@ Rendu hors écran, en espace UV, du canal affiché du texture set courant :
 - [ ] Enregistrer, rouvrir : canaux, valeurs par défaut et résolutions conservés.
 - [ ] Rendu éclairé inchangé par rapport au M2 avec les valeurs par défaut équivalentes.
 - [ ] `cargo run --release -p patine_cli -- bench viewport` sur la RTX A2000 : au moins 60 i/s avec les textures 4K.
+
+## Mesures (11/10/2026, RTX 3080 Ti, build release)
+
+`cargo run --release -p patine_cli -- bench viewport` : sphère de 499 848 triangles, 1920 × 1080, MSAA 4x, IBL, AgX ; les 7 canaux éclairés d'un texture set (5 par défaut, plus AO et émissif) alloués par `GpuDocument`.
+
+| Configuration | Images/s | ms/image |
+| --- | --- | --- |
+| Textures 4096², ombres | 2 799 | 0,36 |
+| Textures 4096², sans ombres | 4 269 | 0,23 |
+| Textures 2048², ombres | 2 735 | 0,37 |
+| Matériau constant, ombres | 3 432 | 0,29 |
+
+Les 7 canaux 4K occupent 716 Mo, mips compris. Le budget de PLAN.md (≥ 120 i/s avec textures 4K) est tenu avec une large marge. Réserve : des textures uniformes sont très favorables au cache ; la mesure sera refaite au M5 avec du contenu réel.
+
+Mémoire des textures finales du casque (6 texture sets, 5 canaux par défaut) : environ 740 Mo en 2048², 2,95 Go en 4096². C'est le point à surveiller sur la RTX A2000.
+
+## Écarts constatés pendant l'implémentation
+
+- **Arêtes UV** : `polygon_edges` identifie les arêtes par position, ce qui est juste en 3D mais, en espace UV, ne garde qu'un côté de chaque couture (le test du critère 2 l'a montré : 12 arêtes au lieu de 24 sur le cube). La nouvelle fonction `uv_polygon_edges` identifie les arêtes par sommet (les sommets sont séparés aux coutures) : les deux bords d'île sont tracés, les diagonales restent cachées. Le wireframe 3D garde les arêtes par position.
+- **Mémoire de l'appareil** : le rapport d'allocation de wgpu inclut ses allocations internes transitoires (quelques centaines d'octets sur Vulkan). Le test compare donc la mémoire de l'appareil à 64 Kio près, dix fois moins que la plus petite texture de canal ; le comptage du pool reste exact.
+- **AO et lumière directe** : par conception, l'AO n'atténue que l'éclairage indirect. La lumière dominante extraite de l'environnement (M2) n'est pas occultée : le test vérifie la linéarité de l'AO plutôt qu'une division par deux.
+- **Options de capture** : `--display lit|checker|channel:<id>` et `--texture-set N` ; `--material` modifie les valeurs par défaut par des commandes.
+- **Couleur de base par défaut** : 0,5 (modèle de canaux du M3) au lieu du 0,6 du matériau d'aperçu du M2 ; le rendu par défaut est un peu plus sombre.
+
+## État à la clôture (11/10/2026)
+
+- Critère 1 : changer de résolution (512 → 2048 → undo), ajouter et retirer des canaux puis tout annuler. La mémoire du pool vaut la somme attendue à chaque étape et revient exactement à sa valeur de départ ; la mémoire réelle de l'appareil aussi (WARP et RTX 3080 Ti). Les valeurs relues à chaque niveau de mip sont les valeurs par défaut.
+- Critère 2 : sur le cube déplié, toutes les arêtes de polygones calculées sur le CPU sont tracées sur toute leur longueur, l'intérieur des faces et les diagonales ne le sont pas, et l'image correspond à sa référence.
+- Image de référence du M2 inchangée ; textures constantes équivalentes aux facteurs ; normal map conforme à la géométrie inclinée ; valeurs affichées des modes canal exactes à 1/255.
+- 190 tests passent sur WARP ; ceux de `patine_render` et `patine_compositor` aussi sur la RTX 3080 Ti.
+- **À vérifier à la main** : la checklist ci-dessus, et le bench sur la RTX A2000.
