@@ -16,8 +16,8 @@ Le plan complet est dans `docs/PLAN.md` : c'est la source de vérité pour la st
 - Ouvrir un mesh au lancement : `cargo run -p patine_app -- <mesh>`
 - Captures pour la doc (options de vue, dialogues, `--capture out.png`) : `cargo run --release -p patine_app -- --help`
 - Fichiers de tests manuels : téléchargés dans `manual_tests/assets` (non versionné), puis `blender -b --factory-startup --python scripts/manual_tests/generate_assets.py`
-- Tutoriel PDF des tests manuels : `cargo build --release -p patine_app -p patine_cli`, `python scripts/manual_tests/capture_tutorial.py`, puis `python scripts/manual_tests/build_tutorial.py` (écrit `manual_tests/Patine-tutoriel-M0-M4.pdf`)
-- Mesurer : `cargo run --release -p patine_cli -- bench viewport` ; `cargo run --release -p patine_cli -- bench project <mesh>` ; `cargo run --release -p patine_cli -- inspect <mesh>`
+- Tutoriel PDF des tests manuels : `cargo build --release -p patine_app -p patine_cli`, `python scripts/manual_tests/capture_tutorial.py`, puis `python scripts/manual_tests/build_tutorial.py` (écrit `manual_tests/Patine-tutoriel-M0-Mxx.pdf`, xx = dernier milestone)
+- Mesurer : `cargo run --release -p patine_cli -- bench viewport` ; `cargo run --release -p patine_cli -- bench project <mesh>` ; `cargo run --release -p patine_cli -- bench compositor` ; `cargo run --release -p patine_cli -- inspect <mesh>`
 - Réécrire la fixture du format courant : `PATINE_UPDATE_FIXTURES=1 cargo test -p patine_core --test file_format` (jamais celle d'une ancienne version)
 - Autosave dans un dossier de test : `PATINE_AUTOSAVE_DIR=<dossier> cargo run -p patine_app -- --autosave-interval 10`
 
