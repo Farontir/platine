@@ -1,11 +1,13 @@
-//! CPU reference of the compositor: every blend mode, the composition of a stack of fill
-//! layers, and the mip reduction. The GPU passes are tested against these functions.
+//! CPU reference of the compositor: every blend mode, layer masks, the composition of a
+//! stack of fill layers, and the mip reduction. The GPU passes are tested against these
+//! functions.
 //!
 //! Values are linear and unclamped (height may be negative, emission above 1), except
 //! where a mode's formula clamps. Normals are tangent-space unit vectors, not encoded.
 
 use patine_core::channel::Channel;
 use patine_core::layer::{BlendMode, FillSource, Layer, LayerKind};
+use patine_core::mask::{FilterKind, LevelsParams, MaskEffect, MaskEffectEntry, MaskStack};
 
 /// How a channel's values are blended.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -301,19 +303,89 @@ pub fn apply(
     }
 }
 
+/// Levels of a mask value: the input range `in_low..in_high` is stretched to 0..1, raised
+/// to `1 / gamma`, then mapped to `out_low..out_high` (which may be reversed).
+pub fn levels(params: &LevelsParams, m: f32) -> f32 {
+    let range = (params.in_high - params.in_low).max(1e-4);
+    let x = ((m - params.in_low) / range).clamp(0.0, 1.0);
+    let x = x.powf(1.0 / params.gamma.max(1e-4));
+    params.out_low + x * (params.out_high - params.out_low)
+}
+
+/// What a mask effect brings onto the mask below of value `m`: a fill's value, the
+/// levels or the inversion of `m`. `None` for effects evaluated in later milestones
+/// (paint, generators, other filters, anchors, polygon fill), which leave the mask as is.
+pub fn mask_source(effect: &MaskEffect, m: f32) -> Option<f32> {
+    match effect {
+        MaskEffect::Fill { .. } => effect.fill_value(),
+        MaskEffect::Levels(params) => Some(levels(params, m)),
+        MaskEffect::Filter {
+            kind: FilterKind::Invert,
+            ..
+        } => Some(1.0 - m),
+        _ => None,
+    }
+}
+
+/// The mask value after `entry` over the mask below `m`:
+/// `clamp(mix(m, blend(m, e), opacity), 0, 1)` with the scalar blend modes.
+pub fn mask_effect(entry: &MaskEffectEntry, m: f32) -> f32 {
+    if !entry.visible {
+        return m;
+    }
+    let Some(e) = mask_source(&entry.effect, m) else {
+        return m;
+    };
+    let blended = apply(
+        entry.blend,
+        ChannelKind::Scalar,
+        [m, 0.0, 0.0, 0.0],
+        [e, 0.0, 0.0, 0.0],
+        entry.opacity,
+    );
+    blended[0].clamp(0.0, 1.0)
+}
+
+/// Value of a mask: its initial value, then each effect from the bottom.
+pub fn mask(stack: &MaskStack) -> f32 {
+    mask_with(stack, &|v| v)
+}
+
+/// [`mask`] with every intermediate value rounded to f16, as the GPU stores the mask in
+/// an `R16Float` texture.
+pub fn mask_stored(stack: &MaskStack) -> f32 {
+    mask_with(stack, &round_f16)
+}
+
+fn mask_with(stack: &MaskStack, store: &dyn Fn(f32) -> f32) -> f32 {
+    stack
+        .effects
+        .iter()
+        .fold(store(stack.initial_value()), |m, entry| {
+            store(mask_effect(entry, m))
+        })
+}
+
 /// Value of `channel` after the fill layers of `layers` (bottom to top), starting from
 /// `start`. A folder composes its children onto the value below, then mixes the result
 /// in with its own opacity: without per-pixel coverage (M8), Normal and Passthrough are
 /// equivalent for folders, Disable skips the folder, and other modes act as Normal.
+/// A layer's mask M scales its opacity: `weight = M × opacity`.
 /// Layers that do not affect `channel`, hidden layers and non-uniform content are skipped.
 pub fn composite(layers: &[Layer], channel: Channel, start: [f32; 4]) -> [f32; 4] {
-    composite_with(layers, channel, start, &|v| v)
+    composite_with(layers, channel, start, &|v| v, &mask)
 }
 
 /// [`composite`] with every intermediate value rounded to f16, as the GPU stores each
-/// composition in a texture.
+/// composition and each mask in a texture.
 pub fn composite_stored(layers: &[Layer], channel: Channel, start: [f32; 4]) -> [f32; 4] {
-    composite_with(layers, channel, start.map(round_f16), &|v| v.map(round_f16))
+    composite_with(
+        layers,
+        channel,
+        start.map(round_f16),
+        &|v| v.map(round_f16),
+        &mask_stored,
+    )
 }
 
 fn composite_with(
@@ -321,6 +393,7 @@ fn composite_with(
     channel: Channel,
     start: [f32; 4],
     store: &dyn Fn([f32; 4]) -> [f32; 4],
+    mask_of: &dyn Fn(&MaskStack) -> f32,
 ) -> [f32; 4] {
     let kind = ChannelKind::of(channel);
     let mut dst = start;
@@ -328,18 +401,19 @@ fn composite_with(
         let Some(blend) = layer.channels.get(&channel) else {
             continue;
         };
+        let weight = layer.mask.as_ref().map_or(1.0, mask_of) * blend.opacity;
         match &layer.kind {
             LayerKind::Fill {
                 source: FillSource::Uniform(values),
                 ..
             } => {
                 if let Some(src) = values.get(&channel) {
-                    dst = store(apply(blend.mode, kind, dst, *src, blend.opacity));
+                    dst = store(apply(blend.mode, kind, dst, *src, weight));
                 }
             }
             LayerKind::Folder { children } if blend.mode != BlendMode::Disable => {
-                let inner = composite_with(children, channel, dst, store);
-                dst = store(apply(BlendMode::Normal, kind, dst, inner, blend.opacity));
+                let inner = composite_with(children, channel, dst, store, mask_of);
+                dst = store(apply(BlendMode::Normal, kind, dst, inner, weight));
             }
             // Paint, procedural and image content, instances: later milestones.
             _ => {}
@@ -591,5 +665,184 @@ mod tests {
         ];
         let out = downsample(&normals, 2, 2, ChannelKind::Normal);
         assert!(close(out[0], [0.0, 0.0, 1.0, 0.0]), "{:?}", out[0]);
+    }
+
+    use patine_core::ids::EffectId;
+    use patine_core::mask::MaskInitial;
+
+    fn entry(effect: MaskEffect, blend: BlendMode, opacity: f32) -> MaskEffectEntry {
+        MaskEffectEntry {
+            blend,
+            opacity,
+            ..MaskEffectEntry::new(EffectId(1), effect)
+        }
+    }
+
+    fn stack(initial: MaskInitial, effects: Vec<MaskEffectEntry>) -> MaskStack {
+        MaskStack { initial, effects }
+    }
+
+    #[test]
+    fn levels_known_values() {
+        let identity = LevelsParams::default();
+        for m in [0.0, 0.2, 0.5, 1.0] {
+            assert!((levels(&identity, m) - m).abs() < 1e-6);
+        }
+        let stretch = LevelsParams {
+            in_low: 0.25,
+            in_high: 0.75,
+            ..identity
+        };
+        assert_eq!(levels(&stretch, 0.1), 0.0);
+        assert!((levels(&stretch, 0.5) - 0.5).abs() < 1e-6);
+        assert_eq!(levels(&stretch, 0.9), 1.0);
+        let gamma = LevelsParams {
+            gamma: 2.0,
+            ..identity
+        };
+        assert!((levels(&gamma, 0.25) - 0.5).abs() < 1e-6);
+        let reversed = LevelsParams {
+            out_low: 1.0,
+            out_high: 0.0,
+            ..identity
+        };
+        assert!((levels(&reversed, 0.3) - 0.7).abs() < 1e-6);
+        // An empty input range acts as a threshold instead of dividing by zero.
+        let threshold = LevelsParams {
+            in_low: 0.5,
+            in_high: 0.5,
+            ..identity
+        };
+        assert_eq!(levels(&threshold, 0.4), 0.0);
+        assert_eq!(levels(&threshold, 0.6), 1.0);
+    }
+
+    #[test]
+    fn mask_effects_known_values() {
+        let fill = |v| MaskEffect::uniform(v);
+        let normal = |effect| entry(effect, BlendMode::Normal, 1.0);
+        assert_eq!(mask_effect(&normal(fill(0.3)), 0.8), 0.3);
+        assert!((mask_effect(&entry(fill(0.3), BlendMode::Normal, 0.5), 0.8) - 0.55).abs() < 1e-6);
+        assert!((mask_effect(&entry(fill(0.5), BlendMode::Multiply, 1.0), 0.8) - 0.4).abs() < 1e-6);
+        assert!((mask_effect(&normal(MaskEffect::invert()), 0.8) - 0.2).abs() < 1e-6);
+        assert!(
+            (mask_effect(&entry(MaskEffect::invert(), BlendMode::Normal, 0.5), 0.8) - 0.5).abs()
+                < 1e-6
+        );
+        // The result stays in 0..1 whatever the mode.
+        assert_eq!(
+            mask_effect(&entry(fill(0.7), BlendMode::LinearDodge, 1.0), 0.8),
+            1.0
+        );
+        assert_eq!(
+            mask_effect(&entry(fill(0.9), BlendMode::Subtract, 1.0), 0.2),
+            0.0
+        );
+        // Hidden, disabled and not yet evaluated effects leave the mask as is.
+        let mut hidden = normal(fill(0.1));
+        hidden.visible = false;
+        assert_eq!(mask_effect(&hidden, 0.6), 0.6);
+        assert_eq!(
+            mask_effect(&entry(fill(0.1), BlendMode::Disable, 1.0), 0.6),
+            0.6
+        );
+        let blur = MaskEffect::Filter {
+            kind: FilterKind::GaussianBlur,
+            params: Default::default(),
+        };
+        assert_eq!(mask_effect(&normal(blur), 0.6), 0.6);
+    }
+
+    #[test]
+    fn mask_properties() {
+        let values = [0.0, 0.1, 0.37, 0.5, 0.8, 1.0];
+        let modes = [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Screen,
+            BlendMode::Overlay,
+            BlendMode::Difference,
+            BlendMode::Lighten,
+        ];
+        for m in values {
+            for mode in modes {
+                for effect in [MaskEffect::uniform(0.6), MaskEffect::invert()] {
+                    // Opacity 0 changes nothing; any result is in 0..1.
+                    assert_eq!(mask_effect(&entry(effect.clone(), mode, 0.0), m), m);
+                    let v = mask_effect(&entry(effect, mode, 0.7), m);
+                    assert!((0.0..=1.0).contains(&v), "{mode:?} {m}: {v}");
+                }
+            }
+            // Two inversions give the mask back; default levels too.
+            let twice = stack(
+                MaskInitial::Black,
+                vec![
+                    entry(MaskEffect::uniform(m), BlendMode::Normal, 1.0),
+                    entry(MaskEffect::invert(), BlendMode::Normal, 1.0),
+                    entry(MaskEffect::invert(), BlendMode::Normal, 1.0),
+                    entry(
+                        MaskEffect::Levels(LevelsParams::default()),
+                        BlendMode::Normal,
+                        1.0,
+                    ),
+                ],
+            );
+            assert!((mask(&twice) - m).abs() < 1e-6);
+        }
+        assert_eq!(mask(&stack(MaskInitial::Black, vec![])), 0.0);
+        assert_eq!(mask(&stack(MaskInitial::White, vec![])), 1.0);
+    }
+
+    #[test]
+    fn masks_scale_the_opacity_of_layers_and_folders() {
+        let mut ids = 1..;
+        let mut fill = |value: f32| {
+            let mut layer = Layer::new(
+                LayerId(ids.next().unwrap()),
+                "fill",
+                LayerKind::Fill {
+                    source: FillSource::Uniform([(Channel::Roughness, [value; 4])].into()),
+                    projection: Projection::default(),
+                },
+                &[Channel::Roughness],
+            );
+            layer.channels.insert(
+                Channel::Roughness,
+                ChannelBlend {
+                    mode: BlendMode::Normal,
+                    opacity: 0.5,
+                },
+            );
+            layer
+        };
+        let half = stack(
+            MaskInitial::Black,
+            vec![entry(MaskEffect::uniform(0.5), BlendMode::Normal, 1.0)],
+        );
+        // 0.2 under a fill of 1.0 at opacity 0.5 masked at 0.5: weight 0.25.
+        let mut masked = fill(1.0);
+        masked.mask = Some(half.clone());
+        let got = composite(&[masked.clone()], Channel::Roughness, [0.2; 4]);
+        assert!((got[0] - 0.4).abs() < 1e-6, "{got:?}");
+        // A black mask hides the layer, a white one changes nothing.
+        let mut hidden = fill(1.0);
+        hidden.mask = Some(stack(MaskInitial::Black, vec![]));
+        assert_eq!(composite(&[hidden], Channel::Roughness, [0.2; 4])[0], 0.2);
+        let mut shown = fill(1.0);
+        shown.mask = Some(stack(MaskInitial::White, vec![]));
+        assert!((composite(&[shown], Channel::Roughness, [0.2; 4])[0] - 0.6).abs() < 1e-6);
+        // A masked folder at opacity 1 mixes its result at the mask's value.
+        let mut folder = Layer::new(
+            LayerId(100),
+            "folder",
+            LayerKind::Folder {
+                children: vec![fill(1.0)],
+            },
+            &[Channel::Roughness],
+        );
+        folder.mask = Some(half);
+        let inner = composite(&[fill(1.0)], Channel::Roughness, [0.2; 4])[0];
+        let got = composite(&[folder], Channel::Roughness, [0.2; 4])[0];
+        assert!((got - (0.2 + (inner - 0.2) * 0.5)).abs() < 1e-6, "{got}");
     }
 }
