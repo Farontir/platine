@@ -17,7 +17,9 @@ Le plan complet est dans `docs/PLAN.md` : c'est la source de vérité pour la st
 - Captures pour la doc (options de vue, dialogues, `--capture out.png`) : `cargo run --release -p patine_app -- --help`
 - Fichiers de tests manuels : téléchargés dans `manual_tests/assets` (non versionné), puis `blender -b --factory-startup --python scripts/manual_tests/generate_assets.py`
 - Tutoriel PDF des tests manuels : `cargo build --release -p patine_app`, `python scripts/manual_tests/capture_tutorial.py`, puis `python scripts/manual_tests/build_tutorial.py` (écrit `manual_tests/Patine-tutoriel-M0-M2.pdf`)
-- Mesurer : `cargo run --release -p patine_cli -- bench viewport` ; `cargo run --release -p patine_cli -- inspect <mesh>`
+- Mesurer : `cargo run --release -p patine_cli -- bench viewport` ; `cargo run --release -p patine_cli -- bench project <mesh>` ; `cargo run --release -p patine_cli -- inspect <mesh>`
+- Réécrire la fixture du format courant : `PATINE_UPDATE_FIXTURES=1 cargo test -p patine_core --test file_format` (jamais celle d'une ancienne version)
+- Autosave dans un dossier de test : `PATINE_AUTOSAVE_DIR=<dossier> cargo run -p patine_app -- --autosave-interval 10`
 
 ## Méthode de travail
 1. Avant un milestone, relis sa section dans `docs/PLAN.md` et les sections d'architecture qu'il touche.
@@ -36,6 +38,7 @@ Le plan complet est dans `docs/PLAN.md` : c'est la source de vérité pour la st
 - Shaders en WGSL dans `shaders/`, validés par naga en test. Aucun shader inline dans le code Rust.
 - Les dispatches GPU longs sont découpés par tuiles (timeout du pilote Windows d'environ 2 s).
 - Les actions de l'UI passent par le registre `Action`. Tous les textes passent par les fichiers de traduction.
+- Toute modification du format sérialisé du document incrémente `file::FORMAT_VERSION`, fige les anciens types dans `file::vN` avec leur migration, et ajoute une fixture `tests/fixtures/projects/vN_*.patine` relue en test.
 
 ## Code
 - Rust stable, édition 2024. Code, identifiants et commentaires en anglais ; notes de conception en français.

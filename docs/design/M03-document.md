@@ -119,3 +119,31 @@ Liste des entrées traduites, l'entrée courante en surbrillance et les entrées
 - [ ] Deux instances ouvertes en même temps : aucune ne propose de récupérer l'autre.
 - [ ] `patine_app projet.patine` ouvre le projet.
 - [ ] Ouvrir un fichier qui n'est pas un projet : message d'erreur clair.
+
+## Mesures (11/10/2026, RTX 3080 Ti, build release)
+
+`cargo run --release -p patine_cli -- bench project <mesh>` : import du mesh, création du projet, enregistrement, réouverture et vérification de l'identité.
+
+| Mesh | Triangles | Import | Enregistrement | Ouverture | Fichier |
+| --- | --- | --- | --- | --- | --- |
+| FlightHelmet.gltf | 94 722 | 170 ms | 26 ms | 22 ms | 2,6 Mo |
+| suzanne_1m.glb | 1 007 616 | 1 876 ms | 229 ms | 105 ms | 25,9 Mo (44,4 Mo bruts) |
+
+Rouvrir un projet est 18 fois plus rapide que réimporter le mesh : le `MeshAsset` traité est stocké tel quel. Le budget « ouverture d'un projet 4K de 30 calques » se mesurera quand les calques auront des pixels (M5 et suivants).
+
+## Écarts constatés pendant l'implémentation
+
+- **Chaîne de migrations** : le lecteur lit la version, refuse les versions futures et inconnues, et la fixture `tests/fixtures/projects/v1_rich.patine` (tous les types de nœuds) est relue en test. Il n'y a pas encore de migration de test : avec des types figés, une migration n'existe qu'entre deux versions réelles. La première modification du format apportera la migration v1 → v2 et son test, sur cette fixture.
+- **Égalité au bit près** : les tests comparent aussi les octets postcard des documents, car `PartialEq` confond 0,0 et −0,0. Le RON de ron 0.12 relit bien les f32 à l'identique.
+- **postcard sans ses features par défaut** : elles tiraient `atomic-polyfill` (non maintenu) pour le support embarqué.
+- **Options de développement** : `--edit rotation=DEG|exposure=EV|rename=SET:NAME|undo=N` applique des commandes au projet de démarrage (captures de l'Historique) ; `PATINE_AUTOSAVE_DIR` choisit le dossier d'autosave, et permet alors de capturer le dialogue de récupération.
+- **Récupération** : le projet récupéré est lu sur le thread de l'interface (opération unique au démarrage), puis un autosave est fait aussitôt, avant la suppression de la copie orpheline.
+- **Réveil de la boucle d'événements** : les threads de travail ne réveillent pas la boucle winit (pas de callback de repaint egui). Les opérations longues affichent un spinner, qui redessine en continu ; l'autosave programme son propre réveil (`WaitUntil`). Un `EventLoopProxy` sera ajouté si un cas le demande.
+- **Résolution d'un texture set** : la commande existe et est testée, son interface arrive au M4 (panneau Texture Sets).
+
+## État à la clôture (11/10/2026)
+
+- Critère 1 : les tests de propriétés passent. Séquences aléatoires de commandes, d'annulations et de rétablissements (256 cas, jusqu'à 80 opérations) : tout annuler redonne le document initial, tout rétablir le document final, et chaque état intermédiaire est valide. Documents construits par commandes, flottants arbitraires : enregistrer puis relire redonne le même document, au bit près (64 cas).
+- Critère 2 : un projet enregistré se rouvre à l'identique (tests, `bench project`, et réouverture dans l'application).
+- Tests : 171 dans le workspace, dont les commandes, l'historique (fusion, scellement, budget, état enregistré), le format (archives endommagées, version future, ressource altérée, écriture atomique), l'autosave et le verrou de session.
+- **À vérifier à la main** : la checklist ci-dessus (Annuler et Rétablir dans l'interface, dialogues de confirmation, crash réel et récupération, deux instances).

@@ -542,11 +542,11 @@ Critères d'acceptation : l'image de référence d'une grille de sphères roughn
 
 Objectif : un modèle de document fiable, entièrement annulable et sauvegardable.
 
-- [ ] Types du modèle de données (section Architecture)
-- [ ] `Command` avec `apply` et `revert`, fusion des commandes continues, historique borné en mémoire
-- [ ] Format `.patine` : zip, RON, postcard + zstd, `format_version`, migrations
-- [ ] Autosave et récupération après crash
-- [ ] Panneau Historique
+- [x] Types du modèle de données (section Architecture)
+- [x] `Command` avec `apply` et `revert`, fusion des commandes continues, historique borné en mémoire
+- [x] Format `.patine` : zip, RON, postcard + zstd, `format_version`, migrations
+- [x] Autosave et récupération après crash
+- [x] Panneau Historique
 
 Critères d'acceptation : les tests de propriétés sur l'undo et la sauvegarde passent ; un projet sauvegardé se rouvre à l'identique.
 
