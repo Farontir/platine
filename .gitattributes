@@ -4,3 +4,5 @@
 *.hdr binary
 *.glb binary
 *.fbx binary
+*.patine binary
+*.bin binary

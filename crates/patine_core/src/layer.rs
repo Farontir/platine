@@ -236,6 +236,16 @@ impl Layer {
         }
     }
 
+    /// Calls `f` on this layer and every descendant, depth first, mutably.
+    pub fn visit_mut(&mut self, f: &mut impl FnMut(&mut Layer)) {
+        f(self);
+        if let LayerKind::Folder { children } = &mut self.kind {
+            for child in children {
+                child.visit_mut(f);
+            }
+        }
+    }
+
     /// Whether `id` is this layer or one of its descendants.
     pub fn contains(&self, id: LayerId) -> bool {
         let mut found = false;
@@ -280,6 +290,13 @@ impl LayerStack {
     pub fn visit<'a>(&'a self, f: &mut impl FnMut(&'a Layer)) {
         for layer in &self.layers {
             layer.visit(f);
+        }
+    }
+
+    /// Calls `f` on every layer, depth first, mutably.
+    pub fn visit_mut(&mut self, f: &mut impl FnMut(&mut Layer)) {
+        for layer in &mut self.layers {
+            layer.visit_mut(f);
         }
     }
 

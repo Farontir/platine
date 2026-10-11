@@ -1,6 +1,11 @@
 //! Documents shared by the integration tests.
 
-#![allow(dead_code)] // Each test file uses a subset.
+#![allow(dead_code, unused_imports)] // Each test file uses a subset.
+
+pub mod ops;
+mod rich;
+
+pub use rich::rich_project;
 
 use patine_core::channel::Channel;
 use patine_core::ids::{IdSequence, LayerId};

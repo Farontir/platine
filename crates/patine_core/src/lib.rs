@@ -9,6 +9,7 @@ pub mod command;
 pub mod commands;
 pub mod environment;
 pub mod export;
+pub mod file;
 pub mod history;
 pub mod ids;
 pub mod layer;
