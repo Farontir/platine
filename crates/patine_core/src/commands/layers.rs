@@ -30,7 +30,7 @@ fn node_ids(layer: &Layer) -> Vec<u64> {
     ids
 }
 
-fn find_mut(project: &mut Project, id: LayerId) -> Result<&mut Layer, CommandError> {
+pub(super) fn find_mut(project: &mut Project, id: LayerId) -> Result<&mut Layer, CommandError> {
     project
         .texture_sets
         .iter_mut()

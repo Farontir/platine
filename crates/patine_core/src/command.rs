@@ -8,7 +8,7 @@ use std::fmt::Debug;
 
 use thiserror::Error;
 
-use crate::ids::LayerId;
+use crate::ids::{EffectId, LayerId};
 use crate::project::Project;
 
 /// Text describing a command in the history: a translation key and its arguments.
@@ -66,6 +66,12 @@ pub enum CommandError {
     /// The layer is not a uniform fill.
     #[error("layer {0} is not a uniform fill")]
     NotAUniformFill(LayerId),
+    /// The layer has no mask.
+    #[error("layer {0} has no mask")]
+    NoMask(LayerId),
+    /// The mask effect does not exist in that mask.
+    #[error("mask effect {0} does not exist")]
+    MissingEffect(EffectId),
     /// Another layer depends on this one (instance or anchor reference).
     #[error("layer {0} is used by another layer")]
     LayerInUse(LayerId),

@@ -234,3 +234,22 @@ blend-luminosity = Luminosité
 blend-disable = Désactivé
 blend-normal-map-combine = Combiner les normales
 blend-normal-map-detail = Détail de normale
+
+## Masks
+command-black-mask = Masque noir sur « { $name } »
+command-white-mask = Masque blanc sur « { $name } »
+command-remove-mask = Supprimer le masque de « { $name } »
+command-add-mask-effect = Ajouter { $effect ->
+        [fill] un fill
+        [levels] un levels
+        [invert] une inversion
+       *[other] un effet
+    } au masque de « { $name } »
+command-remove-mask-effect = Supprimer un effet du masque de « { $name } »
+command-move-mask-effect = Déplacer un effet du masque de « { $name } »
+command-mask-effect = { $effect ->
+        [fill] Fill
+        [levels] Levels
+        [invert] Inversion
+       *[other] Effet
+    } du masque de « { $name } »

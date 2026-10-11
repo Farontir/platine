@@ -229,3 +229,85 @@ pub struct EffectEntry {
     /// The operation.
     pub effect: Effect,
 }
+
+/// Key under which a uniform mask fill stores its gray value, in the first component.
+/// Readers take the first entry whatever its key ([`MaskEffect::fill_value`]).
+pub const MASK_VALUE_CHANNEL: Channel = Channel::Opacity;
+
+impl MaskStack {
+    /// A mask without effects.
+    pub fn new(initial: MaskInitial) -> Self {
+        Self {
+            initial,
+            effects: Vec::new(),
+        }
+    }
+
+    /// The value the mask starts from: 0 (black) or 1 (white).
+    pub fn initial_value(&self) -> f32 {
+        match self.initial {
+            MaskInitial::Black => 0.0,
+            MaskInitial::White => 1.0,
+        }
+    }
+
+    /// Index of the effect `id`.
+    pub fn index_of(&self, id: EffectId) -> Option<usize> {
+        self.effects.iter().position(|entry| entry.id == id)
+    }
+}
+
+impl MaskEffect {
+    /// A uniform fill of value `value` (0 to 1).
+    pub fn uniform(value: f32) -> Self {
+        Self::Fill {
+            source: FillSource::Uniform([(MASK_VALUE_CHANNEL, [value; 4])].into()),
+        }
+    }
+
+    /// The inversion filter (`1 − m`).
+    pub fn invert() -> Self {
+        Self::Filter {
+            kind: FilterKind::Invert,
+            params: Params::new(),
+        }
+    }
+
+    /// The gray value of a uniform fill: the first component of its first entry (0 when
+    /// the fill has none). `None` for other effects and other sources.
+    pub fn fill_value(&self) -> Option<f32> {
+        match self {
+            Self::Fill {
+                source: FillSource::Uniform(values),
+            } => Some(values.values().next().map_or(0.0, |value| value[0])),
+            _ => None,
+        }
+    }
+
+    /// Short identifier of the operation, for history labels: `fill`, `levels`,
+    /// `invert` or `other`.
+    pub fn kind_id(&self) -> &'static str {
+        match self {
+            Self::Fill { .. } => "fill",
+            Self::Levels(_) => "levels",
+            Self::Filter {
+                kind: FilterKind::Invert,
+                ..
+            } => "invert",
+            _ => "other",
+        }
+    }
+}
+
+impl MaskEffectEntry {
+    /// A visible effect in Normal mode at full opacity.
+    pub fn new(id: EffectId, effect: MaskEffect) -> Self {
+        Self {
+            id,
+            visible: true,
+            blend: BlendMode::Normal,
+            opacity: 1.0,
+            effect,
+        }
+    }
+}

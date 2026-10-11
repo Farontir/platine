@@ -4,12 +4,14 @@ use patine_core::channel::Channel;
 use patine_core::channel::ChannelDef;
 use patine_core::command::Command;
 use patine_core::commands::{
-    InsertLayer, MoveLayer, RemoveLayer, RenameLayer, RenameTextureSet, SetChannelBlend,
-    SetChannelDef, SetEnvironment, SetFillValue, SetLayerVisible, SetTextureSetResolution,
+    InsertLayer, InsertMaskEffect, MoveLayer, MoveMaskEffect, RemoveLayer, RemoveMaskEffect,
+    RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef, SetEnvironment, SetFillValue,
+    SetLayerVisible, SetMask, SetMaskEffect, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::ids::LayerId;
 use patine_core::layer::{BlendMode, ChannelBlend, LayerKind, LayerPosition};
+use patine_core::mask::{LevelsParams, MaskEffect, MaskEffectEntry, MaskInitial, MaskStack};
 use patine_core::project::{Project, Resolution, TextureSetId};
 use proptest::prelude::*;
 
@@ -64,6 +66,34 @@ pub enum Op {
         channel: u8,
         default: Option<f32>,
     },
+    /// Adds a black or white mask (`Some`), or removes the mask.
+    Mask {
+        layer: u8,
+        white: Option<bool>,
+    },
+    MaskInsert {
+        layer: u8,
+        index: u8,
+        kind: u8,
+        value: f32,
+    },
+    MaskRemove {
+        layer: u8,
+        effect: u8,
+    },
+    MaskMove {
+        layer: u8,
+        effect: u8,
+        index: u8,
+    },
+    MaskSet {
+        layer: u8,
+        effect: u8,
+        mode: u8,
+        opacity: f32,
+        visible: bool,
+        value: f32,
+    },
     Rotation(f32),
     Exposure(f32),
     Source(u8),
@@ -90,6 +120,17 @@ pub fn op() -> impl Strategy<Value = Op> {
             .prop_map(|(set, channel, default)| Op::ChannelDef { set, channel, default }),
         2 => (any::<u8>(), any::<u8>(), proptest::option::of(0.0f32..1.0))
             .prop_map(|(layer, channel, value)| Op::FillValue { layer, channel, value }),
+        2 => (any::<u8>(), proptest::option::of(any::<bool>()))
+            .prop_map(|(layer, white)| Op::Mask { layer, white }),
+        3 => (any::<u8>(), any::<u8>(), any::<u8>(), 0.0f32..1.0)
+            .prop_map(|(layer, index, kind, value)| Op::MaskInsert { layer, index, kind, value }),
+        1 => (any::<u8>(), any::<u8>()).prop_map(|(layer, effect)| Op::MaskRemove { layer, effect }),
+        1 => (any::<u8>(), any::<u8>(), any::<u8>())
+            .prop_map(|(layer, effect, index)| Op::MaskMove { layer, effect, index }),
+        2 => (any::<u8>(), any::<u8>(), any::<u8>(), 0.0f32..1.0, any::<bool>(), 0.0f32..1.0)
+            .prop_map(|(layer, effect, mode, opacity, visible, value)| Op::MaskSet {
+                layer, effect, mode, opacity, visible, value,
+            }),
         2 => (-10.0f32..10.0).prop_map(Op::Rotation),
         2 => (-6.0f32..6.0).prop_map(Op::Exposure),
         1 => any::<u8>().prop_map(Op::Source),
@@ -150,6 +191,17 @@ const MODES: [BlendMode; 4] = [
     BlendMode::Overlay,
     BlendMode::NormalMapCombine,
 ];
+
+/// The effects of the mask of layer `id`, if it has a mask.
+fn mask_effects(project: &Project, id: LayerId) -> Option<&[MaskEffectEntry]> {
+    project
+        .texture_sets
+        .iter()
+        .find_map(|set| set.stack.find(id))?
+        .mask
+        .as_ref()
+        .map(|mask| mask.effects.as_slice())
+}
 
 /// The command for `op`, or `None` when it does not apply to this document.
 pub fn command(project: &Project, op: &Op) -> Option<Box<dyn Command>> {
@@ -246,6 +298,80 @@ pub fn command(project: &Project, op: &Op) -> Option<Box<dyn Command>> {
                 }
                 None => Box::new(SetChannelDef::remove(set, channel)),
             }
+        }
+        Op::Mask { layer, white } => {
+            let (_, id, _, name) = pick(&all, *layer)?;
+            let mask = white.map(|white| {
+                MaskStack::new(if white {
+                    MaskInitial::White
+                } else {
+                    MaskInitial::Black
+                })
+            });
+            Box::new(SetMask::new(id, mask, name))
+        }
+        Op::MaskInsert {
+            layer,
+            index,
+            kind,
+            value,
+        } => {
+            let (_, id, _, name) = pick(&all, *layer)?;
+            let len = mask_effects(project, id).map_or(0, |effects| effects.len());
+            let effect = match kind % 3 {
+                0 => MaskEffect::uniform(*value),
+                1 => MaskEffect::Levels(LevelsParams {
+                    gamma: 0.5 + value,
+                    ..LevelsParams::default()
+                }),
+                _ => MaskEffect::invert(),
+            };
+            let entry = MaskEffectEntry::new(ids(project).effect(), effect);
+            // One past the end is valid; two past it is refused.
+            Box::new(InsertMaskEffect::new(
+                id,
+                *index as usize % (len + 2),
+                entry,
+                name,
+            ))
+        }
+        Op::MaskRemove { layer, effect } => {
+            let (_, id, _, name) = pick(&all, *layer)?;
+            let entry = pick(mask_effects(project, id)?, *effect)?;
+            Box::new(RemoveMaskEffect::new(id, entry.id, name))
+        }
+        Op::MaskMove {
+            layer,
+            effect,
+            index,
+        } => {
+            let (_, id, _, name) = pick(&all, *layer)?;
+            let effects = mask_effects(project, id)?;
+            let entry = pick(effects, *effect)?;
+            Box::new(MoveMaskEffect::new(
+                id,
+                entry.id,
+                *index as usize % (effects.len() + 1),
+                name,
+            ))
+        }
+        Op::MaskSet {
+            layer,
+            effect,
+            mode,
+            opacity,
+            visible,
+            value,
+        } => {
+            let (_, id, _, name) = pick(&all, *layer)?;
+            let mut entry = pick(mask_effects(project, id)?, *effect)?;
+            entry.blend = MODES[*mode as usize % MODES.len()];
+            entry.opacity = *opacity;
+            entry.visible = *visible;
+            if entry.effect.fill_value().is_some() {
+                entry.effect = MaskEffect::uniform(*value);
+            }
+            Box::new(SetMaskEffect::new(id, entry, name))
         }
         Op::Rotation(radians) => Box::new(SetEnvironment::rotation(env, *radians)),
         Op::Exposure(ev) => Box::new(SetEnvironment::exposure(env, *ev)),

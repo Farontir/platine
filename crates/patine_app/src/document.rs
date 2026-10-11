@@ -182,7 +182,14 @@ pub fn environment_command(
 }
 
 /// Every translation key of command labels, for tests.
-pub const COMMAND_LABEL_KEYS: [&str; 20] = [
+pub const COMMAND_LABEL_KEYS: [&str; 27] = [
+    "command-black-mask",
+    "command-white-mask",
+    "command-remove-mask",
+    "command-add-mask-effect",
+    "command-remove-mask-effect",
+    "command-move-mask-effect",
+    "command-mask-effect",
     "command-fill-value",
     "command-group-layers",
     "command-activate-channel",
