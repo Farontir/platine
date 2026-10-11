@@ -576,9 +576,9 @@ Critères d'acceptation : chaque blend mode correspond à la référence CPU à 
 
 Objectif : masquer n'importe quel calque avec une pile d'effets.
 
-- [ ] `MaskStack` : fill, levels, inversion, blend mode et opacité par effet
-- [ ] Masques noir ou blanc, ajout par menu contextuel
-- [ ] Mode d'affichage du masque sélectionné
+- [x] `MaskStack` : fill, levels, inversion, blend mode et opacité par effet
+- [x] Masques noir ou blanc, ajout par menu contextuel
+- [x] Mode d'affichage du masque sélectionné
 
 Critères d'acceptation : les masques composés correspondent à la référence CPU ; chaque opération s'annule.
 

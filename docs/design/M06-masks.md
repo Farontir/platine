@@ -73,3 +73,39 @@ Le modèle de données existe depuis le M3 (`patine_core::mask`). Un `MaskStack`
 - [ ] Supprimer un effet, puis le masque (Suppr) ; Ctrl+Z et Ctrl+Y sur chaque opération.
 - [ ] Enregistrer, rouvrir : masques identiques.
 - [ ] `cargo run --release -p patine_cli -- bench compositor --masks` sur la RTX A2000.
+
+## Mesures (11/10/2026, RTX 3080 Ti, build release)
+
+`cargo run --release -p patine_cli -- bench compositor [--masks]` : sphère, un texture set à 5 canaux en 4096², 30 fills aux modes variés à 70 %. Avec `--masks`, chaque fill a un masque blanc, un fill de masque à 80 % en Produit et un levels (gamma 1,5). On mesure 20 modifications du fill du bas, attente GPU et mips comprises.
+
+| Pile 30 fills, 4096² | Sans masques | Avec masques |
+| --- | --- | --- |
+| Première évaluation | 56 ms | 138 ms |
+| Valeur d'un canal du fill du bas | 8,1 ms | 8,2 ms |
+| Visibilité du fill du bas (5 canaux) | 33,1 ms | 34,6 ms |
+| Fill du masque du fill du bas (5 canaux) | — | 36,1 ms |
+| Mémoire du pool | 828 Mo | 2 170 Mo, dont 1 342 Mo de masques |
+
+Le budget « paramètre d'un fill » du M5 (100 ms) tient avec les masques. Modifier un masque coûte sa réévaluation (deux passes `R16Float`), puis les mélanges des 5 canaux à partir de son calque.
+
+La mémoire est le point à suivre. Chaque masque 4K pèse 45 Mo avec ses mips, et 30 calques masqués ajoutent 1,3 Go. Le budget de PLAN.md (6 Go sur la RTX 3080 Ti, 3,5 Go sur la RTX A2000) tient pour l'instant, mais ce sera à remesurer avec les contenus du M7 et du M8. Piste, à évaluer seulement si la mesure l'exige : garder les masques jetables hors du calque édité, puisqu'ils sont déjà recalculables.
+
+## Écarts constatés pendant l'implémentation
+
+- **Sélection** : `LayersState` garde `selected: Option<LayerId>` et gagne `part: LayerPart` (`Content`, `Mask` ou `MaskEffect(id)`). Le plan prévoyait une structure `Selection` ; le champ séparé change moins de code.
+- **Fills de masque** : ils passent par la passe `mask_effect.wgsl`, comme Levels et Invert, et non par la passe de mélange du M5. Seule cette passe borne le résultat à [0, 1], ce qu'exige la décision 1 (un fill en Addition dépasserait 1).
+- **`GpuDocument::sync`** signale aussi les sets dont un masque a été libéré : la matière qui affichait ce masque doit perdre la vue d'une texture détruite.
+- **Masque absent dans le mode Masque** : l'application lie une texture blanche de 1 × 1 (`white_mask`). Le libellé indique alors que le calque n'a pas de masque.
+- **`SetMask`** n'accepte que des effets déjà présents dans le masque courant, afin que tout nouvel effet passe par `InsertMaskEffect`, qui alloue son identifiant. La validation n'a lieu qu'à la première application, pour qu'un second `apply` signale bien l'état incohérent.
+- **Libellés d'historique** : l'effet ajouté ou modifié est nommé (fill, levels, inversion) par un sélecteur Fluent sur l'argument `effect`.
+- **Bench** : l'option `--masks` mesure aussi une modification de masque, et la mémoire du pool est affichée.
+- **Risque relevé hors du M6** : le pool détruit tout de suite une texture jetable évincée, même si elle sert dans l'encodeur pas encore soumis de `GpuDocument::sync`. Cela n'arrive qu'au-delà du budget du pool (8 Go dans l'application). Une tâche séparée est proposée pour différer la destruction après la soumission.
+
+## État à la clôture (11/10/2026)
+
+- Critère 1 : les 11 effets testés (fills, levels sur toute leur plage, inversion), dans les 25 modes et à 3 opacités, donnent sur le GPU la valeur de la référence à 1/512 près, sur WARP et sur la RTX 3080 Ti. Les piles aléatoires de calques et de dossiers masqués égalent `reference::composite_stored`, sans échec sur 30 exécutions de 24 piles tirées au hasard (WARP et RTX).
+- Critère 2 : `SetMask`, `InsertMaskEffect`, `RemoveMaskEffect`, `MoveMaskEffect` et `SetMaskEffect` s'annulent et se rétablissent à l'identique (tests de commandes). Les proptests d'undo tirent des opérations de masque aléatoires. Côté GPU, annuler tout redonne la composition d'origine et libère les textures de masque.
+- Cache : modifier un effet ne réévalue que ce masque (2 passes), puis 3 mélanges depuis le cache inférieur. Sans changement, aucune passe n'est faite.
+- Fixture v1 relue sans changement de format.
+- 223 tests passent sur WARP.
+- **À vérifier à la main** : la checklist ci-dessus, et le bench sur la RTX A2000.
