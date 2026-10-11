@@ -10,6 +10,7 @@ publish.workspace = true
 [dependencies]
 patine_core.workspace = true
 patine_gpu.workspace = true
+half.workspace = true
 
 [dev-dependencies]
 patine_gpu = { workspace = true, features = ["testing"] }

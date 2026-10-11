@@ -5,3 +5,4 @@
 //! the document.
 
 pub mod gpu_document;
+pub mod reference;
