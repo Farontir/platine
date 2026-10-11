@@ -59,3 +59,38 @@ Critères d'acceptation :
 - [ ] Ctrl+Z et Ctrl+Y sur chaque opération.
 - [ ] Enregistrer, rouvrir : pile identique.
 - [ ] `cargo run --release -p patine_cli -- bench compositor` sur la RTX A2000 : moins de 250 ms.
+
+## Mesures (11/10/2026, RTX 3080 Ti, build release)
+
+`cargo run --release -p patine_cli -- bench compositor` : sphère, un texture set à 5 canaux, des fills aux modes variés (Normal, Multiply, Overlay, Screen, Soft light ; Normal Map Combine sur la normale), opacité 70 %. On modifie le fill du bas 20 fois, avec l'attente GPU et les mips comprises.
+
+| Pile | Première évaluation | Valeur (couleur de base) | Visibilité (5 canaux) |
+| --- | --- | --- | --- |
+| 30 fills, 4096² | 55 ms | 7,9 ms (max 8,7) | 32,7 ms (max 34,0) |
+| 30 fills, 2048² | 36 ms | 2,8 ms (max 3,4) | 12,5 ms (max 13,3) |
+| 60 fills, 4096² | 93 ms | 14,4 ms (max 15,5) | 63,7 ms (max 65,1) |
+
+Critère 2 tenu : 7,9 ms pour un budget de 100 ms. Le pire cas, la visibilité qui touche les 5 canaux, reste à 33 ms. Changer une valeur ne réévalue que le canal concerné. L'optimisation prévue en repli (regrouper les fills dans une passe) n'est donc pas nécessaire. Il reste à mesurer sur la RTX A2000 (budget 250 ms).
+
+## Écarts constatés pendant l'implémentation
+
+- **Dossiers** (décision 3) : ils composent leurs enfants sur la composition du dessous puis se mêlent en Normal avec leur opacité. Passthrough donne le même résultat ; Disable ignore le dossier.
+- **`CommandGroup`** : une suite de commandes forme une seule entrée d'historique, et les commandes déjà appliquées sont annulées si l'une échoue. Elle sert à activer un canal (mélange et valeur) et à grouper dans un dossier (création puis déplacement).
+- **`clip_color`** : sur un gris pur, la formule W3C divise par zéro (NaN sur le CPU comme sur le GPU). Une garde `> 1e-4` laisse la couleur inchangée dans ce cas.
+- **Formule de `mix`** : la référence CPU calcule `a·(1−w) + b·w`, comme le `mix` de WGSL, et non `a + (b−a)·w`. Les deux écritures divergeaient d'un ulp f16 après une vingtaine de calques.
+- **Piles aléatoires** : le test GPU = CPU sur des piles de 2 à 8 calques exclut deux familles de modes, dont chaque mode reste couvert seul par le test du critère 1.
+  - Les modes qui amplifient l'écart d'arrondi f16 (Divide, Color dodge, Color burn : dérivée non bornée près de 0 ou de 1).
+  - Les modes non séparables (Hue, Saturation, Color, Luminosity : teinte discontinue près des gris).
+- **Disable sur un canal scalaire** : le résultat est `[r, 0, 0, 0]`, comme une texture `R16Float` relue.
+- **`GpuDocument::sync`** : le cache inférieur est invalidé quand le point de départ est le premier calque. Une nouvelle valeur par défaut ne signale plus le set, car seules les textures remplacées changent les bind groups.
+- **Options de capture** : `--edit fill=R,G,B,RUGOSITÉ` (nouveau fill sélectionné au-dessus de la sélection), `--edit mode=MODE,OPACITÉ` (mélange de la couleur de base du calque sélectionné) et `--edit group=`.
+- **Bench** : `--edits N` remplace le `--channels` du plan, car le nombre de canaux est celui du texture set par défaut.
+
+## État à la clôture (11/10/2026)
+
+- Critère 1 : pour les 25 modes et les 3 types de canal, la passe GPU égale la référence CPU à 1/512 près, sur WARP et sur la RTX 3080 Ti. Les tuiles hors région restent intactes et les mips égalent la réduction CPU.
+- Piles aléatoires (dossiers, passthrough, visibilité, Disable) : GPU = `reference::composite_stored`, avec 0 échec sur 40 exécutions de 24 piles sur chaque adaptateur.
+- Cache inférieur : les nombres de passes attendus (10, 3, 3, 10, 8) sont exacts. L'undo redonne l'état précédent.
+- Critère 2 : 7,9 ms sur la RTX 3080 Ti.
+- 210 tests passent sur WARP.
+- **À vérifier à la main** : la checklist ci-dessus, et le bench sur la RTX A2000.

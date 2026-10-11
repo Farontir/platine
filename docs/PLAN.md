@@ -564,11 +564,11 @@ Critères d'acceptation : changer de résolution réalloue sans fuite, et la mé
 
 Objectif : une pile de calques fill complète et rapide.
 
-- [ ] Calques fill (valeur uniforme par canal), dossiers, visibilité, ordre
-- [ ] Blend modes et opacité par canal, Normal Map Combine
-- [ ] Graphe d'évaluation, invalidation, cache inférieur, tuiles sales
-- [ ] Référence CPU de tous les blend modes
-- [ ] Panneau Calques : création, suppression, glisser-déposer, renommage
+- [x] Calques fill (valeur uniforme par canal), dossiers, visibilité, ordre
+- [x] Blend modes et opacité par canal, Normal Map Combine
+- [x] Graphe d'évaluation, invalidation, cache inférieur, tuiles sales
+- [x] Référence CPU de tous les blend modes
+- [x] Panneau Calques : création, suppression, glisser-déposer, renommage
 
 Critères d'acceptation : chaque blend mode correspond à la référence CPU à 1/512 près ; le budget « paramètre d'un fill » est tenu.
 
