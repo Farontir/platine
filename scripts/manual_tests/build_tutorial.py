@@ -4,7 +4,7 @@ Run from the repository root after capture_tutorial.py:
     python scripts/manual_tests/build_tutorial.py
 
 Writes manual_tests/tutorial/ (HTML and cropped images) and
-manual_tests/Patine-tutoriel-M0-M5.pdf, printed by Microsoft Edge (or Chrome) headless.
+manual_tests/Patine-tutoriel-M0-M6.pdf, printed by Microsoft Edge (or Chrome) headless.
 """
 
 import html
@@ -19,7 +19,7 @@ from PIL import Image
 CAPTURES = os.path.join("manual_tests", "captures")
 OUT = os.path.join("manual_tests", "tutorial")
 IMAGES = os.path.join(OUT, "img")
-PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M5.pdf")
+PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M6.pdf")
 
 # Regions of the 1600 x 900 captures.
 FULL = None
@@ -134,7 +134,9 @@ SHORTCUTS = [
     ["Ctrl+S, Ctrl+Maj+S", "Fichier › Enregistrer, Enregistrer sous… (M3)"],
     ["Ctrl+Q", "Fichier › Quitter"],
     ["Ctrl+Z, Ctrl+Y", "Édition › Annuler, Rétablir (M3)"],
-    ["Suppr, Ctrl+G", "Édition › Supprimer le calque, Grouper dans un dossier (M5)"],
+    ["Suppr, Ctrl+G", "Édition › Supprimer le calque (ou le masque, ou l'effet sélectionné), Grouper dans un dossier (M5)"],
+    ["M", "Affichage › Masque du calque sélectionné (M6)"],
+    ["Clic droit", "sur un calque : ajouter ou supprimer un masque ; sur un masque ou un effet : ajouter un fill, un levels, une inversion (M6)"],
     ["F", "Affichage › Cadrer le mesh"],
     ["Ctrl+Maj+P", "Affichage › Profileur"],
     ["—", "Affichage › Orthographique, Fil de fer, Ombres, Réinitialiser la disposition"],
@@ -151,7 +153,7 @@ OPTIONS = [
     ["<code>--tonemap agx|aces|neutral|linear</code>", "opérateur de tone mapping"],
     ["<code>--background env:FLOU|solid:R,V,B</code>", "fond"],
     ["<code>--material R,V,B,METALLIC,ROUGHNESS</code>", "valeurs par défaut des canaux de tous les texture sets (commandes)"],
-    ["<code>--display lit|checker|channel:ID</code>", "mode d'affichage (ID : base-color, roughness, user-0…)"],
+    ["<code>--display lit|checker|mask|channel:ID</code>", "mode d'affichage (ID : base-color, roughness, user-0…)"],
     ["<code>--texture-set N</code>", "texture set courant (panneau Texture sets, vue 2D)"],
     ["<code>--wireframe</code>, <code>--no-shadows</code>, <code>--ortho</code>, <code>--fov DEG</code>", "superpositions et projection"],
     ["<code>--orbit LACET,TANGAGE</code>, <code>--zoom FACTEUR</code>", "position de la caméra après cadrage"],
@@ -160,6 +162,7 @@ OPTIONS = [
     ["<code>--capture PNG</code>, <code>--capture-frames N</code>", "enregistre la fenêtre en PNG puis quitte"],
     ["<code>projet.patine</code>", "ouvre un projet au lieu d'importer un mesh"],
     ["<code>--edit rotation=DEG|exposure=EV|rename=SET:NOM|undo=N</code>", "applique des commandes au projet ouvert (une entrée d'historique chacune)"],
+    ["<code>--edit mask=black|white|mask-fill=V,MODE,OPACITÉ|mask-levels=A,B,G,C,D|mask-invert=</code>", "donne un masque au calque sélectionné, puis lui ajoute un fill, un levels ou une inversion au-dessus de l'effet sélectionné (M6)"],
     ["<code>--edit fill=R,V,B,ROUGHNESS|mode=MODE,OPACITÉ|group=</code>", "ajoute un fill au-dessus de la sélection et le sélectionne ; règle le mélange de la couleur de base du calque sélectionné ; le groupe dans un dossier (M5)"],
     ["<code>--autosave-interval SECS</code>", "délai entre deux autosaves (300 par défaut)"],
     ["variable <code>PATINE_AUTOSAVE_DIR</code>", "dossier des autosaves (par défaut %APPDATA%\\Patine\\autosave)"],
@@ -175,7 +178,7 @@ def body():
         '<div class="kicker">Tutoriel et cahier de tests manuels</div>'
         "<h1>Patine</h1>"
         '<p class="subtitle">Texturing PBR par calques sur mesh 3D<br>'
-        "Fonctionnalités des jalons M0 à M5</p>"
+        "Fonctionnalités des jalons M0 à M6</p>"
         + figure("helmet_texture_sets", FULL, "full", "Le casque d'aviateur importé, panneau Texture sets au premier plan.", "92%")
         + '<p class="meta">Version 0.1.0 — 11 octobre 2026 — captures réalisées sur RTX 3080 Ti (Vulkan), '
         "interface en français, fenêtre 1600 × 900.</p></section>")
@@ -189,6 +192,7 @@ def body():
         "<li>M3 — Document : annuler, historique, enregistrer, autosave</li>"
         "<li>M4 — Texture sets et canaux : valeurs par défaut, modes d'affichage, vue 2D</li>"
         "<li>M5 — Calques : fills, dossiers, blend modes et opacité par canal</li>"
+        "<li>M6 — Masques : masque noir ou blanc, fill, levels, inversion, affichage du masque</li>"
         "<li>Checklist complète des tests manuels</li>"
         "<li>Annexe : options de lancement et régénération de ce document</li>"
         "</ol>"
@@ -691,8 +695,96 @@ def body():
         + "<p>Budget : moins de 100 ms (RTX 3080 Ti) et moins de 250 ms (RTX A2000, <b>à mesurer</b>).</p>"
         + "</section>")
 
-    # 8. Checklist.
-    add("<section><h2>8. Checklist complète des tests manuels</h2>"
+    # 8. M6.
+    add("<section><h2>8. M6 — Masques</h2>"
+        "<p>Un <b>masque</b> limite l'effet d'un calque. C'est une image en niveaux de gris, de la résolution "
+        "du texture set : là où il est blanc, le calque agit pleinement ; là où il est noir, il n'agit pas. Le "
+        "masque multiplie l'opacité de chaque canal du calque, et un dossier masqué masque tout son groupe.</p>"
+        "<p>Un masque part du <b>noir</b> ou du <b>blanc</b>, puis applique une pile d'<b>effets</b> du bas "
+        "vers le haut, chacun avec sa visibilité, son blend mode et son opacité :</p>"
+        "<ul><li><b>Fill</b> : une valeur uniforme ;</li>"
+        "<li><b>Levels</b> : noir et blanc d'entrée, gamma, noir et blanc de sortie, appliqués au masque du dessous ;</li>"
+        "<li><b>Inversion</b> : 1 − masque du dessous.</li></ul>"
+        "<p>Au M6, les masques sont uniformes. La peinture (M8) et les générateurs (M13) leur donneront du "
+        "détail, mais le calcul est déjà fait pixel par pixel.</p>"
+        "<h3>8.1 Ajouter un masque</h3>"
+        "<p><b>Clic droit sur un calque</b> : « Ajouter un masque noir » cache le calque, « Ajouter un "
+        "masque blanc » ne change rien. Le masque s'affiche sous le calque ; un clic le sélectionne, et le "
+        "panneau Propriétés permet alors de changer sa valeur initiale.</p>"
+        + '<div class="grid c2">'
+        + figure("m6_black", VIEWPORT, "view", "Masque noir : le fill rouge disparaît du cuir.")
+        + figure("m6_white", VIEWPORT, "view", "Masque blanc : le fill rouge s'applique en entier.")
+        + figure("m6_black", LAYERS, "layers", "Le masque sous son calque.")
+        + figure("m6_black", PROPERTIES, "props", "Propriétés du masque : valeur initiale.")
+        + "</div>"
+        + test(["Sur le casque (LeatherPartsMat), ajouter un fill rouge.",
+                "Clic droit sur le calque › Ajouter un masque noir, puis Ctrl+Z ; Ajouter un masque blanc.",
+                "Sélectionner la ligne Masque, passer sa valeur initiale de Blanc à Noir dans Propriétés."],
+               "Le fill disparaît avec le masque noir et revient avec Ctrl+Z ; le masque blanc ne change rien. "
+               "Chaque opération donne une entrée d'Historique.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>8.2 Effets : fill, levels, inversion</h3>"
+        "<p><b>Clic droit sur la ligne Masque</b> (ou sur un effet) : « Ajouter un fill », « Ajouter un "
+        "levels », « Ajouter une inversion ». L'effet s'ajoute au-dessus de l'effet sur lequel on a cliqué, "
+        "ou en haut du masque. Les effets s'affichent du haut vers le bas, avec un œil pour les masquer. On "
+        "les réordonne par glisser-déposer : un effet lâché sur un autre se place au-dessus de lui, et lâché "
+        "sur la ligne Masque, il passe en haut. Suppr supprime l'effet sélectionné.</p>"
+        + '<div class="grid c2a">'
+        + figure("m6_fill", VIEWPORT, "view", "Fill de masque à 60 % : le rouge se mêle au cuir.")
+        + figure("m6_fill", PROPERTIES, "props", "Propriétés du fill : mode, opacité, valeur.")
+        + figure("m6_levels", VIEWPORT, "view", "Levels, gamma 2,5 au-dessus : le masque passe de 0,6 à 0,82.")
+        + figure("m6_levels", PROPERTIES, "props", "Propriétés du levels et sa courbe.")
+        + "</div>"
+        + test(["Clic droit sur le masque noir › Ajouter un fill ; régler sa valeur à 60 %.",
+                "Ajouter un levels au-dessus ; faire glisser le gamma, puis le noir d'entrée.",
+                "Ajouter une inversion ; la glisser sous le fill, puis la remettre en haut.",
+                "Masquer un effet avec son œil ; passer le fill en Produit à 50 %."],
+               "Le rendu suit chaque réglage en direct ; un geste de curseur donne une seule entrée d'Historique. "
+               "La courbe du levels suit ses curseurs. Masquer un effet revient à le retirer.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>8.3 Afficher le masque</h3>"
+        "<p>La touche <b>M</b> (ou Affichage › Masque du calque sélectionné, ou Paramètres d'affichage) "
+        "montre le masque du calque sélectionné en niveaux de gris, dans la vue 3D comme dans la vue 2D. "
+        "Les autres texture sets s'affichent en noir, et un calque sans masque s'affiche en blanc. Le nom du "
+        "calque est rappelé en haut à gauche de la vue. M à nouveau revient au matériau éclairé.</p>"
+        + '<div class="grid c2">'
+        + figure("m6_fill_mask", VIEWPORT, "view", "Masque du fill à 60 %.")
+        + figure("m6_levels_mask", VIEWPORT, "view", "Le même masque après le levels (0,82).")
+        + figure("m6_invert_mask", VIEWPORT, "view", "Après une inversion en haut (0,18).")
+        + figure("m6_view_2d", (14, 61, 1174, 628), "view", "Vue 2D en mode masque : le gris uniforme sous le wireframe UV.")
+        + "</div>"
+        + test(["Sélectionner le calque masqué, appuyer sur M ; ouvrir la Vue 2D.",
+                "Sélectionner un calque sans masque, puis aucun calque ; appuyer à nouveau sur M."],
+               "Le masque s'affiche avec la valeur attendue (0,6, puis 0,82 après le levels gamma 2,5) ; un calque "
+               "sans masque donne du blanc et le libellé l'indique ; M revient au rendu éclairé.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>8.4 Annuler et mesurer</h3>"
+        "<p>Chaque opération sur un masque est une commande de l'historique : ajout et suppression du masque, "
+        "ajout, suppression, déplacement et réglage d'un effet. Les tests vérifient que chacune s'annule et "
+        "se rétablit à l'identique, et que la composition GPU suit la référence CPU à 1/512 près.</p>"
+        + '<div class="grid c2a">'
+        + figure("m6_history", VIEWPORT, "view", "Fill, levels et inversion : le masque vaut 0,18.")
+        + figure("m6_history", (1178, 430, 1600, 720), "history", "Une entrée par opération.")
+        + "</div>"
+        + code("cargo run --release -p patine_cli -- bench compositor --masks")
+        + "<p>Les mêmes 30 fills en 4096², chacun avec un masque (fill en Produit et levels). Mesures sur la "
+        "RTX 3080 Ti :</p>"
+        + table(["Modification du fill du bas", "Sans masques", "Avec masques"],
+                [["Valeur d'un canal", "8,1 ms", "8,2 ms"],
+                 ["Visibilité (5 canaux)", "33,1 ms", "34,6 ms"],
+                 ["Fill de son masque (5 canaux)", "—", "36,1 ms"],
+                 ["Mémoire du pool", "828 Mo", "2 170 Mo (1 342 Mo de masques)"]])
+        + "<p>Budget : moins de 100 ms (RTX 3080 Ti) et moins de 250 ms (RTX A2000, <b>à mesurer</b>).</p>"
+        + "</section>")
+
+    # 9. Checklist.
+    add("<section><h2>9. Checklist complète des tests manuels</h2>"
         "<h3>M0 — Fondations</h3>"
         + checklist(["<code>cargo run -p patine_app</code> ouvre une fenêtre sans erreur dans le terminal.",
                      "Les 9 panneaux sont présents ; on peut les détacher, les déplacer et les réancrer.",
@@ -754,10 +846,22 @@ def body():
                      "Ctrl+Z et Ctrl+Y sur chaque opération.",
                      "Enregistrer, rouvrir : pile identique (ordre, noms, visibilité, valeurs, modes).",
                      "<code>patine_cli bench compositor</code> sur la RTX A2000 : moins de 250 ms."])
+        + "<h3>M6 — Masques</h3>"
+        + checklist(["Clic droit sur un calque : un masque noir le cache, un masque blanc ne change rien ; "
+                     "Supprimer le masque le retire.",
+                     "Ajouter un fill, un levels et une inversion au masque ; régler leurs valeurs, modes et opacités : "
+                     "le rendu suit en direct, une entrée d'historique par geste.",
+                     "Réordonner les effets par glisser-déposer ; masquer un effet avec son œil.",
+                     "Touche M : le masque du calque sélectionné s'affiche dans la vue 3D et la vue 2D ; à nouveau M "
+                     "pour revenir.",
+                     "Masque sur un dossier : tout le groupe est masqué.",
+                     "Suppr sur un effet, puis sur le masque ; Ctrl+Z et Ctrl+Y sur chaque opération.",
+                     "Enregistrer, rouvrir : masques identiques.",
+                     "<code>patine_cli bench compositor --masks</code> sur la RTX A2000 : moins de 250 ms."])
         + "</section>")
 
     # Appendix.
-    add("<section><h2>9. Annexe</h2>"
+    add("<section><h2>10. Annexe</h2>"
         "<h3>Options de lancement de patine_app</h3>"
         "<p>Ces options servent aux captures et aux tests ; <code>patine_app --help</code> les liste.</p>"
         + table(["Option", "Effet"], OPTIONS)
@@ -768,7 +872,7 @@ def body():
         + code("cargo build --release -p patine_app -p patine_cli\n"
                "python scripts/manual_tests/capture_tutorial.py\n"
                "python scripts/manual_tests/build_tutorial.py")
-        + "<p>Le premier script produit les 57 captures dans <code>manual_tests/captures/</code> (et le projet "
+        + "<p>Le premier script produit les 66 captures dans <code>manual_tests/captures/</code> (et le projet "
         "<code>manual_tests/casque.patine</code>) ; le second les "
         "recadre et imprime ce PDF avec Microsoft Edge (ou Chrome) sans interface.</p>"
         "<h3>Crédits</h3>"
@@ -853,7 +957,7 @@ def main():
     os.makedirs(IMAGES)
     document = (
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
-        f"<title>Patine — tutoriel M0 à M5</title><style>{STYLE}</style></head>"
+        f"<title>Patine — tutoriel M0 à M6</title><style>{STYLE}</style></head>"
         f"<body>{body()}</body></html>"
     )
     page = os.path.join(OUT, "index.html")

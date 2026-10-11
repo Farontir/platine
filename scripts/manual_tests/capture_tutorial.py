@@ -62,6 +62,12 @@ M5_STACK = [
     "--edit", "mode=multiply,0.5",
 ]
 
+# M6: a red fill on the leather of the helmet, then a mask built step by step.
+M6_BASE = [HELMET, "--orbit", "30,10", "--texture-set", "1", "--edit", "fill=0.8,0.12,0.08,0.45"]
+M6_PANELS = ["--tab", "layers", "--tab", "properties"]
+M6_FILL = ["--edit", "mask=black", "--edit", "mask-fill=0.6,normal,1"]
+M6_LEVELS = M6_FILL + ["--edit", "mask-levels=0,1,2.5,0,1"]
+
 # name -> arguments (mesh first, if any)
 CAPTURES = {
     "interface_fr": [],
@@ -127,6 +133,15 @@ CAPTURES = {
     "m5_mode_overlay": [LANTERN] + MODE_BASE + ["--edit", "mode=overlay,1"] + LANTERN_VIEW,
     "m5_stack": [HELMET, "--tab", "layers", "--tab", "properties", "--orbit", "30,10", "--texture-set", "1"] + M5_STACK,
     "m5_stack_history": [HELMET, "--tab", "layers", "--tab", "history", "--orbit", "30,10", "--texture-set", "1"] + M5_STACK,
+    "m6_black": M6_BASE + M6_PANELS + ["--edit", "mask=black"],
+    "m6_white": M6_BASE + M6_PANELS + ["--edit", "mask=white"],
+    "m6_fill": M6_BASE + M6_PANELS + M6_FILL,
+    "m6_fill_mask": M6_BASE + M6_PANELS + M6_FILL + ["--display", "mask"],
+    "m6_levels": M6_BASE + M6_PANELS + M6_LEVELS,
+    "m6_levels_mask": M6_BASE + M6_PANELS + M6_LEVELS + ["--display", "mask"],
+    "m6_invert_mask": M6_BASE + M6_PANELS + M6_LEVELS + ["--edit", "mask-invert=", "--display", "mask"],
+    "m6_view_2d": [HELMET, "--tab", "view-2d", "--texture-set", "1", "--edit", "fill=0.8,0.12,0.08,0.45"] + M6_LEVELS + ["--display", "mask"],
+    "m6_history": M6_BASE + ["--tab", "layers", "--tab", "history"] + M6_LEVELS + ["--edit", "mask-invert="],
 }
 
 # Captures run with extra environment variables.
