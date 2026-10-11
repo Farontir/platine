@@ -34,6 +34,8 @@ pub struct ViewState {
     pub hover_pixel: Option<[u32; 2]>,
     /// Triangle under the cursor, from the last finished pick.
     pub hovered: Option<u32>,
+    /// Frame the mesh at the next render, once the panel size is known.
+    pub frame_pending: bool,
 }
 
 impl Default for ViewState {
@@ -46,6 +48,7 @@ impl Default for ViewState {
             texture: None,
             hover_pixel: None,
             hovered: None,
+            frame_pending: false,
         }
     }
 }

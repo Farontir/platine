@@ -1,6 +1,6 @@
 //! Main window: winit event loop, wgpu surface and egui rendering.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -19,6 +19,8 @@ use patine_render::mesh_gpu::GpuMesh;
 use patine_render::viewport::{Scene, Viewport};
 
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
+use crate::cli::{StartupDialog, StartupOptions};
+use crate::display_panel::STUDIO_SKY_WIDTH;
 use crate::i18n::{I18n, Language};
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, NewProjectDialog};
@@ -56,12 +58,17 @@ pub struct App {
     graphics: Option<Graphics>,
     /// First fatal error; the event loop exits and `run` returns it.
     error: Option<anyhow::Error>,
+    /// Command line options (window size, forced hover, camera angles).
+    startup: StartupOptions,
+    /// Window capture in progress: PNG path and frames left before it.
+    capture: Option<(PathBuf, u32)>,
 }
 
 /// Opens the main window and runs until it is closed.
 ///
-/// With `mesh`, a project is created from it at startup with default settings.
-pub fn run(logs: LogBuffer, profiler: Profiler, mesh: Option<&Path>) -> anyhow::Result<()> {
+/// `options` come from the command line: an optional mesh opened as a project with default
+/// settings, and developer options setting the view up (see [`crate::cli`]).
+pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyhow::Result<()> {
     let event_loop = EventLoop::new().context("failed to create the event loop")?;
     event_loop.set_control_flow(ControlFlow::Wait);
     let egui_ctx = egui::Context::default();
@@ -69,22 +76,28 @@ pub fn run(logs: LogBuffer, profiler: Profiler, mesh: Option<&Path>) -> anyhow::
     let mut app = App {
         logs,
         profiler,
-        i18n: I18n::new(Language::system()),
+        i18n: I18n::new(options.language.unwrap_or_else(Language::system)),
         actions: ActionRegistry::default(),
         ui: UiState::default(),
         project: None,
         egui_ctx,
         graphics: None,
         error: None,
+        capture: options
+            .capture
+            .clone()
+            .map(|path| (path, options.capture_frames)),
+        startup: options,
     };
-    if let Some(path) = mesh {
-        let imported = patine_mesh::import(path, BuildOptions::default())
+    if let Some(path) = app.startup.mesh.clone() {
+        let imported = patine_mesh::import(&path, BuildOptions::default())
             .with_context(|| format!("cannot import {}", path.display()))?;
         app.open_project(CreatedProject {
-            project: Project::new(imported.mesh, path.to_owned(), ProjectSettings::default()),
+            project: Project::new(imported.mesh, path, ProjectSettings::default()),
             report: imported.report,
         });
     }
+    app.apply_startup_options()?;
     event_loop.run_app(&mut app).context("event loop failed")?;
     match app.error.take() {
         Some(error) => Err(error),
@@ -92,7 +105,103 @@ pub fn run(logs: LogBuffer, profiler: Profiler, mesh: Option<&Path>) -> anyhow::
     }
 }
 
+/// Saves the surface texture `texture` (8-bit RGBA or BGRA) to a PNG file.
+fn save_capture(gpu: &GpuContext, texture: &wgpu::Texture, path: &Path) -> anyhow::Result<()> {
+    let mut pixels = patine_gpu::readback::read_texture(gpu, texture)?;
+    let bgra = matches!(
+        texture.format(),
+        wgpu::TextureFormat::Bgra8Unorm | wgpu::TextureFormat::Bgra8UnormSrgb
+    );
+    for pixel in pixels.as_chunks_mut::<4>().0 {
+        if bgra {
+            pixel.swap(0, 2);
+        }
+        pixel[3] = 255;
+    }
+    let image = image::RgbaImage::from_raw(texture.width(), texture.height(), pixels)
+        .context("capture size matches the texture")?;
+    if let Some(dir) = path.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    image.save(path)?;
+    tracing::info!(path = %path.display(), "window captured");
+    Ok(())
+}
+
 impl App {
+    /// Applies the view options of the command line.
+    fn apply_startup_options(&mut self) -> anyhow::Result<()> {
+        let options = self.startup.clone();
+        for panel in &options.tabs {
+            if let Some(path) = self.ui.dock.find_tab(panel) {
+                // The path was just found in the same dock state.
+                let _ = self.ui.dock.set_active_tab(path);
+            }
+        }
+        let view = &mut self.ui.view;
+        match &options.hdri {
+            Some(Some(path)) => {
+                let image = patine_render::environment::EquirectImage::load(path)
+                    .with_context(|| format!("cannot load {}", path.display()))?;
+                view.environment.name = path
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned());
+                view.environment.pending = Some(image);
+            }
+            Some(None) => {
+                view.environment.name = None;
+                view.environment.pending =
+                    Some(patine_render::environment::studio_sky(STUDIO_SKY_WIDTH));
+            }
+            None => {}
+        }
+        let settings = &mut view.settings;
+        if let Some(rotation) = options.rotation {
+            settings.environment_rotation = rotation.to_radians();
+        }
+        if let Some(exposure) = options.exposure {
+            settings.exposure_ev = exposure;
+        }
+        if let Some(tone_mapper) = options.tone_mapper {
+            settings.tone_mapper = tone_mapper;
+        }
+        if let Some(background) = options.background {
+            settings.background = background;
+        }
+        if let Some((base_color, metallic, roughness)) = options.material {
+            settings.material.base_color = base_color;
+            settings.material.metallic = metallic;
+            settings.material.roughness = roughness;
+        }
+        settings.wireframe |= options.wireframe;
+        settings.shadows &= !options.no_shadows;
+        if let Some(projection) = options.projection {
+            view.camera.projection = projection;
+        }
+        if let Some(fov) = options.fov {
+            view.camera.fov_y = fov.to_radians();
+        }
+        if let Some([yaw, pitch]) = options.orbit {
+            view.camera.yaw = yaw.to_radians();
+            view.camera.pitch = pitch.to_radians();
+        }
+        match options.dialog {
+            Some(StartupDialog::About) => self.ui.show_about = true,
+            Some(StartupDialog::NewProject) => {
+                let mut dialog = match &options.dialog_path {
+                    Some(path) => NewProjectDialog::with_path(path),
+                    None => NewProjectDialog::default(),
+                };
+                if options.dialog_create {
+                    dialog.start_import(&self.egui_ctx);
+                }
+                self.ui.new_project = Some(dialog);
+            }
+            None => {}
+        }
+        Ok(())
+    }
+
     fn action_context(&self) -> ActionContext {
         let view = &self.ui.view;
         ActionContext {
@@ -108,7 +217,10 @@ impl App {
     fn create_graphics(&self, event_loop: &ActiveEventLoop) -> anyhow::Result<Graphics> {
         let attributes = Window::default_attributes()
             .with_title(self.i18n.tr("app-title"))
-            .with_inner_size(PhysicalSize::new(1600, 900))
+            .with_inner_size(match self.startup.window {
+                Some([width, height]) => PhysicalSize::new(width, height),
+                None => PhysicalSize::new(1600, 900),
+            })
             .with_min_inner_size(PhysicalSize::new(640, 360));
         let window = Arc::new(
             event_loop
@@ -139,6 +251,10 @@ impl App {
             config.format = *format;
         }
         config.present_mode = wgpu::PresentMode::AutoVsync;
+        // Window captures copy the presented image.
+        if caps.usages.contains(wgpu::TextureUsages::COPY_SRC) {
+            config.usage |= wgpu::TextureUsages::COPY_SRC;
+        }
         surface.configure(&gpu.device, &config);
 
         let max_texture_side = gpu.device.limits().max_texture_dimension_2d as usize;
@@ -225,10 +341,8 @@ impl App {
             gfx.last_pick = None;
             self.ui.view.hovered = None;
         }
-        if let Some(bounds) = project.mesh.bounds() {
-            let aspect = self.ui.view.aspect();
-            self.ui.view.camera.frame(&bounds, aspect);
-        }
+        // Framed at the next render, when the panel size is known.
+        self.ui.view.frame_pending = true;
         self.project = Some(project);
     }
 
@@ -282,6 +396,16 @@ impl App {
             return;
         };
         let view = &mut self.ui.view;
+        if view.frame_pending && view.size[0] > 1 && view.size[1] > 1 {
+            view.frame_pending = false;
+            if let Some(bounds) = self.project.as_ref().and_then(|p| p.mesh.bounds()) {
+                let aspect = view.aspect();
+                view.camera.frame(&bounds, aspect);
+                if let Some(zoom) = self.startup.zoom.take() {
+                    view.camera.zoom(zoom);
+                }
+            }
+        }
         if let Some(image) = view.environment.pending.take() {
             puffin::profile_scope!("environment");
             let start = Instant::now();
@@ -392,6 +516,9 @@ impl App {
             triggered.extend(output.actions);
             created_project = created_project.take().or(output.created_project);
         });
+        if let Some(pixel) = self.startup.hover {
+            self.ui.view.hover_pixel = Some(pixel);
+        }
         gfx.egui_state.handle_platform_output(
             &gfx.window,
             std::mem::take(&mut full_output.platform_output),
@@ -407,7 +534,28 @@ impl App {
         let Some(gfx) = self.graphics.as_mut() else {
             return;
         };
-        Self::paint(gfx, &self.egui_ctx, &mut full_output);
+        let capture_now = match &mut self.capture {
+            Some((path, 0)) => Some(path.clone()),
+            Some((_, frames)) => {
+                *frames -= 1;
+                gfx.window.request_redraw();
+                None
+            }
+            None => None,
+        };
+        let captured = Self::paint(
+            gfx,
+            &self.egui_ctx,
+            &mut full_output,
+            capture_now.as_deref(),
+        );
+        if let Some(result) = captured {
+            if let Err(error) = result {
+                tracing::error!("{error:#}");
+                self.error = Some(error);
+            }
+            event_loop.exit();
+        }
         self.profiler.new_frame();
 
         if let Some(created) = created_project {
@@ -432,7 +580,15 @@ impl App {
         }
     }
 
-    fn paint(gfx: &mut Graphics, egui_ctx: &egui::Context, full_output: &mut egui::FullOutput) {
+    /// Draws egui to the window. With `capture`, the image is also saved to that PNG and
+    /// the result of the capture is returned.
+    fn paint(
+        gfx: &mut Graphics,
+        egui_ctx: &egui::Context,
+        full_output: &mut egui::FullOutput,
+        capture: Option<&Path>,
+    ) -> Option<anyhow::Result<()>> {
+        let mut captured = None;
         puffin::profile_function!();
         let Graphics {
             window,
@@ -505,6 +661,9 @@ impl App {
             }
             command_buffers.push(encoder.finish());
             queue.submit(command_buffers);
+            if let Some(path) = capture {
+                captured = Some(save_capture(gpu, &frame.texture, path));
+            }
             window.pre_present_notify();
             queue.present(frame);
         }
@@ -512,6 +671,7 @@ impl App {
         for id in textures.free.drain() {
             renderer.free_texture(&id);
         }
+        captured
     }
 
     fn resize(&mut self, size: PhysicalSize<u32>) {

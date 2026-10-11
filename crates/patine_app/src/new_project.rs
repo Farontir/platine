@@ -90,6 +90,27 @@ fn spawn<T: Send + 'static>(
 }
 
 impl NewProjectDialog {
+    /// A dialog with `path` already typed in.
+    pub fn with_path(path: &std::path::Path) -> Self {
+        Self {
+            path: path.display().to_string(),
+            ..Self::default()
+        }
+    }
+
+    /// Starts importing the typed path on a worker thread, as the Create button does.
+    pub fn start_import(&mut self, ctx: &egui::Context) {
+        if self.busy() || self.path.trim().is_empty() {
+            return;
+        }
+        self.error = None;
+        let path = PathBuf::from(self.path.trim());
+        tracing::info!(path = %path.display(), "importing mesh");
+        self.task = Task::Importing(spawn(ctx, move || {
+            patine_mesh::import(&path, BuildOptions::default())
+        }));
+    }
+
     fn busy(&self) -> bool {
         !matches!(self.task, Task::Idle)
     }
@@ -224,12 +245,7 @@ impl NewProjectDialog {
                     .add_enabled(can_create, egui::Button::new(i18n.tr("new-project-create")))
                     .clicked()
                 {
-                    self.error = None;
-                    let path = PathBuf::from(self.path.trim());
-                    tracing::info!(path = %path.display(), "importing mesh");
-                    self.task = Task::Importing(spawn(ctx, move || {
-                        patine_mesh::import(&path, BuildOptions::default())
-                    }));
+                    self.start_import(ctx);
                 }
                 if ui.button(i18n.tr("new-project-cancel")).clicked() {
                     outcome = DialogOutcome::Cancelled;

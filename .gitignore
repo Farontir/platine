@@ -5,3 +5,6 @@
 /.idea/
 .DS_Store
 # Golden-image failures are written under target/, nothing else to ignore.
+
+# Manual test assets, captures and tutorial output (downloaded or generated, not versioned)
+/manual_tests/

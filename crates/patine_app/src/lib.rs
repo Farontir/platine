@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod app;
+pub mod cli;
 pub mod display_panel;
 pub mod i18n;
 pub mod logging;

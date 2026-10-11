@@ -14,6 +14,8 @@ Le plan complet est dans `docs/PLAN.md` : c'est la source de vérité pour la st
 - Contenus interdits : `bash scripts/check-forbidden.sh`
 - Profileur : `PATINE_PROFILE=1 cargo run -p patine_app`, puis `puffin_viewer`
 - Ouvrir un mesh au lancement : `cargo run -p patine_app -- <mesh>`
+- Captures pour la doc (options de vue, dialogues, `--capture out.png`) : `cargo run --release -p patine_app -- --help`
+- Fichiers de tests manuels : téléchargés dans `manual_tests/assets` (non versionné), puis `blender -b --factory-startup --python scripts/manual_tests/generate_assets.py`
 - Mesurer : `cargo run --release -p patine_cli -- bench viewport` ; `cargo run --release -p patine_cli -- inspect <mesh>`
 
 ## Méthode de travail
