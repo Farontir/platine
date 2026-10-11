@@ -4,18 +4,22 @@
 //! The GPU is only a cache: everything here is derived from the project. `sync` compares
 //! the project with what was last evaluated:
 //! - allocation: textures follow the resolution and the channels of each texture set;
+//! - masks: each masked layer has an `R16Float` texture, evaluated again only when its
+//!   mask stack changes;
 //! - evaluation: for each channel, the first top-level layer whose contribution to that
 //!   channel changed gives the starting point. The composition below the layer being
 //!   edited is kept in a *lower cache*, so editing a layer only blends it and the layers
 //!   above it again.
 //!
-//! The ping-pong textures, folder textures and lower caches are discardable in the pool:
-//! if evicted, they are rebuilt.
+//! The ping-pong textures, folder textures, lower caches and masks are discardable in the
+//! pool: if evicted, they are rebuilt.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use patine_core::channel::{Channel, ChannelDef, ChannelFormat};
+use patine_core::ids::LayerId;
 use patine_core::layer::{BlendMode, FillSource, Layer, LayerKind};
+use patine_core::mask::MaskStack;
 use patine_core::project::{Project, TextureSetId};
 use patine_gpu::pool::{Residency, TextureId, TexturePool, full_mip_count, texture_bytes};
 use patine_gpu::{GpuContext, wgpu};
@@ -83,6 +87,19 @@ pub fn expected_memory(project: &Project) -> u64 {
                 .map(|def| texture_bytes(&channel_descriptor(def.format, set.resolution.pixels())))
         })
         .sum()
+}
+
+/// The evaluated mask of one layer.
+#[derive(Debug)]
+struct MaskTexture {
+    /// Stack it was evaluated from.
+    stack: MaskStack,
+    /// Side in pixels.
+    size: u32,
+    /// `R16Float` texture with its mips, discardable in the pool.
+    texture: TextureId,
+    /// View of every mip level.
+    view: wgpu::TextureView,
 }
 
 /// Composition below a top-level layer, kept while that layer is being edited.
@@ -168,6 +185,8 @@ impl Scratch {
 #[derive(Debug, Default)]
 pub struct GpuDocument {
     sets: Vec<GpuTextureSet>,
+    /// Masks of the masked layers of every texture set (identifiers are project-wide).
+    masks: HashMap<LayerId, MaskTexture>,
     scratch: Scratch,
 }
 
@@ -218,7 +237,7 @@ fn same_for_channel(a: &Layer, b: &Layer, channel: Channel) -> bool {
         (true, true) => {}
         _ => return false,
     }
-    if a.channels.get(&channel) != b.channels.get(&channel) {
+    if a.channels.get(&channel) != b.channels.get(&channel) || a.mask != b.mask {
         return false;
     }
     match (&a.kind, &b.kind) {
@@ -261,6 +280,7 @@ fn view(pool: &TexturePool, id: TextureId) -> wgpu::TextureView {
 struct Evaluation<'a> {
     ctx: &'a GpuContext,
     compositor: &'a Compositor,
+    masks: &'a HashMap<LayerId, MaskTexture>,
     channel: Channel,
     kind: ChannelKind,
     size: u32,
@@ -282,6 +302,11 @@ impl Evaluation<'_> {
     ) {
         for layer in layers.iter().filter(|layer| affects(layer, self.channel)) {
             let blend = layer.channels[&self.channel];
+            let mask = layer
+                .mask
+                .as_ref()
+                .and_then(|_| self.masks.get(&layer.id))
+                .map(|mask| &mask.view);
             match &layer.kind {
                 LayerKind::Fill {
                     source: FillSource::Uniform(values),
@@ -294,6 +319,7 @@ impl Evaluation<'_> {
                         mode: blend.mode,
                         opacity: blend.opacity,
                         source: Source::Value(*value),
+                        mask,
                     };
                     self.blend(encoder, pool, pair, &step);
                 }
@@ -313,6 +339,7 @@ impl Evaluation<'_> {
                         mode: BlendMode::Normal,
                         opacity: blend.opacity,
                         source: Source::Texture(&inner_view),
+                        mask,
                     };
                     self.blend(encoder, pool, pair, &step);
                 }
@@ -361,6 +388,19 @@ impl GpuDocument {
         &self.sets
     }
 
+    /// The evaluated mask of layer `id` (an `R16Float` texture with mips), if it has one.
+    pub fn mask(&self, id: LayerId) -> Option<&wgpu::TextureView> {
+        self.masks.get(&id).map(|mask| &mask.view)
+    }
+
+    /// Memory of the mask textures, in bytes.
+    pub fn mask_memory(&self) -> u64 {
+        self.masks
+            .values()
+            .map(|mask| texture_bytes(&channel_descriptor(ChannelFormat::R16Float, mask.size)))
+            .sum()
+    }
+
     /// Releases every texture (the document was closed or replaced).
     pub fn clear(&mut self, pool: &mut TexturePool) {
         for set in self.sets.drain(..) {
@@ -368,13 +408,16 @@ impl GpuDocument {
                 release_channel(pool, channel);
             }
         }
+        for (_, mask) in self.masks.drain() {
+            pool.release(mask.texture);
+        }
         self.scratch.release(pool);
     }
 
     /// Brings the GPU textures in line with `project`: allocates, reallocates and
-    /// releases what changed, then evaluates the layer stacks from the first changed
-    /// layer of each channel. Returns the texture sets whose textures were replaced,
-    /// whose bind groups must be rebuilt.
+    /// releases what changed, evaluates the masks that changed, then evaluates the layer
+    /// stacks from the first changed layer of each channel. Returns the texture sets whose
+    /// channel or mask textures were replaced, whose bind groups must be rebuilt.
     pub fn sync(
         &mut self,
         ctx: &GpuContext,
@@ -390,8 +433,20 @@ impl GpuDocument {
             });
         // Texture sets of the project, in its order; the others are released.
         let mut previous = std::mem::take(&mut self.sets);
+        let mut masked = HashSet::new();
         for set in &project.texture_sets {
             let size = set.resolution.pixels();
+            if self.sync_masks(
+                ctx,
+                pool,
+                compositor,
+                &mut encoder,
+                &set.stack.layers,
+                size,
+                &mut masked,
+            ) {
+                changed.push(set.id);
+            }
             let mut old = previous
                 .iter()
                 .position(|gpu| gpu.id == set.id)
@@ -454,7 +509,7 @@ impl GpuDocument {
                 release_channel(pool, texture);
                 set_changed = true;
             }
-            if set_changed {
+            if set_changed && !changed.contains(&set.id) {
                 changed.push(set.id);
             }
             self.sets.push(GpuTextureSet {
@@ -467,8 +522,128 @@ impl GpuDocument {
                 release_channel(pool, texture);
             }
         }
+        // Masks of layers that were deleted or lost their mask.
+        self.masks.retain(|id, mask| {
+            let keep = masked.contains(id);
+            if !keep {
+                pool.release(mask.texture);
+            }
+            keep
+        });
         ctx.queue.submit([encoder.finish()]);
         changed
+    }
+
+    /// Evaluates the masks of `layers` and their descendants that changed since their last
+    /// evaluation, at `size`². Adds the masked layers to `masked`. Returns whether a mask
+    /// texture was allocated (its view is new).
+    #[allow(clippy::too_many_arguments)]
+    fn sync_masks(
+        &mut self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        compositor: &Compositor,
+        encoder: &mut wgpu::CommandEncoder,
+        layers: &[Layer],
+        size: u32,
+        masked: &mut HashSet<LayerId>,
+    ) -> bool {
+        let mut stacks = Vec::new();
+        for layer in layers {
+            layer.visit(&mut |layer| {
+                if let Some(mask) = &layer.mask {
+                    stacks.push((layer.id, mask));
+                }
+            });
+        }
+        let mut allocated = false;
+        for (id, stack) in stacks {
+            masked.insert(id);
+            let current = self.masks.remove(&id);
+            let alive = |pool: &mut TexturePool, mask: &MaskTexture| {
+                mask.size == size && pool.get(mask.texture).is_some()
+            };
+            let mut mask = match current {
+                Some(mask) if alive(pool, &mask) => {
+                    if mask.stack == *stack {
+                        self.masks.insert(id, mask);
+                        continue;
+                    }
+                    mask
+                }
+                other => {
+                    if let Some(old) = other {
+                        pool.release(old.texture);
+                    }
+                    let texture = pool.allocate(
+                        ctx,
+                        &channel_descriptor(ChannelFormat::R16Float, size),
+                        Residency::Discardable,
+                    );
+                    let view = pool
+                        .peek(texture)
+                        .expect("a texture that was just allocated")
+                        .create_view(&wgpu::TextureViewDescriptor::default());
+                    allocated = true;
+                    MaskTexture {
+                        stack: stack.clone(),
+                        size,
+                        texture,
+                        view,
+                    }
+                }
+            };
+            mask.stack = stack.clone();
+            self.evaluate_mask(ctx, pool, compositor, encoder, &mask);
+            self.masks.insert(id, mask);
+        }
+        allocated
+    }
+
+    /// Evaluates `mask.stack` into `mask.texture`, mips included.
+    fn evaluate_mask(
+        &mut self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        compositor: &Compositor,
+        encoder: &mut wgpu::CommandEncoder,
+        mask: &MaskTexture,
+    ) {
+        let target = pool
+            .peek(mask.texture)
+            .expect("mask textures are alive while evaluated");
+        let initial = [mask.stack.initial_value(); 4];
+        if mask.stack.effects.is_empty() {
+            clear_levels(encoder, target, initial, 0..target.mip_level_count());
+            return;
+        }
+        let format = wgpu::TextureFormat::R16Float;
+        let mut pair = (
+            self.scratch.get(ctx, pool, mask.size, format, 0),
+            self.scratch.get(ctx, pool, mask.size, format, 1),
+        );
+        let region = Region::full(mask.size);
+        clear_levels(
+            encoder,
+            pool.peek(pair.0).expect("allocated above"),
+            initial,
+            0..1,
+        );
+        for entry in &mask.stack.effects {
+            let (read, write) = (view(pool, pair.0), view(pool, pair.1));
+            let ping = Ping {
+                read: &read,
+                write: &write,
+            };
+            if compositor.mask_effect(ctx, encoder, ping, entry, &region) {
+                pair = (pair.1, pair.0);
+            }
+        }
+        let (Some(result), Some(target)) = (pool.peek(pair.0), pool.peek(mask.texture)) else {
+            return;
+        };
+        compositor.copy(encoder, result, target, &region);
+        compositor.build_mips(ctx, encoder, ChannelKind::Scalar, target);
     }
 
     /// Evaluates the composition of one channel if its layers changed since the last
@@ -507,6 +682,7 @@ impl GpuDocument {
         let evaluation = Evaluation {
             ctx,
             compositor,
+            masks: &self.masks,
             channel,
             kind,
             size: texture.size,

@@ -158,6 +158,7 @@ gpu_test!(
                             mode,
                             opacity,
                             source: Source::Value(*src),
+                            mask: None,
                         };
                         let gpu = run(&ctx, &compositor, kind, &dst, step, &region);
                         for (i, (g, d)) in gpu.iter().zip(&dst).enumerate() {
@@ -195,6 +196,7 @@ gpu_test!(
                 mode,
                 opacity: 0.8,
                 source: Source::Texture(&view),
+                mask: None,
             };
             let gpu = run(&ctx, &compositor, kind, &dst, step, &Region::full(SIZE));
             for ((g, d), s) in gpu.iter().zip(&dst).zip(&src) {
@@ -242,6 +244,7 @@ gpu_test!(
             mode: BlendMode::Normal,
             opacity: 1.0,
             source: Source::Value([0.75; 4]),
+            mask: None,
         };
         let mut encoder = ctx.device.create_command_encoder(&Default::default());
         compositor.blend(

@@ -1,10 +1,11 @@
-//! GPU passes of the compositor: blending one layer onto the composition, copying tiles,
-//! and building mips. Each blend is a fullscreen render pass that reads the current
+//! GPU passes of the compositor: blending one layer onto the composition, applying one
+//! effect of a mask, copying tiles, and building mips. Each blend is a fullscreen render pass that reads the current
 //! composition (texture A) and writes the next one (texture B); blending is texel-local,
 //! so a pass restricted to some tiles (scissor rectangles) only needs those tiles of A.
 
 use bytemuck::{Pod, Zeroable};
 use patine_core::layer::BlendMode;
+use patine_core::mask::{FilterKind, MaskEffect, MaskEffectEntry};
 use patine_gpu::{GpuContext, GpuError, wgpu};
 use wgpu::util::DeviceExt as _;
 
@@ -111,6 +112,8 @@ pub struct BlendStep<'a> {
     pub opacity: f32,
     /// Content.
     pub source: Source<'a>,
+    /// The layer's mask (an `R16Float` texture of the target size); `None` for none.
+    pub mask: Option<&'a wgpu::TextureView>,
 }
 
 /// The composition read by a pass and the texture it writes: single-level views of
@@ -129,6 +132,16 @@ pub struct Ping<'a> {
 struct BlendUniforms {
     src: [f32; 4],
     params: [f32; 4],
+}
+
+/// Uniforms of a mask effect pass. Must match `MaskStep` in
+/// `shaders/compositor/mask_effect.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct MaskUniforms {
+    params: [f32; 4],
+    levels: [f32; 4],
+    levels_out: [f32; 4],
 }
 
 /// GPU format holding channels of `kind`.
@@ -150,11 +163,14 @@ pub struct Compositor {
     downsample_layout: wgpu::BindGroupLayout,
     rgba: Pipelines,
     scalar: Pipelines,
-    /// Mask of the layers without mask (until M6): 1×1 white.
+    /// Mask effect pass (`R16Float`).
+    mask: wgpu::RenderPipeline,
+    /// Mask of the layers without mask: 1×1 white.
     white: wgpu::TextureView,
     /// Bound as the source texture of passes with a constant source.
     unused: wgpu::TextureView,
     passes: std::cell::Cell<u64>,
+    mask_passes: std::cell::Cell<u64>,
 }
 
 fn texture_entry(binding: u32) -> wgpu::BindGroupLayoutEntry {
@@ -234,6 +250,7 @@ impl Compositor {
         });
         let blend_module = ctx.create_shader_module("compositor/blend")?;
         let downsample_module = ctx.create_shader_module("compositor/downsample")?;
+        let mask_module = ctx.create_shader_module("compositor/mask_effect")?;
         let pipeline = |module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, format| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("compositor"),
@@ -273,12 +290,24 @@ impl Compositor {
         Ok(Self {
             rgba: pipelines(wgpu::TextureFormat::Rgba16Float),
             scalar: pipelines(wgpu::TextureFormat::R16Float),
+            // The mask pass has the layout of the downsample pass: uniforms and one texture.
+            mask: pipeline(
+                &mask_module,
+                &downsample_layout,
+                wgpu::TextureFormat::R16Float,
+            ),
             white: pixel(ctx, wgpu::TextureFormat::R16Float, 1.0),
             unused: pixel(ctx, wgpu::TextureFormat::R16Float, 0.0),
             blend_layout,
             downsample_layout,
             passes: std::cell::Cell::new(0),
+            mask_passes: std::cell::Cell::new(0),
         })
+    }
+
+    /// Number of mask effect passes encoded since creation (tests of the mask cache).
+    pub fn mask_passes(&self) -> u64 {
+        self.mask_passes.get()
     }
 
     /// Number of blend passes encoded since creation (tests of the lower cache).
@@ -345,7 +374,7 @@ impl Compositor {
                 },
                 wgpu::BindGroupEntry {
                     binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&self.white),
+                    resource: wgpu::BindingResource::TextureView(step.mask.unwrap_or(&self.white)),
                 },
             ],
         });
@@ -371,6 +400,89 @@ impl Compositor {
             pass.set_scissor_rect(x, y, width, height);
             pass.draw(0..3, 0..1);
         }
+    }
+
+    /// Encodes `ping.write = entry(ping.read)` on the tiles of `region`, for a mask
+    /// (`R16Float` textures). Returns `false` without encoding anything when the effect
+    /// leaves the mask unchanged: hidden, disabled, or evaluated in a later milestone
+    /// (see [`crate::reference::mask_source`]); the composition then stays in `ping.read`.
+    pub fn mask_effect(
+        &self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        ping: Ping<'_>,
+        entry: &MaskEffectEntry,
+        region: &Region,
+    ) -> bool {
+        if !entry.visible || entry.blend == BlendMode::Disable || region.is_empty() {
+            return false;
+        }
+        let mut uniforms = MaskUniforms {
+            params: [mode_index(entry.blend) as f32, entry.opacity, 0.0, 0.0],
+            levels: [0.0; 4],
+            levels_out: [0.0; 4],
+        };
+        match &entry.effect {
+            MaskEffect::Fill { .. } => match entry.effect.fill_value() {
+                Some(value) => uniforms.params[3] = value,
+                None => return false,
+            },
+            MaskEffect::Levels(levels) => {
+                uniforms.params[2] = 1.0;
+                uniforms.levels = [levels.in_low, levels.in_high, levels.gamma, levels.out_low];
+                uniforms.levels_out[0] = levels.out_high;
+            }
+            MaskEffect::Filter {
+                kind: FilterKind::Invert,
+                ..
+            } => uniforms.params[2] = 2.0,
+            _ => return false,
+        }
+        self.mask_passes.set(self.mask_passes.get() + 1);
+        let buffer = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("compositor mask"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compositor mask"),
+            layout: &self.downsample_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(ping.read),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("compositor mask"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: ping.write,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.mask);
+        pass.set_bind_group(0, &bind_group, &[]);
+        for [x, y, width, height] in region.rects() {
+            pass.set_scissor_rect(x, y, width, height);
+            pass.draw(0..3, 0..1);
+        }
+        true
     }
 
     /// Copies the tiles of `region` from mip 0 of `source` to mip 0 of `destination`

@@ -1,5 +1,6 @@
-//! Evaluation of layer stacks by GpuDocument: random stacks against the CPU reference,
-//! and the lower cache (only the edited layer and those above are blended again).
+//! Evaluation of layer stacks by GpuDocument: random stacks (with random masks) against
+//! the CPU reference, and the lower cache (only the edited layer and those above are
+//! blended again).
 
 use patine_compositor::compositor::Compositor;
 use patine_compositor::gpu_document::GpuDocument;
@@ -8,8 +9,9 @@ use patine_core::channel::Channel;
 use patine_core::command::Command;
 use patine_core::commands::SetFillValue;
 use patine_core::history::History;
-use patine_core::ids::LayerId;
+use patine_core::ids::{EffectId, LayerId};
 use patine_core::layer::{BlendMode, ChannelBlend, FillSource, Layer, LayerKind, Projection};
+use patine_core::mask::{LevelsParams, MaskEffect, MaskEffectEntry, MaskInitial, MaskStack};
 use patine_core::mesh::{MeshAsset, Submesh};
 use patine_core::project::{Project, ProjectSettings, Resolution, TextureSetId};
 use patine_gpu::pool::TexturePool;
@@ -99,6 +101,59 @@ fn within(gpu: [f32; 4], cpu: [f32; 4], channel: Channel) -> bool {
     (0..components).all(|i| (gpu[i] - cpu[i]).abs() <= cpu[i].abs().max(1.0) / 256.0)
 }
 
+/// A random mask effect: kind (0 fill, 1 levels, 2 invert), value or levels, blend.
+#[derive(Clone, Debug)]
+struct EffectSpec {
+    kind: u8,
+    value: f32,
+    /// in_low, input range, gamma, out_low, out_high.
+    levels: [f32; 5],
+    mode: usize,
+    opacity: f32,
+    visible: bool,
+}
+
+/// A random mask: white or black, then its effects.
+#[derive(Clone, Debug)]
+struct MaskSpec {
+    white: bool,
+    effects: Vec<EffectSpec>,
+}
+
+/// Masks of the random stacks. Levels keep an input range of at least 0.2 and a gamma in
+/// [0.5, 2]: a narrower range or a steeper curve multiplies the f16 rounding of the mask
+/// below without bound (each levels pass alone is checked over its whole range in
+/// tests/masks.rs).
+fn mask_spec() -> impl Strategy<Value = Option<MaskSpec>> {
+    let effect = (
+        0u8..3,
+        0.0f32..=1.0,
+        (
+            0.0f32..0.6,
+            0.2f32..0.4,
+            0.5f32..2.0,
+            0.0f32..=1.0,
+            0.0f32..=1.0,
+        ),
+        0..stack_modes().len(),
+        0.0f32..=1.0,
+        prop::bool::weighted(0.9),
+    )
+        .prop_map(|(kind, value, levels, mode, opacity, visible)| EffectSpec {
+            kind,
+            value,
+            levels: [levels.0, levels.1, levels.2, levels.3, levels.4],
+            mode,
+            opacity,
+            visible,
+        });
+    prop::option::weighted(
+        0.5,
+        (any::<bool>(), prop::collection::vec(effect, 0..4))
+            .prop_map(|(white, effects)| MaskSpec { white, effects }),
+    )
+}
+
 /// A random fill or folder, as data for the strategy.
 #[derive(Clone, Debug)]
 enum Node {
@@ -108,11 +163,13 @@ enum Node {
         mode: usize,
         opacity: f32,
         visible: bool,
+        mask: Option<MaskSpec>,
     },
     Folder {
         children: Vec<Node>,
         opacity: f32,
         disabled: bool,
+        mask: Option<MaskSpec>,
     },
 }
 
@@ -123,26 +180,68 @@ fn node() -> impl Strategy<Value = Node> {
         0..stack_modes().len(),
         0.0f32..=1.0,
         prop::bool::weighted(0.9),
+        mask_spec(),
     )
-        .prop_map(|(values, tilt, mode, opacity, visible)| Node::Fill {
+        .prop_map(|(values, tilt, mode, opacity, visible, mask)| Node::Fill {
             values,
             tilt,
             mode,
             opacity,
             visible,
+            mask,
         });
     fill.prop_recursive(2, 12, 4, |inner| {
         (
             prop::collection::vec(inner, 1..4),
             0.0f32..=1.0,
             prop::bool::weighted(0.1),
+            mask_spec(),
         )
-            .prop_map(|(children, opacity, disabled)| Node::Folder {
+            .prop_map(|(children, opacity, disabled, mask)| Node::Folder {
                 children,
                 opacity,
                 disabled,
+                mask,
             })
     })
+}
+
+/// Builds the mask of `spec`, with effect ids from `next`.
+fn mask(spec: &MaskSpec, next: &mut u64) -> MaskStack {
+    let effects = spec
+        .effects
+        .iter()
+        .map(|effect| {
+            *next += 1;
+            let [in_low, range, gamma, out_low, out_high] = effect.levels;
+            let operation = match effect.kind {
+                0 => MaskEffect::uniform(effect.value),
+                1 => MaskEffect::Levels(LevelsParams {
+                    in_low,
+                    in_high: in_low + range,
+                    gamma,
+                    out_low,
+                    out_high,
+                }),
+                _ => MaskEffect::invert(),
+            };
+            MaskEffectEntry {
+                id: EffectId(*next),
+                visible: effect.visible,
+                blend: stack_modes()[effect.mode],
+                opacity: effect.opacity,
+                effect: operation,
+            }
+        })
+        .collect();
+    MaskStack {
+        initial: if spec.white {
+            MaskInitial::White
+        } else {
+            MaskInitial::Black
+        },
+        effects,
+    }
 }
 
 /// Builds the layer of `node`, with ids from `next`.
@@ -156,6 +255,7 @@ fn layer(node: &Node, next: &mut u64) -> Layer {
             mode,
             opacity,
             visible,
+            mask: mask_spec,
         } => {
             let z = (1.0 - tilt[0] * tilt[0] - tilt[1] * tilt[1])
                 .max(0.1)
@@ -189,12 +289,14 @@ fn layer(node: &Node, next: &mut u64) -> Layer {
                 blend.opacity = *opacity;
             }
             layer.visible = *visible;
+            layer.mask = mask_spec.as_ref().map(|spec| mask(spec, next));
             layer
         }
         Node::Folder {
             children,
             opacity,
             disabled,
+            mask: mask_spec,
         } => {
             let children = children.iter().map(|child| layer(child, next)).collect();
             let mut folder = Layer::folder(id, "folder", &CHANNELS);
@@ -209,14 +311,16 @@ fn layer(node: &Node, next: &mut u64) -> Layer {
                     opacity: *opacity,
                 };
             }
+            folder.mask = mask_spec.as_ref().map(|spec| mask(spec, next));
             folder
         }
     }
 }
 
 gpu_test!(
-    /// Random stacks of fills and folders compose on the GPU like the CPU reference
-    /// (which stores every intermediate value in f16, as the GPU does).
+    /// Random stacks of masked fills and folders compose on the GPU like the CPU
+    /// reference (which stores every intermediate value in f16, as the GPU does): M6
+    /// acceptance criterion 1 for whole stacks.
     fn random_stacks_match_the_reference(ctx) {
         let compositor = Compositor::new(&ctx).expect("shaders compile");
         // The test runner takes a shared closure.
