@@ -78,7 +78,17 @@ impl EquirectImage {
 
     /// Loads an `.hdr` or `.exr` file (any format the `image` crate decodes).
     pub fn load(path: &Path) -> Result<Self, EnvironmentError> {
-        let image = image::open(path)?.into_rgb32f();
+        Self::from_image(image::open(path)?)
+    }
+
+    /// Decodes the contents of an `.hdr` or `.exr` file; the format is recognized from
+    /// the data, as for an environment stored in a project.
+    pub fn decode(bytes: &[u8]) -> Result<Self, EnvironmentError> {
+        Self::from_image(image::load_from_memory(bytes)?)
+    }
+
+    fn from_image(image: image::DynamicImage) -> Result<Self, EnvironmentError> {
+        let image = image.into_rgb32f();
         let (width, height) = image.dimensions();
         if width == 0 || height == 0 {
             return Err(EnvironmentError::Empty);
@@ -278,6 +288,16 @@ pub fn extract_dominant_light(sh: &Sh9) -> (DirectionalLight, Sh9) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn decoding_bytes_matches_loading_the_file() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../assets/environments/studio_small_08_1k.hdr");
+        let bytes = std::fs::read(&path).expect("bundled HDRI");
+        let decoded = EquirectImage::decode(&bytes).expect("decodes");
+        assert_eq!(decoded, EquirectImage::load(&path).expect("loads"));
+        assert!(EquirectImage::decode(b"not an image").is_err());
+    }
 
     #[test]
     fn equirect_mapping_round_trips() {

@@ -12,7 +12,9 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+use patine_core::environment::{EnvironmentSettings, EnvironmentSource};
 use patine_core::project::{Project, ProjectSettings};
+use patine_core::resource::ResourceHash;
 use patine_mesh::BuildOptions;
 use patine_render::camera::{OrbitCamera, Projection};
 use patine_render::mesh_gpu::GpuMesh;
@@ -20,7 +22,9 @@ use patine_render::viewport::{Scene, Viewport};
 
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
 use crate::cli::{StartupDialog, StartupOptions};
-use crate::display_panel::STUDIO_SKY_WIDTH;
+use crate::display_panel::EnvironmentView;
+use crate::document::{Document, DraftEnvironment, EnvironmentChange, environment_command};
+use crate::environment_sync::EnvironmentSync;
 use crate::i18n::{I18n, Language};
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, NewProjectDialog};
@@ -52,8 +56,12 @@ pub struct App {
     i18n: I18n,
     actions: ActionRegistry,
     ui: UiState,
-    /// The document. Replaced as a whole by New Project; edited through commands (M3).
-    project: Option<Project>,
+    /// The open document. Replaced as a whole by New Project; edited through commands.
+    document: Option<Document>,
+    /// Environment used without a project, and given to the next new project.
+    draft_environment: DraftEnvironment,
+    /// Decoding of the environment shown by the viewport.
+    environment_sync: EnvironmentSync,
     egui_ctx: egui::Context,
     graphics: Option<Graphics>,
     /// First fatal error; the event loop exits and `run` returns it.
@@ -79,7 +87,9 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
         i18n: I18n::new(options.language.unwrap_or_else(Language::system)),
         actions: ActionRegistry::default(),
         ui: UiState::default(),
-        project: None,
+        document: None,
+        draft_environment: DraftEnvironment::default(),
+        environment_sync: EnvironmentSync::default(),
         egui_ctx,
         graphics: None,
         error: None,
@@ -89,6 +99,7 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
             .map(|path| (path, options.capture_frames)),
         startup: options,
     };
+    app.apply_startup_environment()?;
     if let Some(path) = app.startup.mesh.clone() {
         let imported = patine_mesh::import(&path, BuildOptions::default())
             .with_context(|| format!("cannot import {}", path.display()))?;
@@ -129,6 +140,42 @@ fn save_capture(gpu: &GpuContext, texture: &wgpu::Texture, path: &Path) -> anyho
 }
 
 impl App {
+    /// Applies the environment options of the command line to the draft environment,
+    /// which the startup project then takes.
+    fn apply_startup_environment(&mut self) -> anyhow::Result<()> {
+        let options = self.startup.clone();
+        match &options.hdri {
+            Some(Some(path)) => {
+                let picked = crate::display_panel::read_hdri(path).map_err(|message| {
+                    anyhow::anyhow!("cannot load {}: {message}", path.display())
+                })?;
+                let hash = ResourceHash::of(&picked.bytes);
+                self.environment_sync.preload(
+                    &self.egui_ctx,
+                    EnvironmentSource::Resource(hash),
+                    picked.image,
+                );
+                self.draft_environment.apply(EnvironmentChange::Imported {
+                    name: picked.name,
+                    bytes: picked.bytes,
+                });
+            }
+            Some(None) => self
+                .draft_environment
+                .apply(EnvironmentChange::Source(EnvironmentSource::Studio)),
+            None => {}
+        }
+        if let Some(rotation) = options.rotation {
+            self.draft_environment
+                .apply(EnvironmentChange::Rotation(rotation.to_radians()));
+        }
+        if let Some(exposure) = options.exposure {
+            self.draft_environment
+                .apply(EnvironmentChange::Exposure(exposure));
+        }
+        Ok(())
+    }
+
     /// Applies the view options of the command line.
     fn apply_startup_options(&mut self) -> anyhow::Result<()> {
         let options = self.startup.clone();
@@ -139,29 +186,7 @@ impl App {
             }
         }
         let view = &mut self.ui.view;
-        match &options.hdri {
-            Some(Some(path)) => {
-                let image = patine_render::environment::EquirectImage::load(path)
-                    .with_context(|| format!("cannot load {}", path.display()))?;
-                view.environment.name = path
-                    .file_name()
-                    .map(|name| name.to_string_lossy().into_owned());
-                view.environment.pending = Some(image);
-            }
-            Some(None) => {
-                view.environment.name = None;
-                view.environment.pending =
-                    Some(patine_render::environment::studio_sky(STUDIO_SKY_WIDTH));
-            }
-            None => {}
-        }
         let settings = &mut view.settings;
-        if let Some(rotation) = options.rotation {
-            settings.environment_rotation = rotation.to_radians();
-        }
-        if let Some(exposure) = options.exposure {
-            settings.exposure_ev = exposure;
-        }
         if let Some(tone_mapper) = options.tone_mapper {
             settings.tone_mapper = tone_mapper;
         }
@@ -207,7 +232,15 @@ impl App {
         ActionContext {
             profiler_enabled: self.profiler.is_enabled(),
             language: self.i18n.language(),
-            has_project: self.project.is_some(),
+            has_project: self.document.is_some(),
+            can_undo: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.history.can_undo()),
+            can_redo: self
+                .document
+                .as_ref()
+                .is_some_and(|document| document.history.can_redo()),
             orthographic: view.camera.projection == Projection::Orthographic,
             wireframe: view.settings.wireframe,
             shadows: view.settings.shadows,
@@ -273,9 +306,9 @@ impl App {
         );
         let viewport = Viewport::new(&gpu).context("failed to create the viewport")?;
         let gpu_mesh = self
-            .project
+            .document
             .as_ref()
-            .and_then(|project| upload_mesh(&gpu, &viewport, &project.mesh));
+            .and_then(|document| upload_mesh(&gpu, &viewport, &document.project.mesh));
 
         Ok(Graphics {
             window,
@@ -292,10 +325,73 @@ impl App {
         })
     }
 
-    /// Replaces the document by a new project. This is not an undoable command: the
-    /// history starts over with the new document.
+    /// The environment shown now: the document's, or the draft without a project.
+    fn environment(&self) -> &EnvironmentSettings {
+        match &self.document {
+            Some(document) => &document.project.environment,
+            None => &self.draft_environment.settings,
+        }
+    }
+
+    /// The current environment as a draft, to give to a new project.
+    fn environment_draft(&self) -> DraftEnvironment {
+        match &self.document {
+            Some(document) => {
+                let settings = document.project.environment.clone();
+                let resources = match &settings.source {
+                    EnvironmentSource::Resource(hash) => document
+                        .project
+                        .resources
+                        .get(hash)
+                        .map(|resource| (*hash, resource.clone()))
+                        .into_iter()
+                        .collect(),
+                    _ => Default::default(),
+                };
+                DraftEnvironment {
+                    settings,
+                    resources,
+                }
+            }
+            None => self.draft_environment.clone(),
+        }
+    }
+
+    /// Display name of the current environment.
+    fn environment_name(&self) -> String {
+        let resources = match &self.document {
+            Some(document) => &document.project.resources,
+            None => &self.draft_environment.resources,
+        };
+        match &self.environment().source {
+            EnvironmentSource::Studio => self.i18n.tr("display-environment-studio").into_owned(),
+            EnvironmentSource::Bundled(name) => name.clone(),
+            EnvironmentSource::Resource(hash) => resources
+                .get(hash)
+                .map_or_else(|| hash.to_string(), |resource| resource.name.clone()),
+        }
+    }
+
+    /// Applies an environment change: a command on the document, or a direct change of
+    /// the draft without a project.
+    fn change_environment(&mut self, change: EnvironmentChange) {
+        match &mut self.document {
+            Some(document) => {
+                let command = environment_command(&document.project.environment, change);
+                document.execute(command);
+            }
+            None => self.draft_environment.apply(change),
+        }
+    }
+
+    /// Replaces the document by a new project, which takes the current environment. This
+    /// is not an undoable command: the history starts over with the new document.
     fn open_project(&mut self, created: CreatedProject) {
-        let CreatedProject { project, report } = created;
+        let CreatedProject {
+            mut project,
+            report,
+        } = created;
+        self.environment_draft().install(&mut project);
         let mesh = &project.mesh;
         tracing::info!(
             name = %mesh.name,
@@ -343,7 +439,8 @@ impl App {
         }
         // Framed at the next render, when the panel size is known.
         self.ui.view.frame_pending = true;
-        self.project = Some(project);
+        self.ui.renaming = None;
+        self.document = Some(Document::new(project));
     }
 
     fn execute(&mut self, action: ActionId, event_loop: &ActiveEventLoop) {
@@ -364,7 +461,11 @@ impl App {
             ActionId::LanguageFrench => self.i18n = I18n::new(Language::French),
             ActionId::About => self.ui.show_about = true,
             ActionId::FrameMesh => {
-                if let Some(bounds) = self.project.as_ref().and_then(|p| p.mesh.bounds()) {
+                if let Some(bounds) = self
+                    .document
+                    .as_ref()
+                    .and_then(|document| document.project.mesh.bounds())
+                {
                     let aspect = self.ui.view.aspect();
                     self.ui.view.camera.frame(&bounds, aspect);
                 }
@@ -384,6 +485,47 @@ impl App {
                 let settings = &mut self.ui.view.settings;
                 settings.shadows = !settings.shadows;
             }
+            ActionId::Undo => {
+                if let Some(document) = &mut self.document {
+                    document.undo();
+                }
+            }
+            ActionId::Redo => {
+                if let Some(document) = &mut self.document {
+                    document.redo();
+                }
+            }
+        }
+        if let Some(gfx) = &self.graphics {
+            gfx.window.request_redraw();
+        }
+    }
+
+    /// Executes what the interface asked for this frame: a new project, commands and
+    /// environment changes.
+    fn apply_ui_output(&mut self, output: ui::UiOutput) {
+        if let Some(created) = output.created_project {
+            self.open_project(created);
+        }
+        if let Some(picked) = output.picked_hdri {
+            // Already decoded: the viewport uses it without decoding the file again.
+            let hash = ResourceHash::of(&picked.bytes);
+            self.environment_sync.preload(
+                &self.egui_ctx,
+                EnvironmentSource::Resource(hash),
+                picked.image,
+            );
+        }
+        if let Some(change) = output.environment {
+            self.change_environment(change);
+        }
+        if let Some(document) = &mut self.document {
+            for command in output.commands {
+                document.execute(command);
+            }
+            if output.seal {
+                document.history.seal();
+            }
         }
         if let Some(gfx) = &self.graphics {
             gfx.window.request_redraw();
@@ -395,7 +537,20 @@ impl App {
         let Some(gfx) = self.graphics.as_mut() else {
             return;
         };
+        // The GPU follows the document: environment image, rotation and exposure.
+        let (wanted, resources) = match &self.document {
+            Some(document) => (&document.project.environment, &document.project.resources),
+            None => (
+                &self.draft_environment.settings,
+                &self.draft_environment.resources,
+            ),
+        };
+        let decoded = self
+            .environment_sync
+            .update(&self.egui_ctx, &wanted.source, resources);
         let view = &mut self.ui.view;
+        view.settings.environment_rotation = wanted.rotation;
+        view.settings.exposure_ev = wanted.exposure_ev;
         // Frame once the panel size has settled (the same two frames in a row): the first
         // layouts of a new window or dock can report intermediate sizes.
         let size_settled = view.size == view.previous_size && view.size[0] > 1 && view.size[1] > 1;
@@ -405,7 +560,11 @@ impl App {
         }
         if view.frame_pending && size_settled {
             view.frame_pending = false;
-            if let Some(bounds) = self.project.as_ref().and_then(|p| p.mesh.bounds()) {
+            if let Some(bounds) = self
+                .document
+                .as_ref()
+                .and_then(|document| document.project.mesh.bounds())
+            {
                 let aspect = view.aspect();
                 view.camera.frame(&bounds, aspect);
                 if let Some(zoom) = self.startup.zoom.take() {
@@ -413,7 +572,7 @@ impl App {
                 }
             }
         }
-        if let Some(image) = view.environment.pending.take() {
+        if let Some(image) = decoded {
             puffin::profile_scope!("environment");
             let start = Instant::now();
             match gfx.viewport.set_environment(&gfx.gpu, &image) {
@@ -425,7 +584,7 @@ impl App {
                 ),
                 Err(error) => {
                     tracing::error!(%error, "environment processing failed");
-                    view.environment.error = Some(error.to_string());
+                    self.environment_sync.error = Some(error.to_string());
                 }
             }
         }
@@ -491,6 +650,7 @@ impl App {
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         puffin::profile_function!();
         let action_context = self.action_context();
+        let environment_name = self.environment_name();
         let Some(gfx) = self.graphics.as_mut() else {
             return;
         };
@@ -500,7 +660,7 @@ impl App {
 
         let raw_input = gfx.egui_state.take_egui_input(&gfx.window);
         let mut triggered = Vec::new();
-        let mut created_project = None;
+        let mut outputs = Vec::new();
         let info = FrameInfo {
             i18n: &self.i18n,
             actions: &self.actions,
@@ -508,8 +668,17 @@ impl App {
             logs: &self.logs,
             gpu_name: &gfx.gpu_name,
             gpu_backend: &gfx.gpu_backend,
-            project: self.project.as_ref(),
+            project: self.document.as_ref().map(|document| &document.project),
             hovered: self.ui.view.hovered,
+            environment: EnvironmentView {
+                settings: match &self.document {
+                    Some(document) => &document.project.environment,
+                    None => &self.draft_environment.settings,
+                },
+                name: environment_name,
+                loading: self.environment_sync.loading(),
+                error: self.environment_sync.error.as_deref(),
+            },
         };
         let ui_state = &mut self.ui;
         let actions = &self.actions;
@@ -519,9 +688,9 @@ impl App {
             triggered.extend(ui.ctx().input_mut(|input| {
                 actions.triggered_by_shortcuts(input, &action_context, text_focus)
             }));
-            let output = ui::show(ui, ui_state, &info);
-            triggered.extend(output.actions);
-            created_project = created_project.take().or(output.created_project);
+            let mut output = ui::show(ui, ui_state, &info);
+            triggered.append(&mut output.actions);
+            outputs.push(output);
         });
         if let Some(pixel) = self.startup.hover {
             self.ui.view.hover_pixel = Some(pixel);
@@ -535,6 +704,11 @@ impl App {
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .map(|viewport| viewport.repaint_delay);
+
+        // Document changes of this frame, before rendering it.
+        for output in outputs {
+            self.apply_ui_output(output);
+        }
 
         // The 3D image of this frame, with the camera moved by this frame's input.
         self.render_viewport();
@@ -565,9 +739,6 @@ impl App {
         }
         self.profiler.new_frame();
 
-        if let Some(created) = created_project {
-            self.open_project(created);
-        }
         for action in triggered {
             self.execute(action, event_loop);
         }

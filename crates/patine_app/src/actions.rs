@@ -30,6 +30,10 @@ pub enum ActionId {
     ToggleWireframe,
     /// Enable or disable shadows.
     ToggleShadows,
+    /// Undo the last command.
+    Undo,
+    /// Redo the last undone command.
+    Redo,
 }
 
 /// Application state that actions read to decide whether they are enabled or checked.
@@ -47,6 +51,10 @@ pub struct ActionContext {
     pub wireframe: bool,
     /// Whether shadows are enabled.
     pub shadows: bool,
+    /// Whether the history has a command to undo.
+    pub can_undo: bool,
+    /// Whether the history has a command to redo.
+    pub can_redo: bool,
 }
 
 /// Declaration of an action.
@@ -64,6 +72,9 @@ pub struct Action {
     pub enabled: fn(&ActionContext) -> bool,
     /// For toggles: whether the action is currently on.
     pub checked: Option<fn(&ActionContext) -> bool>,
+    /// Whether a focused text field keeps the shortcut even with a modifier (Ctrl+Z
+    /// undoes the typing, not the document).
+    pub yields_to_text: bool,
 }
 
 fn always(_: &ActionContext) -> bool {
@@ -87,6 +98,7 @@ impl Default for ActionRegistry {
                     shortcut: Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::N)),
                     enabled: always,
                     checked: None,
+                    yields_to_text: false,
                 },
                 Action {
                     id: ActionId::Quit,
@@ -95,6 +107,7 @@ impl Default for ActionRegistry {
                     shortcut: Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::Q)),
                     enabled: always,
                     checked: None,
+                    yields_to_text: false,
                 },
                 Action {
                     id: ActionId::ResetLayout,
@@ -103,6 +116,7 @@ impl Default for ActionRegistry {
                     shortcut: None,
                     enabled: always,
                     checked: None,
+                    yields_to_text: false,
                 },
                 Action {
                     id: ActionId::ToggleProfiler,
@@ -114,6 +128,7 @@ impl Default for ActionRegistry {
                     )),
                     enabled: always,
                     checked: Some(|ctx| ctx.profiler_enabled),
+                    yields_to_text: false,
                 },
                 Action {
                     id: ActionId::LanguageEnglish,
@@ -122,6 +137,7 @@ impl Default for ActionRegistry {
                     shortcut: None,
                     enabled: always,
                     checked: Some(|ctx| ctx.language == Language::English),
+                    yields_to_text: false,
                 },
                 Action {
                     id: ActionId::LanguageFrench,
@@ -130,6 +146,7 @@ impl Default for ActionRegistry {
                     shortcut: None,
                     enabled: always,
                     checked: Some(|ctx| ctx.language == Language::French),
+                    yields_to_text: false,
                 },
                 Action {
                     id: ActionId::About,
@@ -138,6 +155,7 @@ impl Default for ActionRegistry {
                     shortcut: None,
                     enabled: always,
                     checked: None,
+                    yields_to_text: false,
                 },
                 Action {
                     id: ActionId::FrameMesh,
@@ -146,6 +164,7 @@ impl Default for ActionRegistry {
                     shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::F)),
                     enabled: |ctx| ctx.has_project,
                     checked: None,
+                    yields_to_text: false,
                 },
                 Action {
                     id: ActionId::ToggleProjection,
@@ -154,6 +173,7 @@ impl Default for ActionRegistry {
                     shortcut: None,
                     enabled: always,
                     checked: Some(|ctx| ctx.orthographic),
+                    yields_to_text: false,
                 },
                 Action {
                     id: ActionId::ToggleWireframe,
@@ -162,6 +182,7 @@ impl Default for ActionRegistry {
                     shortcut: None,
                     enabled: always,
                     checked: Some(|ctx| ctx.wireframe),
+                    yields_to_text: false,
                 },
                 Action {
                     id: ActionId::ToggleShadows,
@@ -170,6 +191,25 @@ impl Default for ActionRegistry {
                     shortcut: None,
                     enabled: always,
                     checked: Some(|ctx| ctx.shadows),
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::Undo,
+                    name: "edit.undo",
+                    label_key: "action-edit-undo",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::Z)),
+                    enabled: |ctx| ctx.can_undo,
+                    checked: None,
+                    yields_to_text: true,
+                },
+                Action {
+                    id: ActionId::Redo,
+                    name: "edit.redo",
+                    label_key: "action-edit-redo",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::Y)),
+                    enabled: |ctx| ctx.can_redo,
+                    checked: None,
+                    yields_to_text: true,
                 },
             ],
         }
@@ -193,7 +233,8 @@ impl ActionRegistry {
     /// Consumes the shortcuts pressed this frame and returns the enabled actions they trigger.
     ///
     /// While a text field has the keyboard (`text_focus`), shortcuts without a modifier are
-    /// left to the text field: typing an "f" must not frame the mesh.
+    /// left to the text field (typing an "f" must not frame the mesh), and so are the
+    /// actions that yield to text (Ctrl+Z undoes the typing).
     pub fn triggered_by_shortcuts(
         &self,
         input: &mut egui::InputState,
@@ -204,7 +245,7 @@ impl ActionRegistry {
             .iter()
             .filter(|action| {
                 action.shortcut.is_some_and(|shortcut| {
-                    !(text_focus && shortcut.modifiers.is_none())
+                    !(text_focus && (shortcut.modifiers.is_none() || action.yields_to_text))
                         && input.consume_shortcut(&shortcut)
                 }) && (action.enabled)(context)
             })
@@ -262,6 +303,8 @@ mod tests {
             ActionId::ToggleProjection,
             ActionId::ToggleWireframe,
             ActionId::ToggleShadows,
+            ActionId::Undo,
+            ActionId::Redo,
         ] {
             assert_eq!(registry.get(id).id, id);
         }
@@ -325,5 +368,26 @@ mod tests {
     fn disabled_actions_do_not_trigger() {
         // Framing needs a project.
         assert!(press(Key::F, Modifiers::NONE, &ActionContext::default(), false).is_empty());
+        // Undo needs something to undo.
+        assert!(press(Key::Z, Modifiers::COMMAND, &ActionContext::default(), false).is_empty());
+    }
+
+    #[test]
+    fn undo_is_left_to_a_focused_text_field() {
+        let context = ActionContext {
+            can_undo: true,
+            can_redo: true,
+            ..ActionContext::default()
+        };
+        assert_eq!(
+            press(Key::Z, Modifiers::COMMAND, &context, false),
+            [ActionId::Undo]
+        );
+        assert_eq!(
+            press(Key::Y, Modifiers::COMMAND, &context, false),
+            [ActionId::Redo]
+        );
+        assert!(press(Key::Z, Modifiers::COMMAND, &context, true).is_empty());
+        assert!(press(Key::Y, Modifiers::COMMAND, &context, true).is_empty());
     }
 }

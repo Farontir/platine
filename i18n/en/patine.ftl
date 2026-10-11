@@ -5,6 +5,7 @@ app-title = Patine
 
 ## Menus
 menu-file = File
+menu-edit = Edit
 menu-view = View
 menu-language = Language
 menu-help = Help
@@ -21,6 +22,8 @@ action-debug-toggle-profiler = Profiler
 action-language-english = English
 action-language-french = Français
 action-help-about = About Patine
+action-edit-undo = Undo
+action-edit-redo = Redo
 
 ## Panels
 panel-viewport-3d = 3D Viewport
@@ -74,6 +77,7 @@ texture-sets-mesh = { $name }: { $triangles } triangles, { $vertices } vertices
 texture-sets-name = Texture set
 texture-sets-resolution = Resolution
 texture-sets-triangles = Triangles
+texture-sets-rename-hint = Double-click to rename
 
 ## Mesh import errors
 error-mesh-io = Cannot read { $path }: { $message }
@@ -112,3 +116,19 @@ display-base-color = Base color
 display-metallic = Metallic
 display-roughness = Roughness
 error-environment = Cannot load the environment: { $message }
+
+## History
+command-rename-texture-set = Rename texture set to “{ $name }”
+command-texture-set-resolution = Texture set resolution: { $resolution }
+command-environment-source = Change environment
+command-environment-rotation = Rotate environment
+command-environment-exposure = Exposure
+command-add-layer = Add layer “{ $name }”
+command-remove-layer = Delete layer “{ $name }”
+command-move-layer = Move layer “{ $name }”
+command-rename-layer = Rename layer to “{ $name }”
+command-show-layer = Show layer “{ $name }”
+command-hide-layer = Hide layer “{ $name }”
+command-channel-blend = { $channel } blending of “{ $name }”
+history-initial = Project opened
+history-truncated = Older steps released (memory budget)

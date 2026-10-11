@@ -5,6 +5,7 @@ app-title = Patine
 
 ## Menus
 menu-file = Fichier
+menu-edit = Édition
 menu-view = Affichage
 menu-language = Langue
 menu-help = Aide
@@ -21,6 +22,8 @@ action-debug-toggle-profiler = Profileur
 action-language-english = English
 action-language-french = Français
 action-help-about = À propos de Patine
+action-edit-undo = Annuler
+action-edit-redo = Rétablir
 
 ## Panels
 panel-viewport-3d = Vue 3D
@@ -74,6 +77,7 @@ texture-sets-mesh = { $name } : { $triangles } triangles, { $vertices } sommets
 texture-sets-name = Texture set
 texture-sets-resolution = Résolution
 texture-sets-triangles = Triangles
+texture-sets-rename-hint = Double-cliquez pour renommer
 
 ## Mesh import errors
 error-mesh-io = Impossible de lire { $path } : { $message }
@@ -112,3 +116,19 @@ display-base-color = Couleur de base
 display-metallic = Metallic
 display-roughness = Roughness
 error-environment = Impossible de charger l'environnement : { $message }
+
+## History
+command-rename-texture-set = Renommer le texture set en « { $name } »
+command-texture-set-resolution = Résolution du texture set : { $resolution }
+command-environment-source = Changer d'environnement
+command-environment-rotation = Rotation de l'environnement
+command-environment-exposure = Exposition
+command-add-layer = Ajouter le calque « { $name } »
+command-remove-layer = Supprimer le calque « { $name } »
+command-move-layer = Déplacer le calque « { $name } »
+command-rename-layer = Renommer le calque en « { $name } »
+command-show-layer = Afficher le calque « { $name } »
+command-hide-layer = Masquer le calque « { $name } »
+command-channel-blend = Mélange du canal { $channel } de « { $name } »
+history-initial = Ouverture du projet
+history-truncated = Étapes plus anciennes libérées (budget mémoire)

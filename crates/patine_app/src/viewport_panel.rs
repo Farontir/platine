@@ -1,6 +1,7 @@
 //! The 3D viewport panel: shows the image rendered by `patine_render` and turns mouse
 //! input into camera moves. The camera and display settings are view state, not
-//! document data.
+//! document data; rotating the environment changes the document, so it is returned to
+//! the application as a change.
 
 use egui::{PointerButton, Sense, Ui};
 use patine_render::camera::OrbitCamera;
@@ -99,9 +100,20 @@ pub fn drag_gesture(
     }
 }
 
+/// Environment rotation asked by the viewport this frame.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct ViewportOutput {
+    /// New environment rotation, radians.
+    pub environment_rotation: Option<f32>,
+    /// A drag ended: the next change starts a new history entry.
+    pub seal: bool,
+}
+
 impl ViewState {
-    /// Applies a gesture; `pixels_per_point` converts egui points to image pixels.
-    pub fn apply(&mut self, gesture: Gesture, pixels_per_point: f32) {
+    /// Applies a gesture; `pixels_per_point` converts egui points to image pixels. Camera
+    /// gestures move the camera; an environment rotation is returned (the environment
+    /// belongs to the document), and also shown at once.
+    pub fn apply(&mut self, gesture: Gesture, pixels_per_point: f32) -> Option<f32> {
         match gesture {
             Gesture::Orbit(delta) => self
                 .camera
@@ -113,16 +125,19 @@ impl ViewState {
             ),
             Gesture::Zoom(factor) => self.camera.zoom(factor),
             Gesture::RotateEnvironment(dx) => {
-                self.settings.environment_rotation = (self.settings.environment_rotation
-                    + dx * ENVIRONMENT_SPEED)
+                let rotation = (self.settings.environment_rotation + dx * ENVIRONMENT_SPEED)
                     .rem_euclid(std::f32::consts::TAU);
+                self.settings.environment_rotation = rotation;
+                return Some(rotation);
             }
         }
+        None
     }
 }
 
 /// Draws the viewport panel and applies the mouse input of this frame.
-pub fn show(ui: &mut Ui, view: &mut ViewState) {
+pub fn show(ui: &mut Ui, view: &mut ViewState) -> ViewportOutput {
+    let mut output = ViewportOutput::default();
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let pixels_per_point = ui.ctx().pixels_per_point();
@@ -144,14 +159,17 @@ pub fn show(ui: &mut Ui, view: &mut ViewState) {
     ] {
         if response.dragged_by(button)
             && let Some(gesture) = drag_gesture(button, modifiers, response.drag_delta())
+            && let Some(rotation) = view.apply(gesture, pixels_per_point)
         {
-            view.apply(gesture, pixels_per_point);
+            output.environment_rotation = Some(rotation);
         }
     }
+    output.seal = response.drag_stopped();
     if response.hovered() {
         let scroll = ui.input(|input| input.smooth_scroll_delta.y);
         if scroll != 0.0 {
-            view.apply(
+            // Zooming never returns an environment rotation.
+            let _ = view.apply(
                 Gesture::Zoom((-scroll * WHEEL_ZOOM_SPEED).exp()),
                 pixels_per_point,
             );
@@ -161,6 +179,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState) {
         let local = (pos - rect.min) * pixels_per_point;
         [local.x.max(0.0) as u32, local.y.max(0.0) as u32]
     });
+    output
 }
 
 #[cfg(test)]
@@ -206,14 +225,16 @@ mod tests {
             egui::Modifiers::ALT,
             egui::vec2(0.0, 50.0),
         );
-        view.apply(gesture.unwrap(), 1.0);
+        assert_eq!(view.apply(gesture.unwrap(), 1.0), None);
         assert!(view.camera.distance > start);
     }
 
     #[test]
     fn environment_rotation_wraps() {
         let mut view = ViewState::default();
-        view.apply(Gesture::RotateEnvironment(-10.0), 1.0);
-        assert!((0.0..std::f32::consts::TAU).contains(&view.settings.environment_rotation));
+        let rotation = view.apply(Gesture::RotateEnvironment(-10.0), 1.0);
+        let rotation = rotation.expect("an environment rotation is returned");
+        assert!((0.0..std::f32::consts::TAU).contains(&rotation));
+        assert_eq!(view.settings.environment_rotation, rotation);
     }
 }

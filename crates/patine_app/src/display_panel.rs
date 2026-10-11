@@ -1,41 +1,72 @@
 //! Display Settings panel: environment, exposure, tone mapping, background, overlays,
 //! projection and the preview material.
 //!
-//! HDRI files are picked and decoded on a worker thread; the application then processes
-//! the image on the GPU (see [`ViewState::pending_environment`]).
+//! The environment belongs to the document: the panel shows it and returns the changes
+//! the user asks for. HDRI files are picked and decoded on a worker thread.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::mpsc::{Receiver, TryRecvError};
 
 use egui::Ui;
 use fluent_bundle::FluentArgs;
+use patine_core::environment::{EnvironmentSettings, EnvironmentSource};
 use patine_render::camera::Projection;
-use patine_render::environment::{EquirectImage, studio_sky};
+use patine_render::environment::EquirectImage;
 use patine_render::settings::{Background, ToneMapper};
 
+use crate::document::EnvironmentChange;
 use crate::i18n::I18n;
 use crate::viewport_panel::ViewState;
 
 /// Width of the procedural studio sky used by the application.
 pub const STUDIO_SKY_WIDTH: u32 = 1024;
 
-/// Result of the loading thread: `None` when the file dialog was cancelled, otherwise the
-/// file name and decoded image, or an error message.
-type LoadOutcome = Option<Result<(String, EquirectImage), String>>;
+/// An HDRI picked by the user: file name, contents and decoded image.
+pub struct PickedHdri {
+    /// File name.
+    pub name: String,
+    /// File contents, stored in the project.
+    pub bytes: Arc<[u8]>,
+    /// Decoded image, so that the viewport does not decode it again.
+    pub image: EquirectImage,
+}
 
-/// Environment loading state, kept in [`ViewState`].
+/// Result of the import thread: `None` when the file dialog was cancelled.
+type ImportOutcome = Option<Result<PickedHdri, String>>;
+
+/// Import state of the panel, kept in [`ViewState`].
 #[derive(Default)]
 pub struct EnvironmentState {
-    /// Display name of the current environment; `None` for the procedural studio sky.
-    pub name: Option<String>,
-    /// File being picked and decoded.
-    task: Option<Receiver<LoadOutcome>>,
-    /// Message of the last failure.
-    pub error: Option<String>,
-    /// Decoded image waiting for the application to process it on the GPU.
-    pub pending: Option<EquirectImage>,
+    /// File being picked, read and decoded.
+    task: Option<Receiver<ImportOutcome>>,
+    /// Message of the last failed import.
+    error: Option<String>,
     /// HDRIs shipped in `assets/environments`, found on first display.
     bundled: Option<Vec<PathBuf>>,
+}
+
+/// The environment as the panel shows it.
+pub struct EnvironmentView<'a> {
+    /// Current settings (document or draft).
+    pub settings: &'a EnvironmentSettings,
+    /// Display name of the current source.
+    pub name: String,
+    /// Whether the viewport is decoding the environment.
+    pub loading: bool,
+    /// Last decoding error of the viewport.
+    pub error: Option<&'a str>,
+}
+
+/// What the panel asks for this frame.
+#[derive(Default)]
+pub struct DisplayOutput {
+    /// Environment change.
+    pub change: Option<EnvironmentChange>,
+    /// A picked HDRI, already decoded; `change` imports it.
+    pub picked: Option<PickedHdri>,
+    /// The current gesture ended: the next change starts a new history entry.
+    pub seal: bool,
 }
 
 /// The `assets/environments` directory: `PATINE_ASSETS`, next to the executable, or the
@@ -81,51 +112,59 @@ fn file_name(path: &std::path::Path) -> String {
 impl std::fmt::Debug for EnvironmentState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("EnvironmentState")
-            .field("name", &self.name)
-            .field("loading", &self.task.is_some())
+            .field("importing", &self.task.is_some())
             .field("error", &self.error)
             .finish()
     }
 }
 
+/// Reads and decodes the HDRI at `path`.
+pub fn read_hdri(path: &std::path::Path) -> Result<PickedHdri, String> {
+    let bytes: Arc<[u8]> = std::fs::read(path)
+        .map_err(|error| format!("{}: {error}", path.display()))?
+        .into();
+    let image = EquirectImage::decode(&bytes).map_err(|error| error.to_string())?;
+    Ok(PickedHdri {
+        name: file_name(path),
+        bytes,
+        image,
+    })
+}
+
 impl EnvironmentState {
-    fn poll(&mut self) {
-        let Some(task) = &self.task else {
-            return;
-        };
+    fn poll(&mut self) -> Option<PickedHdri> {
+        let task = self.task.as_ref()?;
         match task.try_recv() {
-            Ok(Some(Ok((name, image)))) => {
-                self.name = Some(name);
-                self.pending = Some(image);
+            Ok(Some(Ok(picked))) => {
                 self.error = None;
                 self.task = None;
+                Some(picked)
             }
             Ok(Some(Err(message))) => {
                 self.error = Some(message);
                 self.task = None;
+                None
             }
             // Dialog cancelled, or the thread ended.
-            Ok(None) | Err(TryRecvError::Disconnected) => self.task = None,
-            Err(TryRecvError::Empty) => {}
+            Ok(None) | Err(TryRecvError::Disconnected) => {
+                self.task = None;
+                None
+            }
+            Err(TryRecvError::Empty) => None,
         }
     }
 
-    /// Decodes `path`, or a file picked in a native dialog when `path` is `None`, on a
-    /// worker thread.
-    fn load(&mut self, ctx: &egui::Context, path: Option<PathBuf>, filter_name: String) {
+    /// Picks a file in a native dialog, then reads and decodes it on a worker thread.
+    fn import(&mut self, ctx: &egui::Context, filter_name: String) {
         let (sender, receiver) = std::sync::mpsc::channel();
         let ctx = ctx.clone();
         std::thread::spawn(move || {
-            let path = path.or_else(|| {
-                rfd::FileDialog::new()
-                    .add_filter(filter_name, &["hdr", "exr"])
-                    .pick_file()
-            });
+            let path = rfd::FileDialog::new()
+                .add_filter(filter_name, &["hdr", "exr"])
+                .pick_file();
             let result = path.map(|path| {
-                tracing::info!(path = %path.display(), "loading environment");
-                EquirectImage::load(&path)
-                    .map(|image| (file_name(&path), image))
-                    .map_err(|error| error.to_string())
+                tracing::info!(path = %path.display(), "importing environment");
+                read_hdri(&path)
             });
             // The panel may be gone; nobody listens then.
             let _ = sender.send(result);
@@ -141,6 +180,11 @@ impl EnvironmentState {
                 .unwrap_or_default()
         })
     }
+}
+
+/// Whether the edit of `response` ends a gesture (drag released, value typed, click).
+pub fn gesture_ended(response: &egui::Response) -> bool {
+    response.drag_stopped() || response.lost_focus() || (response.changed() && !response.dragged())
 }
 
 fn tone_mapper_key(operator: ToneMapper) -> &'static str {
@@ -182,52 +226,63 @@ pub const TRANSLATION_KEYS: [&str; 26] = [
     "error-environment",
 ];
 
-/// Draws the panel.
-pub fn show(ui: &mut Ui, view: &mut ViewState, i18n: &I18n) {
-    view.environment.poll();
+/// Draws the panel and returns the environment changes asked for.
+pub fn show(
+    ui: &mut Ui,
+    view: &mut ViewState,
+    i18n: &I18n,
+    environment: &EnvironmentView<'_>,
+) -> DisplayOutput {
+    let mut output = DisplayOutput::default();
+    if let Some(picked) = view.environment.poll() {
+        output.change = Some(EnvironmentChange::Imported {
+            name: picked.name.clone(),
+            bytes: picked.bytes.clone(),
+        });
+        output.picked = Some(picked);
+        output.seal = true;
+    }
+    let current = environment.settings;
     let settings = &mut view.settings;
 
     ui.heading(i18n.tr("display-environment"));
     ui.horizontal(|ui| {
-        let name = view
-            .environment
-            .name
-            .clone()
-            .unwrap_or_else(|| i18n.tr("display-environment-studio").into_owned());
         egui::ComboBox::from_id_salt("environment_choice")
-            .selected_text(name)
+            .selected_text(environment.name.clone())
             .show_ui(ui, |ui| {
+                let studio = current.source == EnvironmentSource::Studio;
                 if ui
-                    .selectable_label(
-                        view.environment.name.is_none(),
-                        i18n.tr("display-environment-studio"),
-                    )
+                    .selectable_label(studio, i18n.tr("display-environment-studio"))
                     .clicked()
+                    && !studio
                 {
-                    view.environment.name = None;
-                    view.environment.pending = Some(studio_sky(STUDIO_SKY_WIDTH));
+                    output.change = Some(EnvironmentChange::Source(EnvironmentSource::Studio));
+                    output.seal = true;
                 }
                 let bundled = view.environment.bundled().to_vec();
                 for path in bundled {
-                    let name = file_name(&path);
-                    let selected = view.environment.name.as_deref() == Some(name.as_str());
-                    if ui.selectable_label(selected, &name).clicked() && !selected {
-                        let filter = i18n.tr("display-hdri-filter").into_owned();
-                        view.environment.load(ui.ctx(), Some(path), filter);
+                    let source = EnvironmentSource::Bundled(file_name(&path));
+                    let selected = current.source == source;
+                    if ui.selectable_label(selected, file_name(&path)).clicked() && !selected {
+                        output.change = Some(EnvironmentChange::Source(source));
+                        output.seal = true;
                     }
                 }
             });
-        if view.environment.task.is_some() {
+        if view.environment.task.is_some() || environment.loading {
             ui.spinner();
             ui.label(i18n.tr("display-loading"));
         } else if ui.button(i18n.tr("display-load-hdri")).clicked() {
             let filter = i18n.tr("display-hdri-filter").into_owned();
-            view.environment.load(ui.ctx(), None, filter);
+            view.environment.import(ui.ctx(), filter);
         }
     });
-    if let Some(error) = &view.environment.error {
+    for error in [view.environment.error.as_deref(), environment.error]
+        .into_iter()
+        .flatten()
+    {
         let mut args = FluentArgs::new();
-        args.set("message", error.clone());
+        args.set("message", error.to_owned());
         ui.colored_label(
             ui.visuals().error_fg_color,
             i18n.tr_args("error-environment", &args),
@@ -239,17 +294,21 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, i18n: &I18n) {
         .spacing([12.0, 6.0])
         .show(ui, |ui| {
             ui.label(i18n.tr("display-rotation"));
-            let mut degrees = settings.environment_rotation.to_degrees();
-            if ui
-                .add(egui::Slider::new(&mut degrees, 0.0..=360.0).suffix("°"))
-                .changed()
-            {
-                settings.environment_rotation = degrees.to_radians();
+            let mut degrees = current.rotation.to_degrees();
+            let response = ui.add(egui::Slider::new(&mut degrees, 0.0..=360.0).suffix("°"));
+            if response.changed() {
+                output.change = Some(EnvironmentChange::Rotation(degrees.to_radians()));
             }
+            output.seal |= gesture_ended(&response);
             ui.end_row();
 
             ui.label(i18n.tr("display-exposure"));
-            ui.add(egui::Slider::new(&mut settings.exposure_ev, -6.0..=6.0).step_by(0.1));
+            let mut exposure = current.exposure_ev;
+            let response = ui.add(egui::Slider::new(&mut exposure, -6.0..=6.0).step_by(0.1));
+            if response.changed() {
+                output.change = Some(EnvironmentChange::Exposure(exposure));
+            }
+            output.seal |= gesture_ended(&response);
             ui.end_row();
 
             ui.label(i18n.tr("display-tone-mapper"));
@@ -349,6 +408,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, i18n: &I18n) {
             ui.add(egui::Slider::new(&mut material.roughness, 0.0..=1.0));
             ui.end_row();
         });
+    output
 }
 
 #[cfg(test)]
