@@ -11,9 +11,11 @@ publish.workspace = true
 patine_core.workspace = true
 patine_gpu.workspace = true
 half.workspace = true
+bytemuck.workspace = true
 
 [dev-dependencies]
 patine_gpu = { workspace = true, features = ["testing"] }
+half.workspace = true
 
 [lints]
 workspace = true

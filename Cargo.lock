@@ -2415,6 +2415,7 @@ dependencies = [
 name = "patine_compositor"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
  "half",
  "patine_core",
  "patine_gpu",

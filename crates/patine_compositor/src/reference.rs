@@ -167,10 +167,11 @@ fn clip_color(c: Rgb) -> Rgb {
     let n = c[0].min(c[1]).min(c[2]);
     let x = c[0].max(c[1]).max(c[2]);
     let mut out = c;
-    if n < 0.0 {
+    // The spec divides by l - n and x - l, zero for a gray: nothing to clip then.
+    if n < 0.0 && l - n > EPSILON {
         out = out.map(|v| l + (v - l) * l / (l - n));
     }
-    if x > 1.0 {
+    if x > 1.0 && x - l > EPSILON {
         out = out.map(|v| l + (v - l) * (1.0 - l) / (x - l));
     }
     out
@@ -432,6 +433,9 @@ mod tests {
             BlendMode::Color,
             BlendMode::Luminosity,
         ] {
+            // Grays are finite: the spec's clipping divides by zero for them.
+            let gray = blend_rgb(mode, [0.4387; 3], [0.0; 3]);
+            assert!(gray.iter().all(|v| v.is_finite()), "{mode:?} {gray:?}");
             let c = blend_rgb(mode, b, s);
             assert!(
                 c.iter().all(|v| (-1e-5..=1.0 + 1e-5).contains(v)),

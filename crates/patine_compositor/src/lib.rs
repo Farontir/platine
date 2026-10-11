@@ -4,5 +4,6 @@
 //! [`gpu_document::GpuDocument`] keeps the final texture of every channel in step with
 //! the document.
 
+pub mod compositor;
 pub mod gpu_document;
 pub mod reference;
