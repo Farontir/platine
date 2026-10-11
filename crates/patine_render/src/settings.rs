@@ -81,6 +81,10 @@ pub enum DisplayMode {
     Channel,
     /// A checker on the UVs.
     UvChecker,
+    /// The mask of the selected layer, in grayscale: the inspected texture of each
+    /// material is that mask ([`InspectKind::Scalar`](crate::material::InspectKind)),
+    /// shown like an inspected channel.
+    Mask,
 }
 
 impl DisplayMode {
@@ -90,6 +94,8 @@ impl DisplayMode {
             DisplayMode::Lit => 0,
             DisplayMode::Channel => 1,
             DisplayMode::UvChecker => 2,
+            // The shaders show the inspected texture, here the mask.
+            DisplayMode::Mask => 1,
         }
     }
 }

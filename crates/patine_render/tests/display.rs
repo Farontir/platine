@@ -73,6 +73,13 @@ gpu_test!(
             ..Default::default()
         });
         assert_near(center(&displayed(&ctx, &mut viewport, &scalar, DisplayMode::Channel)), [0.3; 3]);
+        // The mask mode shows a mask as an inspected scalar.
+        let mask = texture(&ctx, R16Float, [0.6; 4]);
+        let masked = viewport.material(&ctx, &MaterialTextures {
+            inspect: Some((&mask, InspectKind::Scalar)),
+            ..Default::default()
+        });
+        assert_near(center(&displayed(&ctx, &mut viewport, &masked, DisplayMode::Mask)), [0.6; 3]);
 
         let color = [0.75, 0.25, 0.125];
         let base = texture(&ctx, Rgba16Float, [color[0], color[1], color[2], 1.0]);

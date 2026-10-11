@@ -198,7 +198,7 @@ fn tone_mapper_key(operator: ToneMapper) -> &'static str {
 }
 
 /// Every translation key used by the panel, for tests.
-pub const TRANSLATION_KEYS: [&str; 26] = [
+pub const TRANSLATION_KEYS: [&str; 27] = [
     "display-mode",
     "display-mode-lit",
     "display-mode-checker",
@@ -224,6 +224,7 @@ pub const TRANSLATION_KEYS: [&str; 26] = [
     "display-perspective",
     "display-orthographic",
     "display-fov",
+    "display-mode-mask",
     "error-environment",
 ];
 
@@ -233,6 +234,7 @@ pub fn display_mode_label(i18n: &I18n, mode: DisplayMode, channel: Channel) -> S
     match mode {
         DisplayMode::Lit => i18n.tr("display-mode-lit").into_owned(),
         DisplayMode::UvChecker => i18n.tr("display-mode-checker").into_owned(),
+        DisplayMode::Mask => i18n.tr("display-mode-mask").into_owned(),
         DisplayMode::Channel => {
             let mut args = FluentArgs::new();
             args.set("channel", channel_name(i18n, channel));
@@ -417,6 +419,7 @@ pub fn show(
             .show_ui(ui, |ui| {
                 let mut choices = vec![(DisplayMode::Lit, view.inspect_channel)];
                 choices.extend(channels.iter().map(|c| (DisplayMode::Channel, *c)));
+                choices.push((DisplayMode::Mask, view.inspect_channel));
                 choices.push((DisplayMode::UvChecker, view.inspect_channel));
                 for (mode, channel) in choices {
                     let selected = view.settings.display == mode

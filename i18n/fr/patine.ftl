@@ -176,6 +176,7 @@ command-channel-default = Valeur par défaut : { $channel }
 display-mode = Mode d'affichage
 display-mode-lit = Matériau éclairé
 display-mode-checker = Damier UV
+display-mode-mask = Masque du calque sélectionné
 display-mode-channel = Canal : { $channel }
 action-view-toggle-channel = Canal isolé
 action-view-next-channel = Canal suivant

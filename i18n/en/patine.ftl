@@ -176,6 +176,7 @@ command-channel-default = Default value: { $channel }
 display-mode = Display mode
 display-mode-lit = Lit material
 display-mode-checker = UV checker
+display-mode-mask = Mask of the selected layer
 display-mode-channel = Channel: { $channel }
 action-view-toggle-channel = Isolated channel
 action-view-next-channel = Next channel
