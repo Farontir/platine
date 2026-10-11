@@ -6,10 +6,11 @@
 
 use std::ops::Range;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// A contiguous range of triangles sharing one material.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Submesh {
     /// Index into [`MeshAsset::materials`].
     pub material: u32,
@@ -18,7 +19,7 @@ pub struct Submesh {
 }
 
 /// An indexed triangle mesh with everything later subsystems need.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct MeshAsset {
     /// Display name, usually the file stem.
     pub name: String,
