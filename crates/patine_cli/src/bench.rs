@@ -191,3 +191,136 @@ impl ViewportBench {
         Ok(())
     }
 }
+
+/// Options of the compositor benchmark (budget "parameter of a fill at the bottom of a
+/// stack of 30 layers 4K" of PLAN.md).
+pub struct CompositorBench {
+    /// Number of fill layers.
+    pub layers: usize,
+    /// Texture set resolution.
+    pub resolution: Resolution,
+    /// Measured edits.
+    pub edits: u32,
+}
+
+impl CompositorBench {
+    /// Parses `--layers N --resolution N --edits N`.
+    pub fn parse(args: &[String]) -> anyhow::Result<Self> {
+        let mut bench = Self {
+            layers: 30,
+            resolution: Resolution::new(4096).context("supported")?,
+            edits: 20,
+        };
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let mut value = || args.next().context("missing value");
+            match arg.as_str() {
+                "--layers" => bench.layers = value()?.parse()?,
+                "--resolution" => {
+                    let pixels = value()?.parse()?;
+                    bench.resolution = Resolution::new(pixels).context("resolution 512 to 8192")?;
+                }
+                "--edits" => bench.edits = value()?.parse()?,
+                other => bail!("unknown option {other}"),
+            }
+        }
+        Ok(bench)
+    }
+
+    /// Runs the benchmark and prints the results.
+    pub fn run(&self) -> anyhow::Result<()> {
+        use patine_core::command::Command;
+        use patine_core::commands::{SetFillValue, SetLayerVisible};
+        use patine_core::ids::{IdSequence, LayerId};
+        use patine_core::layer::{BlendMode, Layer};
+
+        let ctx = GpuContext::new_headless(AdapterChoice::Hardware)?;
+        let info = ctx.adapter_info();
+        println!("adapter    {} ({:?})", info.name, info.backend);
+        let mut project = Project::new(
+            primitives::uv_sphere(32, 16),
+            "bench".into(),
+            ProjectSettings {
+                resolution: self.resolution,
+                ..ProjectSettings::default()
+            },
+        );
+        let modes = [
+            BlendMode::Normal,
+            BlendMode::Multiply,
+            BlendMode::Overlay,
+            BlendMode::Screen,
+            BlendMode::SoftLight,
+        ];
+        let mut ids = IdSequence::starting_at(project.next_id);
+        let set = &mut project.texture_sets[0];
+        let channels = set.channels.clone();
+        set.stack.layers = (0..self.layers)
+            .map(|i| {
+                let mut layer = Layer::fill_for(ids.layer(), format!("fill {i}"), &channels);
+                for (channel, blend) in &mut layer.channels {
+                    if *channel != Channel::Normal {
+                        blend.mode = modes[i % modes.len()];
+                    }
+                    blend.opacity = 0.7;
+                }
+                layer
+            })
+            .collect();
+        project.next_id = ids.next_raw();
+        let bottom = set.stack.layers[0].id;
+        let channel_count = channels.len();
+
+        let compositor = Compositor::new(&ctx)?;
+        let mut pool = TexturePool::new(u64::MAX);
+        let mut document = GpuDocument::new();
+        let start = Instant::now();
+        document.sync(&ctx, &mut pool, &compositor, &project);
+        ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+        println!(
+            "stack      {} fills, {} channels of {}², first evaluation {:.0} ms",
+            self.layers,
+            channel_count,
+            self.resolution.pixels(),
+            start.elapsed().as_secs_f64() * 1e3
+        );
+
+        let mut measure =
+            |label: &str, edit: &mut dyn FnMut(&mut Project, u32)| -> anyhow::Result<()> {
+                let mut times = Vec::new();
+                for step in 0..self.edits {
+                    edit(&mut project, step);
+                    let start = Instant::now();
+                    document.sync(&ctx, &mut pool, &compositor, &project);
+                    ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+                    times.push(start.elapsed().as_secs_f64() * 1e3);
+                }
+                let average = times.iter().sum::<f64>() / times.len() as f64;
+                let max = times.iter().copied().fold(0.0, f64::max);
+                println!(
+                    "{label} average {average:.1} ms, max {max:.1} ms over {} edits",
+                    times.len()
+                );
+                Ok(())
+            };
+        measure(
+            "value      base color of the bottom fill:",
+            &mut |project, step| {
+                let value = [0.2 + 0.03 * step as f32, 0.4, 0.6, 1.0];
+                SetFillValue::new(bottom, Channel::BaseColor, Some(value), "")
+                    .apply(project)
+                    .expect("the bottom layer is a fill");
+            },
+        )?;
+        measure(
+            "visibility of the bottom fill (every channel):",
+            &mut |project, step| {
+                SetLayerVisible::new(LayerId(bottom.0), step % 2 == 1, "")
+                    .apply(project)
+                    .expect("the bottom layer exists");
+            },
+        )?;
+        println!("budget     < 100 ms on the RTX 3080 Ti, < 250 ms on the RTX A2000");
+        Ok(())
+    }
+}
