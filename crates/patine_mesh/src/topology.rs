@@ -206,6 +206,12 @@ impl MeshTopology {
 /// polygons, so quads and n-gons show without their triangulation diagonals. Each edge is
 /// returned once, using the vertices of its first triangle.
 pub fn polygon_edges(mesh: &MeshAsset) -> Vec<[u32; 2]> {
+    polygon_edges_in(mesh, 0..mesh.triangles.len() as u32)
+}
+
+/// [`polygon_edges`] of the triangles `triangles` only (a submesh): edges shared with
+/// triangles outside the range count as borders.
+pub fn polygon_edges_in(mesh: &MeshAsset, triangles: std::ops::Range<u32>) -> Vec<[u32; 2]> {
     /// What is known about a geometric edge.
     struct EdgeInfo {
         vertices: [u32; 2],
@@ -224,7 +230,8 @@ pub fn polygon_edges(mesh: &MeshAsset) -> Vec<[u32; 2]> {
         })
         .collect();
     let mut order = Vec::new();
-    for (triangle, corners) in mesh.triangles.iter().enumerate() {
+    for triangle in triangles.start as usize..triangles.end as usize {
+        let corners = &mesh.triangles[triangle];
         let polygon = mesh.triangle_polygon[triangle];
         for edge in 0..3 {
             let (a, b) = (corners[edge], corners[(edge + 1) % 3]);
@@ -277,6 +284,9 @@ mod tests {
         let mut mesh = primitives::plane(1);
         mesh.triangle_polygon = vec![0, 1];
         assert_eq!(polygon_edges(&mesh).len(), 5);
+        // One triangle alone: its three edges, the shared diagonal being a border.
+        assert_eq!(polygon_edges_in(&mesh, 0..1).len(), 3);
+        assert!(polygon_edges_in(&mesh, 1..1).is_empty());
     }
 
     /// Acceptance criterion 2 of M1: exact UV island counts on the generated meshes.

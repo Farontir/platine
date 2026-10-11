@@ -2,11 +2,13 @@
 // the environment. Diffuse from spherical harmonics, specular from the prefiltered cube
 // and the split-sum LUT. The dominant light is taken out of the harmonics and added
 // back as a directional light, shadowed when shadows are on (diffuse only: the
-// environment's specular reflection is not shadowed).
+// environment's specular reflection is not shadowed). The surface comes from the
+// material textures (normal map, occlusion of the indirect light, emission).
 
 // #import render/frame
 // #import render/brdf
 // #import render/environment
+// #import render/material
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 
@@ -20,8 +22,10 @@ struct VertexInput {
 struct VertexOutput {
     @builtin(position) clip: vec4<f32>,
     @location(0) world_position: vec3<f32>,
-    // Not renormalized after interpolation (mikktspace rule).
+    // Normal and tangent are not renormalized after interpolation (mikktspace rule).
     @location(1) normal: vec3<f32>,
+    @location(2) tangent: vec4<f32>,
+    @location(3) uv: vec2<f32>,
 }
 
 @vertex
@@ -30,6 +34,8 @@ fn vs_main(in: VertexInput) -> VertexOutput {
     out.clip = frame.view_proj * vec4<f32>(in.position, 1.0);
     out.world_position = in.position;
     out.normal = in.normal;
+    out.tangent = in.tangent;
+    out.uv = in.uv;
     return out;
 }
 
@@ -57,11 +63,12 @@ fn shadow_factor(world_position: vec3<f32>, n: vec3<f32>) -> f32 {
 
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
-    let n = normalize(in.normal);
+    let surface = sample_surface(in.uv);
+    let n = perturb_normal(surface.normal, in.normal, in.tangent);
     let v = normalize(frame.camera_position.xyz - in.world_position);
-    let base_color = frame.base_color.rgb;
-    let metallic = clamp(frame.material.x, 0.0, 1.0);
-    let roughness = clamp(frame.material.y, 0.02, 1.0);
+    let base_color = surface.base_color;
+    let metallic = surface.metallic;
+    let roughness = surface.roughness;
     let rotation = frame.environment.x;
     let shadows = frame.environment.z > 0.5;
 
@@ -75,7 +82,7 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let r = reflect(-v, n);
     let lod = roughness * (environment.mips.x - 1.0);
     let prefiltered = textureSampleLevel(specular_cube, environment_sampler, to_environment(r, rotation), lod).rgb;
-    let specular = prefiltered * specular_albedo;
+    let specular = prefiltered * specular_albedo * surface.occlusion;
 
     // Diffuse: energy not reflected specularly.
     let diffuse_weight = diffuse_color * (vec3<f32>(1.0) - specular_albedo);
@@ -90,8 +97,8 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
         shadow = shadow_factor(in.world_position, n);
     }
     let direct = environment.light_color.rgb * n_dot_l * shadow;
-    let irradiance = sh_diffuse(environment.residual, to_environment(n, rotation)) + direct;
-    // Ambient occlusion would scale the indirect terms only (channel added in M4).
-    let color = diffuse_weight * irradiance + specular;
+    // Ambient occlusion scales the indirect light only.
+    let indirect = sh_diffuse(environment.residual, to_environment(n, rotation)) * surface.occlusion;
+    let color = diffuse_weight * (indirect + direct) + specular + surface.emissive;
     return vec4<f32>(color, 1.0);
 }

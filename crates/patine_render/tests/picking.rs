@@ -60,6 +60,7 @@ fn check_picking(ctx: &GpuContext, mesh: &MeshAsset, flat: bool) {
     let settings = ViewSettings::default();
     let scene = Scene {
         mesh: Some(&gpu_mesh),
+        materials: None,
         camera: &camera,
         settings: &settings,
     };
@@ -189,6 +190,7 @@ gpu_test!(
         let settings = ViewSettings::default();
         let scene = Scene {
             mesh: Some(&gpu_mesh),
+            materials: None,
             camera: &camera,
             settings: &settings,
         };

@@ -6,9 +6,9 @@ struct Frame {
     inv_view_proj: mat4x4<f32>,
     // xyz: eye position.
     camera_position: vec4<f32>,
-    // rgb: linear base color, a: unused.
+    // Unused since the material moved to bind group 2 (M4).
     base_color: vec4<f32>,
-    // x: metallic, y: roughness, z: exposure multiplier, w: tone mapper index.
+    // x, y: unused (see base_color); z: exposure multiplier, w: tone mapper index.
     material: vec4<f32>,
     // rgb: wireframe color (linear), a: opacity.
     wire_color: vec4<f32>,

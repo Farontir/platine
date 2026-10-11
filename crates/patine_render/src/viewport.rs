@@ -9,6 +9,7 @@ use patine_gpu::{GpuContext, GpuError, wgpu};
 use crate::camera::{OrbitCamera, look_at_rh, orthographic_rh};
 use crate::environment::{EquirectImage, studio_sky};
 use crate::environment_gpu::{BrdfLut, EnvironmentSizes, GpuEnvironment, linear_sampler};
+use crate::material::{GpuMaterial, MaterialResources, MaterialTextures};
 use crate::mesh_gpu::{GpuMesh, VERTEX_LAYOUTS};
 use crate::picking::{PickImage, PickResult, Picker};
 use crate::settings::{Background, ViewSettings};
@@ -236,6 +237,9 @@ struct Targets {
 pub struct Scene<'a> {
     /// The mesh, if a project is open.
     pub mesh: Option<&'a GpuMesh>,
+    /// Material of each texture set, by material index; `None` (or a missing entry) uses
+    /// the constant material of the settings.
+    pub materials: Option<&'a [GpuMaterial]>,
     /// The camera.
     pub camera: &'a OrbitCamera,
     /// Display settings.
@@ -263,6 +267,8 @@ pub struct Viewport {
     display_pipeline: wgpu::RenderPipeline,
     targets: Option<Targets>,
     picker: Picker,
+    materials: MaterialResources,
+    constant_material: GpuMaterial,
 }
 
 fn texture(
@@ -491,6 +497,16 @@ impl Viewport {
             bind_group_layouts: &[Some(&frame_layout), Some(&environment_layout)],
             immediate_size: 0,
         });
+        let materials = MaterialResources::new(ctx);
+        let mesh_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("viewport mesh"),
+            bind_group_layouts: &[
+                Some(&frame_layout),
+                Some(&environment_layout),
+                Some(&materials.layout),
+            ],
+            immediate_size: 0,
+        });
         let display_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("viewport display"),
@@ -520,7 +536,7 @@ impl Viewport {
                 label: "viewport mesh",
                 shader: "render/pbr",
                 vertex_entry: "vs_main",
-                layout: &scene_layout,
+                layout: &mesh_layout,
                 buffers: &mesh_buffers,
                 primitive: wgpu::PrimitiveState {
                     topology: wgpu::PrimitiveTopology::TriangleList,
@@ -624,7 +640,15 @@ impl Viewport {
             display_pipeline,
             targets: None,
             picker,
+            constant_material: materials.constant(ctx),
+            materials,
         })
+    }
+
+    /// Binds the channel textures of a texture set for the mesh shader; missing slots use
+    /// neutral values.
+    pub fn material(&self, ctx: &GpuContext, textures: &MaterialTextures<'_>) -> GpuMaterial {
+        self.materials.document(ctx, textures)
     }
 
     fn environment_bind_group(
@@ -778,6 +802,8 @@ impl Viewport {
 
     /// Writes the frame uniforms of `scene` for a `width` × `height` image.
     fn write_frame(&self, ctx: &GpuContext, scene: &Scene<'_>, width: u32, height: u32) {
+        self.constant_material
+            .set_constant(ctx, &scene.settings.material);
         let rotation = scene.settings.environment_rotation;
         let light = match scene.mesh {
             Some(mesh) => LightProjection::new(
@@ -935,7 +961,15 @@ impl Viewport {
                 pass.set_pipeline(&self.mesh_pipeline);
                 mesh.bind_vertices(&mut pass);
                 pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                // One draw per texture set, with its material.
+                for submesh in &mesh.submeshes {
+                    let material = scene
+                        .materials
+                        .and_then(|materials| materials.get(submesh.material as usize))
+                        .unwrap_or(&self.constant_material);
+                    pass.set_bind_group(2, &material.bind_group, &[]);
+                    pass.draw_indexed(submesh.indices.clone(), 0, 0..1);
+                }
                 if scene.settings.wireframe {
                     pass.set_pipeline(&self.wire_pipeline);
                     pass.set_vertex_buffer(0, mesh.positions.slice(..));

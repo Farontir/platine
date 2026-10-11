@@ -19,6 +19,7 @@ fn render(ctx: &GpuContext, mesh: Option<&GpuMesh>, settings: &ViewSettings) -> 
     }
     let scene = Scene {
         mesh,
+        materials: None,
         camera: &camera,
         settings,
     };

@@ -95,6 +95,7 @@ impl ViewportBench {
             camera.orbit(0.01, 0.0);
             let scene = Scene {
                 mesh: Some(&gpu_mesh),
+                materials: None,
                 camera: &camera,
                 settings: &settings,
             };

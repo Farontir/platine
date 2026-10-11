@@ -42,6 +42,7 @@ gpu_test!(
                 };
                 let scene = Scene {
                     mesh: Some(&mesh),
+                    materials: None,
                     camera: &camera,
                     settings: &settings,
                 };

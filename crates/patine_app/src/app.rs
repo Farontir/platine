@@ -881,6 +881,7 @@ impl App {
         }
         let scene = Scene {
             mesh: gfx.gpu_mesh.as_ref(),
+            materials: None,
             camera: &view.camera,
             settings: &view.settings,
         };

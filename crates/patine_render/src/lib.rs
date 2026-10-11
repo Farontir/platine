@@ -3,6 +3,7 @@
 pub mod camera;
 pub mod environment;
 pub mod environment_gpu;
+pub mod material;
 pub mod mesh_gpu;
 pub mod picking;
 pub mod reference;
