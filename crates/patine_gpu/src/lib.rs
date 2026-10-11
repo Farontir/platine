@@ -7,6 +7,7 @@
 mod context;
 mod error;
 pub mod fill;
+pub mod pool;
 pub mod readback;
 pub mod shaders;
 #[cfg(feature = "testing")]
