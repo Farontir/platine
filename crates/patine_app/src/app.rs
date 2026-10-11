@@ -22,10 +22,11 @@ use patine_render::viewport::{Scene, Viewport};
 
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
 use crate::autosave::{self, Autosaver, Orphan, Session};
-use crate::cli::{StartupDialog, StartupOptions};
+use crate::cli::{StartupDialog, StartupEdit, StartupOptions};
 use crate::display_panel::EnvironmentView;
 use crate::document::{Document, DraftEnvironment, EnvironmentChange, environment_command};
 use crate::environment_sync::EnvironmentSync;
+use crate::history_panel;
 use crate::i18n::{I18n, Language};
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, NewProjectDialog};
@@ -242,6 +243,34 @@ impl App {
     /// Applies the view options of the command line.
     fn apply_startup_options(&mut self) -> anyhow::Result<()> {
         let options = self.startup.clone();
+        if let Some(document) = &mut self.document {
+            for edit in &options.edits {
+                let command: Box<dyn patine_core::command::Command> = match edit {
+                    StartupEdit::Rotation(degrees) => environment_command(
+                        &document.project.environment,
+                        EnvironmentChange::Rotation(degrees.to_radians()),
+                    ),
+                    StartupEdit::Exposure(ev) => environment_command(
+                        &document.project.environment,
+                        EnvironmentChange::Exposure(*ev),
+                    ),
+                    StartupEdit::RenameTextureSet(set, name) => {
+                        Box::new(patine_core::commands::RenameTextureSet::new(
+                            patine_core::project::TextureSetId(*set),
+                            name.clone(),
+                        ))
+                    }
+                    StartupEdit::Undo(count) => {
+                        for _ in 0..*count {
+                            document.undo();
+                        }
+                        continue;
+                    }
+                };
+                document.execute(command);
+                document.history.seal();
+            }
+        }
         for panel in &options.tabs {
             if let Some(path) = self.ui.dock.find_tab(panel) {
                 // The path was just found in the same dock state.
@@ -783,6 +812,11 @@ impl App {
             if output.seal {
                 document.history.seal();
             }
+            if let Some(applied) = output.history_go_to
+                && let Err(error) = document.history.go_to(&mut document.project, applied)
+            {
+                tracing::error!(%error, "history navigation failed; the history was cleared");
+            }
         }
         if let Some(gfx) = &self.graphics {
             gfx.window.request_redraw();
@@ -939,6 +973,14 @@ impl App {
                 loading: self.environment_sync.loading(),
                 error: self.environment_sync.error.as_deref(),
             },
+            history: self
+                .document
+                .as_ref()
+                .map(|document| history_panel::HistoryView {
+                    labels: document.history.labels(),
+                    applied: document.history.applied(),
+                    truncated: document.history.truncated(),
+                }),
             file_status: if self.file_jobs.saving() {
                 Some("file-busy-saving")
             } else if self.file_jobs.opening() {

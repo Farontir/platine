@@ -9,6 +9,7 @@ pub mod cli;
 pub mod display_panel;
 pub mod document;
 pub mod environment_sync;
+pub mod history_panel;
 pub mod i18n;
 pub mod logging;
 pub mod new_project;

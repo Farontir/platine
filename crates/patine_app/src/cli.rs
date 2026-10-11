@@ -36,8 +36,39 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
   --capture PNG                 save the window to PNG after a few frames, then quit
   --capture-frames N            frames to wait before capturing (default 30)
   --autosave-interval SECS      time between autosaves (default 300)
+  --edit EDIT                   apply a command to the opened project (repeatable):
+                                rotation=DEG, exposure=EV, rename=SET:NAME, undo=N
 
   A project file (.patine) can be given instead of a mesh.";
+
+/// A command applied to the project opened at startup, as if made by the user.
+#[derive(Clone, Debug, PartialEq)]
+pub enum StartupEdit {
+    /// Rotate the environment, degrees.
+    Rotation(f32),
+    /// Set the exposure, EV.
+    Exposure(f32),
+    /// Rename a texture set (by index).
+    RenameTextureSet(u32, String),
+    /// Undo this many commands.
+    Undo(u32),
+}
+
+impl StartupEdit {
+    fn parse(text: &str) -> Option<Self> {
+        let (kind, value) = text.split_once('=')?;
+        Some(match kind {
+            "rotation" => StartupEdit::Rotation(value.parse().ok()?),
+            "exposure" => StartupEdit::Exposure(value.parse().ok()?),
+            "rename" => {
+                let (set, name) = value.split_once(':')?;
+                StartupEdit::RenameTextureSet(set.parse().ok()?, name.to_owned())
+            }
+            "undo" => StartupEdit::Undo(value.parse().ok()?),
+            _ => return None,
+        })
+    }
+}
 
 /// A dialog to open at startup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -97,6 +128,8 @@ pub struct StartupOptions {
     pub capture_frames: u32,
     /// Seconds between autosaves.
     pub autosave_interval: Option<u64>,
+    /// Commands applied to the startup project, in order.
+    pub edits: Vec<StartupEdit>,
 }
 
 /// Invalid command line.
@@ -233,6 +266,12 @@ impl StartupOptions {
                 }
                 "--dialog-path" => options.dialog_path = Some(PathBuf::from(value()?)),
                 "--dialog-create" => options.dialog_create = true,
+                "--edit" => {
+                    let v = value()?;
+                    options
+                        .edits
+                        .push(StartupEdit::parse(&v).ok_or_else(|| invalid(&v))?);
+                }
                 "--capture" => options.capture = Some(PathBuf::from(value()?)),
                 "--capture-frames" => {
                     let v = value()?;
@@ -303,6 +342,25 @@ mod tests {
         assert_eq!(options.mesh, Some(PathBuf::from("work.patine")));
         assert_eq!(options.autosave_interval, Some(10));
         assert!(parse(&["--autosave-interval", "0"]).is_err());
+        let options = parse(&[
+            "--edit",
+            "rotation=90",
+            "--edit",
+            "rename=1:Verre",
+            "--edit",
+            "undo=1",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.edits,
+            [
+                StartupEdit::Rotation(90.0),
+                StartupEdit::RenameTextureSet(1, "Verre".into()),
+                StartupEdit::Undo(1),
+            ]
+        );
+        assert!(parse(&["--edit", "scale=2"]).is_err());
+        assert!(parse(&["--edit", "rename=x"]).is_err());
     }
 
     #[test]

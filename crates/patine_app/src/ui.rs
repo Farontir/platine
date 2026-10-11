@@ -16,6 +16,7 @@ use patine_core::project::{Project, TextureSetId};
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
 use crate::display_panel::{self, EnvironmentView, PickedHdri};
 use crate::document::EnvironmentChange;
+use crate::history_panel::{self, HistoryView};
 use crate::i18n::I18n;
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, DialogOutcome, NewProjectDialog};
@@ -179,6 +180,8 @@ pub struct FrameInfo<'a> {
     pub environment: EnvironmentView<'a>,
     /// Translation key of the file operation in progress, for the status bar.
     pub file_status: Option<&'static str>,
+    /// History of the open document.
+    pub history: Option<HistoryView>,
 }
 
 /// What the interface asks the application to do after a frame.
@@ -200,6 +203,8 @@ pub struct UiOutput {
     pub unsaved_choice: Option<UnsavedChoice>,
     /// Answer to the recovery dialog: `true` to recover, `false` to delete the copy.
     pub recovery_choice: Option<bool>,
+    /// History state to go to: number of entries to apply.
+    pub history_go_to: Option<usize>,
 }
 
 /// Applies the Patine theme and adds the icon font. Call once on the egui context.
@@ -471,6 +476,12 @@ impl TabViewer for PanelViewer<'_, '_> {
                 self.output.seal |= viewport.seal;
             }
             Panel::Console => console(ui, self.info, self.console_level),
+            Panel::History => {
+                let target = history_panel::show(ui, self.info.i18n, self.info.history.as_ref());
+                if target.is_some() {
+                    self.output.history_go_to = target;
+                }
+            }
             Panel::TextureSets => {
                 if let Some(command) = texture_sets(ui, self.info, self.renaming) {
                     self.output.commands.push(command);
@@ -729,6 +740,13 @@ mod tests {
                     error: Some("test error"),
                 },
                 file_status: Some("file-busy-saving"),
+                history: Some(HistoryView {
+                    labels: vec![patine_core::command::Label::new(
+                        "command-environment-exposure",
+                    )],
+                    applied: 0,
+                    truncated: false,
+                }),
             };
             for _ in 0..3 {
                 let input = egui::RawInput {
