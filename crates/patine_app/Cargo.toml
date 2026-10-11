@@ -37,6 +37,8 @@ winit.workspace = true
 pollster.workspace = true
 rfd.workspace = true
 image = { workspace = true, features = ["png"] }
+ron.workspace = true
+serde.workspace = true
 fluent-bundle.workspace = true
 fluent-syntax.workspace = true
 unic-langid.workspace = true

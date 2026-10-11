@@ -2367,6 +2367,8 @@ dependencies = [
  "puffin",
  "puffin_http",
  "rfd",
+ "ron",
+ "serde",
  "sys-locale",
  "thiserror 2.0.21",
  "tracing",

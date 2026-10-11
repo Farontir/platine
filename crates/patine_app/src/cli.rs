@@ -34,7 +34,10 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
   --dialog-path PATH            mesh path typed in the New Project dialog
   --dialog-create               press Create in the New Project dialog
   --capture PNG                 save the window to PNG after a few frames, then quit
-  --capture-frames N            frames to wait before capturing (default 30)";
+  --capture-frames N            frames to wait before capturing (default 30)
+  --autosave-interval SECS      time between autosaves (default 300)
+
+  A project file (.patine) can be given instead of a mesh.";
 
 /// A dialog to open at startup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -92,6 +95,8 @@ pub struct StartupOptions {
     pub capture: Option<PathBuf>,
     /// Frames before the capture.
     pub capture_frames: u32,
+    /// Seconds between autosaves.
+    pub autosave_interval: Option<u64>,
 }
 
 /// Invalid command line.
@@ -233,6 +238,14 @@ impl StartupOptions {
                     let v = value()?;
                     options.capture_frames = v.parse().map_err(|_| invalid(&v))?;
                 }
+                "--autosave-interval" => {
+                    let v = value()?;
+                    let seconds: u64 = v.parse().map_err(|_| invalid(&v))?;
+                    if seconds == 0 {
+                        return Err(invalid(&v));
+                    }
+                    options.autosave_interval = Some(seconds);
+                }
                 other if other.starts_with("--") => {
                     return Err(CliError::UnknownOption(other.to_owned()));
                 }
@@ -285,6 +298,11 @@ mod tests {
         assert!(options.wireframe);
         assert_eq!(options.capture, Some(PathBuf::from("out.png")));
         assert_eq!(options.capture_frames, 30);
+        assert_eq!(options.autosave_interval, None);
+        let options = parse(&["work.patine", "--autosave-interval", "10"]).unwrap();
+        assert_eq!(options.mesh, Some(PathBuf::from("work.patine")));
+        assert_eq!(options.autosave_interval, Some(10));
+        assert!(parse(&["--autosave-interval", "0"]).is_err());
     }
 
     #[test]

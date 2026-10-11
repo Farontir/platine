@@ -152,3 +152,12 @@ unsaved-discard = Don't save
 unsaved-cancel = Cancel
 error-title = Error
 error-ok = OK
+
+## Recovery
+recovery-title = Recovery
+recovery-message = Patine closed without saving “{ $name }”. A copy saved automatically { $minutes ->
+        [0] less than a minute ago
+       *[other] { $minutes } min ago
+    } can be recovered.
+recovery-recover = Recover
+recovery-discard = Delete the copy

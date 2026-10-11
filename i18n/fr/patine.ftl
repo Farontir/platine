@@ -152,3 +152,12 @@ unsaved-discard = Ne pas enregistrer
 unsaved-cancel = Annuler
 error-title = Erreur
 error-ok = OK
+
+## Recovery
+recovery-title = Récupération
+recovery-message = Patine s'est fermé sans enregistrer « { $name } ». Une copie enregistrée automatiquement { $minutes ->
+        [0] il y a moins d'une minute
+       *[other] il y a { $minutes } min
+    } peut être récupérée.
+recovery-recover = Récupérer
+recovery-discard = Supprimer la copie

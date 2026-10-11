@@ -4,6 +4,7 @@
 
 pub mod actions;
 pub mod app;
+pub mod autosave;
 pub mod cli;
 pub mod display_panel;
 pub mod document;

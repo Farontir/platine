@@ -21,6 +21,7 @@ use patine_render::mesh_gpu::GpuMesh;
 use patine_render::viewport::{Scene, Viewport};
 
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
+use crate::autosave::{self, Autosaver, Orphan, Session};
 use crate::cli::{StartupDialog, StartupOptions};
 use crate::display_panel::EnvironmentView;
 use crate::document::{Document, DraftEnvironment, EnvironmentChange, environment_command};
@@ -92,6 +93,13 @@ pub struct App {
     quit_requested: bool,
     /// Title currently shown by the window.
     title: String,
+    /// Autosave of the open document; `None` in capture mode or without a data folder.
+    autosaver: Option<Autosaver>,
+    /// Incremented whenever the document is replaced, so that a late autosave of the
+    /// previous document is not taken for one of the new document.
+    document_generation: u64,
+    /// Projects left by crashed sessions, still to propose for recovery.
+    orphans: Vec<Orphan>,
 }
 
 /// Opens the main window and runs until it is closed.
@@ -125,7 +133,15 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
         after_save: None,
         quit_requested: false,
         title: String::new(),
+        autosaver: None,
+        document_generation: 0,
+        orphans: Vec::new(),
     };
+    // Captures show the application as configured, without recovery prompts, unless an
+    // autosave folder is given explicitly (to capture the recovery dialog).
+    if app.capture.is_none() || std::env::var_os("PATINE_AUTOSAVE_DIR").is_some() {
+        app.start_autosave();
+    }
     app.apply_startup_environment()?;
     match app.startup.mesh.clone() {
         Some(path) if is_project_file(&path) => {
@@ -145,7 +161,12 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
         None => {}
     }
     app.apply_startup_options()?;
+    app.propose_recovery();
     event_loop.run_app(&mut app).context("event loop failed")?;
+    // A clean exit: the autosave session is no longer needed.
+    if let Some(autosaver) = app.autosaver.take() {
+        autosaver.finish();
+    }
     match app.error.take() {
         Some(error) => Err(error),
         None => Ok(()),
@@ -478,8 +499,69 @@ impl App {
         self.replace_document(Document::new(project));
     }
 
+    /// Starts this instance's autosave session, and finds the projects left by crashes.
+    fn start_autosave(&mut self) {
+        let Some(root) = autosave::default_root() else {
+            tracing::warn!("no application data folder: autosave disabled");
+            return;
+        };
+        self.orphans = autosave::orphans(&root);
+        let interval = self
+            .startup
+            .autosave_interval
+            .map_or(autosave::DEFAULT_INTERVAL, std::time::Duration::from_secs);
+        match Session::start(&root) {
+            Ok(session) => self.autosaver = Some(Autosaver::new(session, interval)),
+            Err(error) => tracing::warn!(%error, "autosave disabled"),
+        }
+    }
+
+    /// Shows the recovery dialog for the next project left by a crash, if any.
+    fn propose_recovery(&mut self) {
+        self.ui.recovery_prompt = self
+            .orphans
+            .first()
+            .map(|orphan| (orphan.info.name.clone(), orphan.age.as_secs() / 60));
+    }
+
+    /// Answer of the recovery dialog for the first orphan.
+    fn answer_recovery(&mut self, recover: bool) {
+        self.ui.recovery_prompt = None;
+        if self.orphans.is_empty() {
+            return;
+        }
+        let orphan = self.orphans.remove(0);
+        if recover {
+            match patine_core::file::load(&orphan.project) {
+                Ok(project) => {
+                    tracing::info!(name = %orphan.info.name, "project recovered");
+                    let mut document = Document::new(project);
+                    document.path = orphan.info.original_path.clone();
+                    // Not saved anywhere the user knows of.
+                    document.history.mark_unsaved();
+                    self.replace_document(document);
+                    if let Some(autosaver) = &mut self.autosaver {
+                        autosaver.due_now();
+                    }
+                }
+                Err(error) => {
+                    tracing::error!(%error, "recovery failed");
+                    self.ui.error_message = Some(project_io::error_message(
+                        &self.i18n,
+                        false,
+                        &orphan.project,
+                        &error,
+                    ));
+                }
+            }
+        }
+        orphan.discard();
+        self.propose_recovery();
+    }
+
     /// Makes `document` the open document: uploads its mesh and frames it.
     fn replace_document(&mut self, document: Document) {
+        self.document_generation += 1;
         if let Some(gfx) = self.graphics.as_mut() {
             gfx.gpu_mesh = upload_mesh(&gfx.gpu, &gfx.viewport, &document.project.mesh);
             gfx.last_pick = None;
@@ -673,6 +755,9 @@ impl App {
     /// Executes what the interface asked for this frame: a new project, commands and
     /// environment changes.
     fn apply_ui_output(&mut self, output: ui::UiOutput) {
+        if let Some(recover) = output.recovery_choice {
+            self.answer_recovery(recover);
+        }
         if let Some(choice) = output.unsaved_choice {
             self.answer_unsaved(choice);
         }
@@ -891,6 +976,13 @@ impl App {
         for output in outputs {
             self.apply_ui_output(output);
         }
+        if let Some(autosaver) = &mut self.autosaver {
+            autosaver.tick(
+                &self.egui_ctx,
+                self.document.as_ref(),
+                self.document_generation,
+            );
+        }
 
         // The 3D image of this frame, with the camera moved by this frame's input.
         self.render_viewport();
@@ -1099,13 +1191,24 @@ impl ApplicationHandler for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
-        // A WaitUntil deadline from egui has passed: draw the requested frame.
+        // A WaitUntil deadline (egui's or the autosave's) has passed: draw a frame, which
+        // also runs a due autosave.
         if let ControlFlow::WaitUntil(deadline) = event_loop.control_flow()
             && Instant::now() >= deadline
         {
             event_loop.set_control_flow(ControlFlow::Wait);
             if let Some(gfx) = &self.graphics {
                 gfx.window.request_redraw();
+            }
+        }
+        // Wake up for the next autosave even when nothing happens.
+        let autosave = self.autosaver.as_ref().and_then(|autosaver| {
+            autosaver.deadline(self.document.as_ref(), self.document_generation)
+        });
+        if let Some(autosave) = autosave {
+            match event_loop.control_flow() {
+                ControlFlow::WaitUntil(deadline) if deadline <= autosave => {}
+                _ => event_loop.set_control_flow(ControlFlow::WaitUntil(autosave)),
             }
         }
     }

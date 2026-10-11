@@ -126,6 +126,8 @@ pub struct UiState {
     pub unsaved_prompt: Option<String>,
     /// Error shown in a dialog until dismissed.
     pub error_message: Option<String>,
+    /// Project left by a crash, offered for recovery: name and minutes since autosave.
+    pub recovery_prompt: Option<(String, u64)>,
 }
 
 /// Answer to the unsaved changes dialog.
@@ -150,6 +152,7 @@ impl Default for UiState {
             renaming: None,
             unsaved_prompt: None,
             error_message: None,
+            recovery_prompt: None,
         }
     }
 }
@@ -195,6 +198,8 @@ pub struct UiOutput {
     pub seal: bool,
     /// Answer to the unsaved changes dialog.
     pub unsaved_choice: Option<UnsavedChoice>,
+    /// Answer to the recovery dialog: `true` to recover, `false` to delete the copy.
+    pub recovery_choice: Option<bool>,
 }
 
 /// Applies the Patine theme and adds the icon font. Call once on the egui context.
@@ -292,6 +297,9 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> UiOutput 
     if let Some(name) = &state.unsaved_prompt {
         output.unsaved_choice = unsaved_dialog(ui.ctx(), info.i18n, name);
     }
+    if let Some((name, minutes)) = &state.recovery_prompt {
+        output.recovery_choice = recovery_dialog(ui.ctx(), info.i18n, name, *minutes);
+    }
     if let Some(message) = &state.error_message
         && message_dialog(ui.ctx(), info.i18n, message)
     {
@@ -326,6 +334,29 @@ fn unsaved_dialog(ctx: &egui::Context, i18n: &I18n, name: &str) -> Option<Unsave
     if choice.is_none() && response.should_close() {
         choice = Some(UnsavedChoice::Cancel);
     }
+    choice
+}
+
+/// Offers to recover a project left by a crash; `None` while the user has not answered.
+fn recovery_dialog(ctx: &egui::Context, i18n: &I18n, name: &str, minutes: u64) -> Option<bool> {
+    let mut choice = None;
+    egui::Modal::new(egui::Id::new("recovery")).show(ctx, |ui| {
+        ui.set_max_width(520.0);
+        ui.heading(i18n.tr("recovery-title"));
+        let mut args = FluentArgs::new();
+        args.set("name", name.to_owned());
+        args.set("minutes", minutes);
+        ui.label(i18n.tr_args("recovery-message", &args));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button(i18n.tr("recovery-recover")).clicked() {
+                choice = Some(true);
+            }
+            if ui.button(i18n.tr("recovery-discard")).clicked() {
+                choice = Some(false);
+            }
+        });
+    });
     choice
 }
 
@@ -674,6 +705,7 @@ mod tests {
                 new_project: Some(NewProjectDialog::default()),
                 unsaved_prompt: Some("helmet".into()),
                 error_message: Some("cannot open".into()),
+                recovery_prompt: Some(("lantern".into(), 3)),
                 ..UiState::default()
             };
             let info = FrameInfo {
