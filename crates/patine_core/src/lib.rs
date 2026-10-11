@@ -5,8 +5,11 @@
 
 pub mod bake;
 pub mod channel;
+pub mod command;
+pub mod commands;
 pub mod environment;
 pub mod export;
+pub mod history;
 pub mod ids;
 pub mod layer;
 pub mod mask;
