@@ -9,6 +9,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use fluent_bundle::FluentArgs;
+use patine_core::channel::Channel;
 use patine_core::command::{Command, Label};
 use patine_core::commands::SetEnvironment;
 use patine_core::environment::{EnvironmentSettings, EnvironmentSource};
@@ -80,13 +81,30 @@ impl Document {
     }
 }
 
-/// Translates a command label.
+/// Translates a command label. A `channel` argument holds a channel identifier, shown
+/// by its translated name.
 pub fn translate(i18n: &I18n, label: &Label) -> String {
     let mut args = FluentArgs::new();
     for (name, value) in &label.args {
-        args.set(*name, value.clone());
+        let value = match (*name, Channel::from_id(value)) {
+            ("channel", Some(channel)) => channel_name(i18n, channel),
+            _ => value.clone(),
+        };
+        args.set(*name, value);
     }
     i18n.tr_args(label.key, &args)
+}
+
+/// Translated name of a channel.
+pub fn channel_name(i18n: &I18n, channel: Channel) -> String {
+    match channel {
+        Channel::User(index) => {
+            let mut args = FluentArgs::new();
+            args.set("index", index);
+            i18n.tr_args("channel-user", &args)
+        }
+        other => i18n.tr(&format!("channel-{}", other.id())).into_owned(),
+    }
 }
 
 /// A change of the environment asked by the interface.
@@ -164,7 +182,10 @@ pub fn environment_command(
 }
 
 /// Every translation key of command labels, for tests.
-pub const COMMAND_LABEL_KEYS: [&str; 14] = [
+pub const COMMAND_LABEL_KEYS: [&str; 17] = [
+    "command-add-channel",
+    "command-remove-channel",
+    "command-channel-default",
     "command-rename-texture-set",
     "command-texture-set-resolution",
     "command-environment-source",
@@ -207,6 +228,24 @@ mod tests {
         let label = RenameTextureSet::new(TextureSetId(0), "Coque").label();
         let text = translate(&I18n::new(Language::French), &label);
         assert!(text.contains("Coque"), "{text}");
+        // Channel arguments are translated.
+        let label = patine_core::commands::SetChannelDef::remove(
+            TextureSetId(0),
+            Channel::AmbientOcclusion,
+        )
+        .label();
+        let text = translate(&I18n::new(Language::French), &label);
+        assert!(text.contains("Occlusion ambiante"), "{text}");
+        for language in Language::ALL {
+            let i18n = I18n::new(language);
+            for channel in Channel::STANDARD {
+                assert!(
+                    i18n.has(&format!("channel-{}", channel.id())),
+                    "{channel:?}"
+                );
+            }
+            assert!(channel_name(&i18n, Channel::User(2)).contains('2'));
+        }
     }
 
     #[test]

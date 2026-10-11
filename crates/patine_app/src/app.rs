@@ -12,12 +12,18 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+use patine_compositor::gpu_document::GpuDocument;
+use patine_core::channel::{Channel, ChannelDef};
 use patine_core::environment::{EnvironmentSettings, EnvironmentSource};
 use patine_core::project::{Project, ProjectSettings};
 use patine_core::resource::ResourceHash;
+use patine_gpu::pool::TexturePool;
 use patine_mesh::BuildOptions;
 use patine_render::camera::{OrbitCamera, Projection};
+use patine_render::material::{GpuMaterial, InspectKind, MaterialTextures, Slot};
 use patine_render::mesh_gpu::GpuMesh;
+use patine_render::settings::DisplayMode;
+use patine_render::uv_view::{UvScene, UvView};
 use patine_render::viewport::{Scene, Viewport};
 
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
@@ -50,6 +56,53 @@ struct Graphics {
     /// What the last pick request looked at (pixel, image size, camera): a new request is
     /// only sent when it changes, so hovering does not redraw continuously.
     last_pick: Option<([u32; 2], [u32; 2], OrbitCamera)>,
+    /// Pool of the document's GPU textures.
+    pool: TexturePool,
+    /// Final channel textures of the document.
+    gpu_document: GpuDocument,
+    /// Material of each texture set, by material index.
+    materials: Vec<GpuMaterial>,
+    /// Inspected channel the materials were built with.
+    materials_inspect: Option<Channel>,
+    /// Renderer of the 2D view.
+    uv_view: UvView,
+}
+
+/// Budget of the texture pool. The document's channel textures are pinned; the budget
+/// only bounds discardable caches (M5 onwards).
+const POOL_BUDGET: u64 = 8 << 30;
+
+/// Binds the channel textures of every texture set, by material index. `inspect` is the
+/// channel shown by the channel display mode.
+fn build_materials(
+    gpu: &GpuContext,
+    viewport: &Viewport,
+    document: &GpuDocument,
+    project: &Project,
+    inspect: Option<Channel>,
+) -> Vec<GpuMaterial> {
+    (0..project.mesh.materials.len() as u32)
+        .map(|material| {
+            let set = project
+                .texture_sets
+                .iter()
+                .find(|set| set.material_index == material)
+                .and_then(|set| document.texture_set(set.id));
+            let mut textures = MaterialTextures::default();
+            if let Some(set) = set {
+                for texture in &set.channels {
+                    if let Some(slot) = Slot::of(texture.def.channel) {
+                        textures = textures.with(slot, &texture.view);
+                    }
+                }
+                textures.inspect = inspect.and_then(|channel| {
+                    set.channel(channel)
+                        .map(|texture| (&texture.view, InspectKind::of(channel)))
+                });
+            }
+            viewport.material(gpu, &textures)
+        })
+        .collect()
 }
 
 /// What to do once the user has decided about unsaved changes.
@@ -243,6 +296,30 @@ impl App {
     /// Applies the view options of the command line.
     fn apply_startup_options(&mut self) -> anyhow::Result<()> {
         let options = self.startup.clone();
+        if let Some(set) = options.texture_set {
+            self.ui.texture_sets.selected = patine_core::project::TextureSetId(set);
+        }
+        if let (Some((base_color, metallic, roughness)), Some(document)) =
+            (options.material, &mut self.document)
+        {
+            let [r, g, b] = base_color;
+            let values = [
+                (Channel::BaseColor, [r, g, b, 1.0]),
+                (Channel::Metallic, [metallic; 4]),
+                (Channel::Roughness, [roughness; 4]),
+            ];
+            let sets: Vec<_> = document.project.texture_sets.iter().map(|s| s.id).collect();
+            for set in sets {
+                for (channel, value) in values {
+                    let mut def = ChannelDef::standard(channel);
+                    def.default = value;
+                    document.execute(Box::new(patine_core::commands::SetChannelDef::set(
+                        set, def,
+                    )));
+                    document.history.seal();
+                }
+            }
+        }
         if let Some(document) = &mut self.document {
             for edit in &options.edits {
                 let command: Box<dyn patine_core::command::Command> = match edit {
@@ -285,13 +362,14 @@ impl App {
         if let Some(background) = options.background {
             settings.background = background;
         }
-        if let Some((base_color, metallic, roughness)) = options.material {
-            settings.material.base_color = base_color;
-            settings.material.metallic = metallic;
-            settings.material.roughness = roughness;
+        if let Some((mode, _)) = options.display {
+            settings.display = mode;
         }
         settings.wireframe |= options.wireframe;
         settings.shadows &= !options.no_shadows;
+        if let Some((_, Some(channel))) = options.display {
+            view.inspect_channel = channel;
+        }
         if let Some(projection) = options.projection {
             view.camera.projection = projection;
         }
@@ -334,6 +412,7 @@ impl App {
                 .document
                 .as_ref()
                 .is_some_and(|document| document.history.can_redo()),
+            channel_view: view.settings.display == DisplayMode::Channel,
             orthographic: view.camera.projection == Projection::Orthographic,
             wireframe: view.settings.wireframe,
             shadows: view.settings.shadows,
@@ -398,6 +477,7 @@ impl App {
             egui_wgpu::RendererOptions::default(),
         );
         let viewport = Viewport::new(&gpu).context("failed to create the viewport")?;
+        let uv_view = UvView::new(&gpu).context("failed to create the 2D view")?;
         let gpu_mesh = self
             .document
             .as_ref()
@@ -415,6 +495,11 @@ impl App {
             viewport,
             gpu_mesh,
             last_pick: None,
+            pool: TexturePool::new(POOL_BUDGET),
+            gpu_document: GpuDocument::new(),
+            materials: Vec::new(),
+            materials_inspect: None,
+            uv_view,
         })
     }
 
@@ -594,11 +679,14 @@ impl App {
         if let Some(gfx) = self.graphics.as_mut() {
             gfx.gpu_mesh = upload_mesh(&gfx.gpu, &gfx.viewport, &document.project.mesh);
             gfx.last_pick = None;
+            gfx.gpu_document.clear(&mut gfx.pool);
+            gfx.materials.clear();
         }
         self.ui.view.hovered = None;
         // Framed at the next render, when the panel size is known.
         self.ui.view.frame_pending = true;
-        self.ui.renaming = None;
+        self.ui.texture_sets = Default::default();
+        self.ui.view_2d.framed = false;
         self.document = Some(document);
     }
 
@@ -740,6 +828,7 @@ impl App {
             ActionId::LanguageEnglish => self.i18n = I18n::new(Language::English),
             ActionId::LanguageFrench => self.i18n = I18n::new(Language::French),
             ActionId::About => self.ui.show_about = true,
+            ActionId::FrameMesh if self.ui.view_2d.hovered => self.ui.view_2d.frame(),
             ActionId::FrameMesh => {
                 if let Some(bounds) = self
                     .document
@@ -764,6 +853,33 @@ impl App {
             ActionId::ToggleShadows => {
                 let settings = &mut self.ui.view.settings;
                 settings.shadows = !settings.shadows;
+            }
+            ActionId::ToggleChannelView => {
+                let channels = self.current_channels();
+                let view = &mut self.ui.view;
+                if view.settings.display == DisplayMode::Channel {
+                    view.settings.display = DisplayMode::Lit;
+                } else if let Some(first) = channels.first() {
+                    if !channels.contains(&view.inspect_channel) {
+                        view.inspect_channel = *first;
+                    }
+                    view.settings.display = DisplayMode::Channel;
+                }
+            }
+            ActionId::NextChannel => {
+                let channels = self.current_channels();
+                let view = &mut self.ui.view;
+                if let Some(first) = channels.first() {
+                    view.inspect_channel = if view.settings.display == DisplayMode::Channel {
+                        let index = channels.iter().position(|c| *c == view.inspect_channel);
+                        index.map_or(*first, |i| channels[(i + 1) % channels.len()])
+                    } else if channels.contains(&view.inspect_channel) {
+                        view.inspect_channel
+                    } else {
+                        *first
+                    };
+                    view.settings.display = DisplayMode::Channel;
+                }
             }
             ActionId::Undo => {
                 if let Some(document) = &mut self.document {
@@ -823,6 +939,77 @@ impl App {
         }
     }
 
+    /// Channels of the current texture set.
+    fn current_channels(&self) -> Vec<Channel> {
+        self.document
+            .as_ref()
+            .and_then(|document| document.project.texture_set(self.ui.texture_sets.selected))
+            .map(|set| set.channels.iter().map(|def| def.channel).collect())
+            .unwrap_or_default()
+    }
+
+    /// Renders the 2D view of the current texture set when its panel is shown, and keeps
+    /// its egui texture registered.
+    fn render_view_2d(&mut self) {
+        let state = &mut self.ui.view_2d;
+        let visible = std::mem::take(&mut state.visible);
+        let (Some(gfx), Some(document)) = (self.graphics.as_mut(), &self.document) else {
+            return;
+        };
+        let Some(mesh) = gfx.gpu_mesh.as_ref() else {
+            return;
+        };
+        if !visible || state.size[0] <= 1 || state.size[1] <= 1 {
+            return;
+        }
+        if !state.framed {
+            state.frame();
+        }
+        let project = &document.project;
+        let Some(set) = project
+            .texture_set(self.ui.texture_sets.selected)
+            .or(project.texture_sets.first())
+        else {
+            return;
+        };
+        let channel = match self.ui.view.settings.display {
+            DisplayMode::Channel => self.ui.view.inspect_channel,
+            _ => Channel::BaseColor,
+        };
+        let texture = gfx
+            .gpu_document
+            .texture_set(set.id)
+            .and_then(|gpu| gpu.channel(channel))
+            .map(|texture| (&texture.view, InspectKind::of(channel)));
+        let scene = UvScene {
+            mesh,
+            material: set.material_index,
+            texture,
+            transform: state.transform,
+            wireframe: true,
+        };
+        let reallocated = gfx
+            .uv_view
+            .render(&gfx.gpu, &scene, state.size[0], state.size[1]);
+        if !reallocated && state.texture.is_some() {
+            return;
+        }
+        let Some((_, output)) = gfx.uv_view.output() else {
+            return;
+        };
+        let device = &gfx.gpu.device;
+        let filter = wgpu::FilterMode::Linear;
+        match state.texture {
+            Some(id) => gfx
+                .renderer
+                .update_egui_texture_from_wgpu_texture(device, output, filter, id),
+            None => {
+                state.texture = Some(gfx.renderer.register_native_texture(device, output, filter));
+                gfx.window.request_redraw();
+            }
+        }
+    }
+
     /// Renders the 3D viewport and keeps its egui texture registered.
     fn render_viewport(&mut self) {
         let Some(gfx) = self.graphics.as_mut() else {
@@ -879,9 +1066,36 @@ impl App {
                 }
             }
         }
+        // The document's channel textures, and the materials binding them.
+        let inspect =
+            (view.settings.display == DisplayMode::Channel).then_some(view.inspect_channel);
+        match &self.document {
+            Some(document) => {
+                let project = &document.project;
+                let changed = gfx.gpu_document.sync(&gfx.gpu, &mut gfx.pool, project);
+                if !changed.is_empty()
+                    || gfx.materials_inspect != inspect
+                    || gfx.materials.len() != project.mesh.materials.len()
+                {
+                    gfx.materials = build_materials(
+                        &gfx.gpu,
+                        &gfx.viewport,
+                        &gfx.gpu_document,
+                        project,
+                        inspect,
+                    );
+                    gfx.materials_inspect = inspect;
+                }
+            }
+            None if !gfx.materials.is_empty() => {
+                gfx.gpu_document.clear(&mut gfx.pool);
+                gfx.materials.clear();
+            }
+            None => {}
+        }
         let scene = Scene {
             mesh: gfx.gpu_mesh.as_ref(),
-            materials: None,
+            materials: (!gfx.materials.is_empty()).then_some(gfx.materials.as_slice()),
             camera: &view.camera,
             settings: &view.settings,
         };
@@ -982,6 +1196,7 @@ impl App {
                     applied: document.history.applied(),
                     truncated: document.history.truncated(),
                 }),
+            gpu_memory: self.document.as_ref().map(|_| gfx.gpu_document.memory()),
             file_status: if self.file_jobs.saving() {
                 Some("file-busy-saving")
             } else if self.file_jobs.opening() {
@@ -1029,6 +1244,7 @@ impl App {
 
         // The 3D image of this frame, with the camera moved by this frame's input.
         self.render_viewport();
+        self.render_view_2d();
         let Some(gfx) = self.graphics.as_mut() else {
             return;
         };

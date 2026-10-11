@@ -4,8 +4,9 @@
 
 use std::path::PathBuf;
 
+use patine_core::channel::Channel;
 use patine_render::camera::Projection;
-use patine_render::settings::{Background, ToneMapper};
+use patine_render::settings::{Background, DisplayMode, ToneMapper};
 use thiserror::Error;
 
 use crate::i18n::Language;
@@ -36,6 +37,8 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
   --capture PNG                 save the window to PNG after a few frames, then quit
   --capture-frames N            frames to wait before capturing (default 30)
   --autosave-interval SECS      time between autosaves (default 300)
+  --display MODE                lit, checker or channel:<id> (base-color, roughness, user-0...)
+  --texture-set N               current texture set (Texture Sets panel, 2D view)
   --edit EDIT                   apply a command to the opened project (repeatable):
                                 rotation=DEG, exposure=EV, rename=SET:NAME, undo=N
 
@@ -130,6 +133,10 @@ pub struct StartupOptions {
     pub autosave_interval: Option<u64>,
     /// Commands applied to the startup project, in order.
     pub edits: Vec<StartupEdit>,
+    /// Display mode, with the inspected channel for the channel mode.
+    pub display: Option<(DisplayMode, Option<Channel>)>,
+    /// Current texture set.
+    pub texture_set: Option<u32>,
 }
 
 /// Invalid command line.
@@ -266,6 +273,24 @@ impl StartupOptions {
                 }
                 "--dialog-path" => options.dialog_path = Some(PathBuf::from(value()?)),
                 "--dialog-create" => options.dialog_create = true,
+                "--display" => {
+                    let v = value()?;
+                    options.display = Some(match v.as_str() {
+                        "lit" => (DisplayMode::Lit, None),
+                        "checker" => (DisplayMode::UvChecker, None),
+                        other => {
+                            let channel = other
+                                .strip_prefix("channel:")
+                                .and_then(Channel::from_id)
+                                .ok_or_else(|| invalid(&v))?;
+                            (DisplayMode::Channel, Some(channel))
+                        }
+                    });
+                }
+                "--texture-set" => {
+                    let v = value()?;
+                    options.texture_set = Some(v.parse().map_err(|_| invalid(&v))?);
+                }
                 "--edit" => {
                     let v = value()?;
                     options
@@ -360,6 +385,17 @@ mod tests {
             ]
         );
         assert!(parse(&["--edit", "scale=2"]).is_err());
+        let options = parse(&["--display", "channel:roughness", "--texture-set", "2"]).unwrap();
+        assert_eq!(
+            options.display,
+            Some((DisplayMode::Channel, Some(Channel::Roughness)))
+        );
+        assert_eq!(options.texture_set, Some(2));
+        assert_eq!(
+            parse(&["--display", "checker"]).unwrap().display,
+            Some((DisplayMode::UvChecker, None))
+        );
+        assert!(parse(&["--display", "channel:albedo"]).is_err());
         assert!(parse(&["--edit", "rename=x"]).is_err());
     }
 

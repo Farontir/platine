@@ -15,5 +15,7 @@ pub mod logging;
 pub mod new_project;
 pub mod profiling;
 pub mod project_io;
+pub mod texture_sets_panel;
 pub mod ui;
+pub mod view_2d;
 pub mod viewport_panel;

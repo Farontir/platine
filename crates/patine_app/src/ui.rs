@@ -9,9 +9,10 @@ use egui_phosphor::regular as icons;
 use fluent_bundle::FluentArgs;
 use tracing::Level;
 
+use patine_core::channel::Channel;
 use patine_core::command::Command;
-use patine_core::commands::RenameTextureSet;
-use patine_core::project::{Project, TextureSetId};
+use patine_core::project::Project;
+use patine_render::settings::DisplayMode;
 
 use crate::actions::{ActionContext, ActionId, ActionRegistry};
 use crate::display_panel::{self, EnvironmentView, PickedHdri};
@@ -20,6 +21,8 @@ use crate::history_panel::{self, HistoryView};
 use crate::i18n::I18n;
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, DialogOutcome, NewProjectDialog};
+use crate::texture_sets_panel::{self, TextureSetsState};
+use crate::view_2d::{self, View2dState};
 use crate::viewport_panel::{self, ViewState};
 
 /// A dockable panel of the main window.
@@ -121,8 +124,10 @@ pub struct UiState {
     pub new_project: Option<NewProjectDialog>,
     /// Camera and display settings of the 3D viewport.
     pub view: ViewState,
-    /// Texture set being renamed in the Texture Sets panel, with the edited name.
-    pub renaming: Option<(TextureSetId, String)>,
+    /// Texture Sets panel: current texture set, renaming.
+    pub texture_sets: TextureSetsState,
+    /// The 2D view.
+    pub view_2d: View2dState,
     /// Name of the document whose unsaved changes the user must decide about.
     pub unsaved_prompt: Option<String>,
     /// Error shown in a dialog until dismissed.
@@ -150,7 +155,8 @@ impl Default for UiState {
             console_level: Level::INFO,
             new_project: None,
             view: ViewState::default(),
-            renaming: None,
+            texture_sets: TextureSetsState::default(),
+            view_2d: View2dState::default(),
             unsaved_prompt: None,
             error_message: None,
             recovery_prompt: None,
@@ -182,6 +188,8 @@ pub struct FrameInfo<'a> {
     pub file_status: Option<&'static str>,
     /// History of the open document.
     pub history: Option<HistoryView>,
+    /// Memory of the channel textures of the document, in bytes.
+    pub gpu_memory: Option<u64>,
 }
 
 /// What the interface asks the application to do after a frame.
@@ -272,7 +280,8 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> UiOutput 
             info,
             console_level: &mut state.console_level,
             view: &mut state.view,
-            renaming: &mut state.renaming,
+            texture_sets: &mut state.texture_sets,
+            view_2d: &mut state.view_2d,
             output: &mut output,
         };
         DockArea::new(&mut state.dock)
@@ -401,6 +410,9 @@ fn menu_bar(ui: &mut Ui, info: &FrameInfo<'_>, triggered: &mut Vec<ActionId>) {
         action_item(ui, info, ActionId::ToggleWireframe, triggered);
         action_item(ui, info, ActionId::ToggleShadows, triggered);
         ui.separator();
+        action_item(ui, info, ActionId::ToggleChannelView, triggered);
+        action_item(ui, info, ActionId::NextChannel, triggered);
+        ui.separator();
         action_item(ui, info, ActionId::ResetLayout, triggered);
         action_item(ui, info, ActionId::ToggleProfiler, triggered);
     });
@@ -451,8 +463,20 @@ struct PanelViewer<'a, 'b> {
     info: &'a FrameInfo<'b>,
     console_level: &'a mut Level,
     view: &'a mut ViewState,
-    renaming: &'a mut Option<(TextureSetId, String)>,
+    texture_sets: &'a mut TextureSetsState,
+    view_2d: &'a mut View2dState,
     output: &'a mut UiOutput,
+}
+
+impl PanelViewer<'_, '_> {
+    /// Channels of the current texture set.
+    fn current_channels(&self) -> Vec<Channel> {
+        self.info
+            .project
+            .and_then(|project| project.texture_set(self.texture_sets.selected))
+            .map(|set| set.channels.iter().map(|def| def.channel).collect())
+            .unwrap_or_default()
+    }
 }
 
 impl TabViewer for PanelViewer<'_, '_> {
@@ -469,7 +493,14 @@ impl TabViewer for PanelViewer<'_, '_> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Panel) {
         match tab {
             Panel::Viewport3D => {
-                let viewport = viewport_panel::show(ui, self.view);
+                let overlay = (self.view.settings.display != DisplayMode::Lit).then(|| {
+                    display_panel::display_mode_label(
+                        self.info.i18n,
+                        self.view.settings.display,
+                        self.view.inspect_channel,
+                    )
+                });
+                let viewport = viewport_panel::show(ui, self.view, overlay.as_deref());
                 if let Some(rotation) = viewport.environment_rotation {
                     self.output.environment = Some(EnvironmentChange::Rotation(rotation));
                 }
@@ -483,14 +514,33 @@ impl TabViewer for PanelViewer<'_, '_> {
                 }
             }
             Panel::TextureSets => {
-                if let Some(command) = texture_sets(ui, self.info, self.renaming) {
-                    self.output.commands.push(command);
-                    self.output.seal = true;
-                }
+                let panel = texture_sets_panel::show(
+                    ui,
+                    self.info.i18n,
+                    self.info.project,
+                    self.texture_sets,
+                    self.info.gpu_memory,
+                );
+                self.output.commands.extend(panel.command);
+                self.output.seal |= panel.seal;
+            }
+            Panel::View2D => {
+                view_2d::show(
+                    ui,
+                    self.view_2d,
+                    self.info.i18n,
+                    self.info.project.is_some(),
+                );
             }
             Panel::Display => {
-                let display =
-                    display_panel::show(ui, self.view, self.info.i18n, &self.info.environment);
+                let channels = self.current_channels();
+                let display = display_panel::show(
+                    ui,
+                    self.view,
+                    self.info.i18n,
+                    &self.info.environment,
+                    &channels,
+                );
                 if display.change.is_some() {
                     self.output.environment = display.change;
                 }
@@ -519,76 +569,6 @@ impl TabViewer for PanelViewer<'_, '_> {
             [true, true]
         }
     }
-}
-
-/// Texture Sets panel. A double click on a name starts renaming it; Enter or a click
-/// elsewhere returns the rename command, Escape cancels.
-fn texture_sets(
-    ui: &mut Ui,
-    info: &FrameInfo<'_>,
-    renaming: &mut Option<(TextureSetId, String)>,
-) -> Option<Box<dyn Command>> {
-    let i18n = info.i18n;
-    let Some(project) = info.project else {
-        ui.centered_and_justified(|ui| {
-            ui.label(RichText::new(i18n.tr("texture-sets-empty")).weak());
-        });
-        *renaming = None;
-        return None;
-    };
-    let mut command: Option<Box<dyn Command>> = None;
-    let mut args = FluentArgs::new();
-    args.set("name", project.mesh.name.clone());
-    args.set("triangles", project.mesh.triangle_count());
-    args.set("vertices", project.mesh.vertex_count());
-    ui.label(i18n.tr_args("texture-sets-mesh", &args));
-    ui.separator();
-    egui::Grid::new("texture_sets_grid")
-        .num_columns(3)
-        .striped(true)
-        .spacing([16.0, 4.0])
-        .show(ui, |ui| {
-            ui.strong(i18n.tr("texture-sets-name"));
-            ui.strong(i18n.tr("texture-sets-resolution"));
-            ui.strong(i18n.tr("texture-sets-triangles"));
-            ui.end_row();
-            for set in &project.texture_sets {
-                match renaming {
-                    Some((id, name)) if *id == set.id => {
-                        let response =
-                            ui.add(egui::TextEdit::singleline(name).desired_width(140.0));
-                        if !response.has_focus() && !response.lost_focus() {
-                            response.request_focus();
-                        }
-                        if response.lost_focus() {
-                            let cancelled = ui.input(|input| input.key_pressed(egui::Key::Escape));
-                            let name = name.trim().to_owned();
-                            if !cancelled && !name.is_empty() && name != set.name {
-                                command = Some(Box::new(RenameTextureSet::new(set.id, name)));
-                            }
-                            *renaming = None;
-                        }
-                    }
-                    _ => {
-                        let label = ui
-                            .add(egui::Label::new(&set.name).sense(egui::Sense::click()))
-                            .on_hover_text(i18n.tr("texture-sets-rename-hint"));
-                        if label.double_clicked() {
-                            *renaming = Some((set.id, set.name.clone()));
-                        }
-                    }
-                }
-                ui.label(format!("{0} × {0}", set.resolution.pixels()));
-                ui.label(
-                    project
-                        .mesh
-                        .material_triangle_count(set.material_index)
-                        .to_string(),
-                );
-                ui.end_row();
-            }
-        });
-    command
 }
 
 const LEVELS: [(Level, &str); 5] = [
@@ -747,6 +727,7 @@ mod tests {
                     applied: 0,
                     truncated: false,
                 }),
+                gpu_memory: Some(512 << 20),
             };
             for _ in 0..3 {
                 let input = egui::RawInput {

@@ -114,10 +114,6 @@ display-projection = Projection
 display-perspective = Perspective
 display-orthographic = Orthographique
 display-fov = Champ de vision
-display-material = Matériau d'aperçu
-display-base-color = Couleur de base
-display-metallic = Metallic
-display-roughness = Roughness
 error-environment = Impossible de charger l'environnement : { $message }
 
 ## History
@@ -161,3 +157,37 @@ recovery-message = Patine s'est fermé sans enregistrer « { $name } ». Une cop
     } peut être récupérée.
 recovery-recover = Récupérer
 recovery-discard = Supprimer la copie
+
+## Channels
+channel-base-color = Couleur de base
+channel-metallic = Metallic
+channel-roughness = Roughness
+channel-normal = Normale
+channel-height = Hauteur
+channel-ambient-occlusion = Occlusion ambiante
+channel-emissive = Émissif
+channel-opacity = Opacité
+channel-user = Utilisateur { $index }
+command-add-channel = Ajouter le canal { $channel }
+command-remove-channel = Retirer le canal { $channel }
+command-channel-default = Valeur par défaut : { $channel }
+
+## Display modes
+display-mode = Mode d'affichage
+display-mode-lit = Matériau éclairé
+display-mode-checker = Damier UV
+display-mode-channel = Canal : { $channel }
+action-view-toggle-channel = Canal isolé
+action-view-next-channel = Canal suivant
+
+## Texture sets panel (channels)
+texture-sets-channels = Canaux de « { $name } »
+texture-sets-add-channel = Ajouter un canal
+texture-sets-remove-channel = Retirer ce canal
+texture-sets-select-hint = Clic : texture set courant · double-clic : renommer
+texture-sets-memory = Mémoire GPU des canaux : { $document } Mo
+texture-sets-normal-default = (0, 0, 1)
+
+## 2D view
+view-2d-empty = Aucun projet ouvert.
+view-2d-hint = Molette : zoom · clic milieu : déplacer · F : cadrer

@@ -10,12 +10,13 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 
 use egui::Ui;
 use fluent_bundle::FluentArgs;
+use patine_core::channel::Channel;
 use patine_core::environment::{EnvironmentSettings, EnvironmentSource};
 use patine_render::camera::Projection;
 use patine_render::environment::EquirectImage;
-use patine_render::settings::{Background, ToneMapper};
+use patine_render::settings::{Background, DisplayMode, ToneMapper};
 
-use crate::document::EnvironmentChange;
+use crate::document::{EnvironmentChange, channel_name};
 use crate::i18n::I18n;
 use crate::viewport_panel::ViewState;
 
@@ -198,8 +199,10 @@ fn tone_mapper_key(operator: ToneMapper) -> &'static str {
 
 /// Every translation key used by the panel, for tests.
 pub const TRANSLATION_KEYS: [&str; 26] = [
-    "display-metallic",
-    "display-roughness",
+    "display-mode",
+    "display-mode-lit",
+    "display-mode-checker",
+    "display-mode-channel",
     "display-environment",
     "display-environment-studio",
     "display-load-hdri",
@@ -221,17 +224,31 @@ pub const TRANSLATION_KEYS: [&str; 26] = [
     "display-perspective",
     "display-orthographic",
     "display-fov",
-    "display-material",
-    "display-base-color",
     "error-environment",
 ];
 
 /// Draws the panel and returns the environment changes asked for.
+/// Name of a display mode, `channel` being the inspected channel.
+pub fn display_mode_label(i18n: &I18n, mode: DisplayMode, channel: Channel) -> String {
+    match mode {
+        DisplayMode::Lit => i18n.tr("display-mode-lit").into_owned(),
+        DisplayMode::UvChecker => i18n.tr("display-mode-checker").into_owned(),
+        DisplayMode::Channel => {
+            let mut args = FluentArgs::new();
+            args.set("channel", channel_name(i18n, channel));
+            i18n.tr_args("display-mode-channel", &args)
+        }
+    }
+}
+
+/// Draws the panel and returns the environment changes asked for. `channels` are those
+/// of the current texture set, offered as display modes.
 pub fn show(
     ui: &mut Ui,
     view: &mut ViewState,
     i18n: &I18n,
     environment: &EnvironmentView<'_>,
+    channels: &[Channel],
 ) -> DisplayOutput {
     let mut output = DisplayOutput::default();
     if let Some(picked) = view.environment.poll() {
@@ -392,22 +409,28 @@ pub fn show(
         });
 
     ui.separator();
-    ui.heading(i18n.tr("display-material"));
-    let material = &mut settings.material;
-    egui::Grid::new("material_grid")
-        .num_columns(2)
-        .spacing([12.0, 6.0])
-        .show(ui, |ui| {
-            ui.label(i18n.tr("display-base-color"));
-            ui.color_edit_button_rgb(&mut material.base_color);
-            ui.end_row();
-            ui.label(i18n.tr("display-metallic"));
-            ui.add(egui::Slider::new(&mut material.metallic, 0.0..=1.0));
-            ui.end_row();
-            ui.label(i18n.tr("display-roughness"));
-            ui.add(egui::Slider::new(&mut material.roughness, 0.0..=1.0));
-            ui.end_row();
-        });
+    ui.horizontal(|ui| {
+        ui.label(i18n.tr("display-mode"));
+        let current = display_mode_label(i18n, view.settings.display, view.inspect_channel);
+        egui::ComboBox::from_id_salt("display_mode")
+            .selected_text(current)
+            .show_ui(ui, |ui| {
+                let mut choices = vec![(DisplayMode::Lit, view.inspect_channel)];
+                choices.extend(channels.iter().map(|c| (DisplayMode::Channel, *c)));
+                choices.push((DisplayMode::UvChecker, view.inspect_channel));
+                for (mode, channel) in choices {
+                    let selected = view.settings.display == mode
+                        && (mode != DisplayMode::Channel || view.inspect_channel == channel);
+                    if ui
+                        .selectable_label(selected, display_mode_label(i18n, mode, channel))
+                        .clicked()
+                    {
+                        view.settings.display = mode;
+                        view.inspect_channel = channel;
+                    }
+                }
+            });
+    });
     output
 }
 

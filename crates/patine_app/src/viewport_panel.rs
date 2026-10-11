@@ -4,6 +4,7 @@
 //! the application as a change.
 
 use egui::{PointerButton, Sense, Ui};
+use patine_core::channel::Channel;
 use patine_render::camera::OrbitCamera;
 use patine_render::settings::ViewSettings;
 
@@ -39,6 +40,8 @@ pub struct ViewState {
     pub frame_pending: bool,
     /// Panel size at the previous render, to detect a settled layout.
     pub previous_size: [u32; 2],
+    /// Channel shown by the channel display mode.
+    pub inspect_channel: Channel,
 }
 
 impl Default for ViewState {
@@ -53,6 +56,7 @@ impl Default for ViewState {
             hovered: None,
             frame_pending: false,
             previous_size: [0, 0],
+            inspect_channel: Channel::BaseColor,
         }
     }
 }
@@ -135,8 +139,9 @@ impl ViewState {
     }
 }
 
-/// Draws the viewport panel and applies the mouse input of this frame.
-pub fn show(ui: &mut Ui, view: &mut ViewState) -> ViewportOutput {
+/// Draws the viewport panel and applies the mouse input of this frame. `overlay` is
+/// written in the top-left corner (the display mode when it is not the lit material).
+pub fn show(ui: &mut Ui, view: &mut ViewState, overlay: Option<&str>) -> ViewportOutput {
     let mut output = ViewportOutput::default();
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -149,6 +154,17 @@ pub fn show(ui: &mut Ui, view: &mut ViewState) -> ViewportOutput {
     if let Some(texture) = view.texture {
         let uv = egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0));
         ui.painter().image(texture, rect, uv, egui::Color32::WHITE);
+    }
+    if let Some(text) = overlay {
+        let position = rect.min + egui::vec2(10.0, 8.0);
+        let font = egui::FontId::proportional(14.0);
+        let galley = ui
+            .painter()
+            .layout_no_wrap(text.to_owned(), font, egui::Color32::WHITE);
+        let background = egui::Rect::from_min_size(position, galley.size()).expand(4.0);
+        ui.painter()
+            .rect_filled(background, 4.0, egui::Color32::from_black_alpha(160));
+        ui.painter().galley(position, galley, egui::Color32::WHITE);
     }
 
     let modifiers = ui.input(|input| input.modifiers);

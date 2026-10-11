@@ -114,10 +114,6 @@ display-projection = Projection
 display-perspective = Perspective
 display-orthographic = Orthographic
 display-fov = Field of view
-display-material = Preview material
-display-base-color = Base color
-display-metallic = Metallic
-display-roughness = Roughness
 error-environment = Cannot load the environment: { $message }
 
 ## History
@@ -161,3 +157,37 @@ recovery-message = Patine closed without saving “{ $name }”. A copy saved au
     } can be recovered.
 recovery-recover = Recover
 recovery-discard = Delete the copy
+
+## Channels
+channel-base-color = Base color
+channel-metallic = Metallic
+channel-roughness = Roughness
+channel-normal = Normal
+channel-height = Height
+channel-ambient-occlusion = Ambient occlusion
+channel-emissive = Emissive
+channel-opacity = Opacity
+channel-user = User { $index }
+command-add-channel = Add channel { $channel }
+command-remove-channel = Remove channel { $channel }
+command-channel-default = Default value: { $channel }
+
+## Display modes
+display-mode = Display mode
+display-mode-lit = Lit material
+display-mode-checker = UV checker
+display-mode-channel = Channel: { $channel }
+action-view-toggle-channel = Isolated channel
+action-view-next-channel = Next channel
+
+## Texture sets panel (channels)
+texture-sets-channels = Channels of “{ $name }”
+texture-sets-add-channel = Add a channel
+texture-sets-remove-channel = Remove this channel
+texture-sets-select-hint = Click: current texture set · double-click: rename
+texture-sets-memory = GPU memory of the channels: { $document } MB
+texture-sets-normal-default = (0, 0, 1)
+
+## 2D view
+view-2d-empty = No project open.
+view-2d-hint = Wheel: zoom · middle click: pan · F: frame

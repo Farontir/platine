@@ -40,6 +40,10 @@ pub enum ActionId {
     Undo,
     /// Redo the last undone command.
     Redo,
+    /// Switch between the lit material and the isolated channel.
+    ToggleChannelView,
+    /// Show the next channel of the current texture set.
+    NextChannel,
 }
 
 /// Application state that actions read to decide whether they are enabled or checked.
@@ -63,6 +67,8 @@ pub struct ActionContext {
     pub can_undo: bool,
     /// Whether the history has a command to redo.
     pub can_redo: bool,
+    /// Whether the viewport shows an isolated channel.
+    pub channel_view: bool,
 }
 
 /// Declaration of an action.
@@ -232,6 +238,24 @@ impl Default for ActionRegistry {
                     yields_to_text: false,
                 },
                 Action {
+                    id: ActionId::ToggleChannelView,
+                    name: "view.toggle_channel",
+                    label_key: "action-view-toggle-channel",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::F1)),
+                    enabled: |ctx| ctx.has_project,
+                    checked: Some(|ctx| ctx.channel_view),
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::NextChannel,
+                    name: "view.next_channel",
+                    label_key: "action-view-next-channel",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::C)),
+                    enabled: |ctx| ctx.has_project,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
                     id: ActionId::Undo,
                     name: "edit.undo",
                     label_key: "action-edit-undo",
@@ -346,6 +370,8 @@ mod tests {
             ActionId::ToggleShadows,
             ActionId::Undo,
             ActionId::Redo,
+            ActionId::ToggleChannelView,
+            ActionId::NextChannel,
         ] {
             assert_eq!(registry.get(id).id, id);
         }
