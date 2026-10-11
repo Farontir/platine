@@ -16,6 +16,7 @@ bytemuck.workspace = true
 [dev-dependencies]
 patine_gpu = { workspace = true, features = ["testing"] }
 half.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

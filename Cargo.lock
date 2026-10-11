@@ -2419,6 +2419,7 @@ dependencies = [
  "half",
  "patine_core",
  "patine_gpu",
+ "proptest",
 ]
 
 [[package]]

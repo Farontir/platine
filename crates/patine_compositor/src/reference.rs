@@ -267,7 +267,8 @@ pub fn apply(
         };
     }
     let w = weight.clamp(0.0, 1.0);
-    let mix = |a: f32, b: f32| a + (b - a) * w;
+    // The formula of WGSL's mix, so that the GPU rounds the same way.
+    let mix = |a: f32, b: f32| a * (1.0 - w) + b * w;
     let b = [dst[0], dst[1], dst[2]];
     let s = [src[0], src[1], src[2]];
     match kind {
@@ -306,6 +307,21 @@ pub fn apply(
 /// equivalent for folders, Disable skips the folder, and other modes act as Normal.
 /// Layers that do not affect `channel`, hidden layers and non-uniform content are skipped.
 pub fn composite(layers: &[Layer], channel: Channel, start: [f32; 4]) -> [f32; 4] {
+    composite_with(layers, channel, start, &|v| v)
+}
+
+/// [`composite`] with every intermediate value rounded to f16, as the GPU stores each
+/// composition in a texture.
+pub fn composite_stored(layers: &[Layer], channel: Channel, start: [f32; 4]) -> [f32; 4] {
+    composite_with(layers, channel, start.map(round_f16), &|v| v.map(round_f16))
+}
+
+fn composite_with(
+    layers: &[Layer],
+    channel: Channel,
+    start: [f32; 4],
+    store: &dyn Fn([f32; 4]) -> [f32; 4],
+) -> [f32; 4] {
     let kind = ChannelKind::of(channel);
     let mut dst = start;
     for layer in layers.iter().filter(|layer| layer.visible) {
@@ -318,12 +334,12 @@ pub fn composite(layers: &[Layer], channel: Channel, start: [f32; 4]) -> [f32; 4
                 ..
             } => {
                 if let Some(src) = values.get(&channel) {
-                    dst = apply(blend.mode, kind, dst, *src, blend.opacity);
+                    dst = store(apply(blend.mode, kind, dst, *src, blend.opacity));
                 }
             }
             LayerKind::Folder { children } if blend.mode != BlendMode::Disable => {
-                let inner = composite(children, channel, dst);
-                dst = apply(BlendMode::Normal, kind, dst, inner, blend.opacity);
+                let inner = composite_with(children, channel, dst, store);
+                dst = store(apply(BlendMode::Normal, kind, dst, inner, blend.opacity));
             }
             // Paint, procedural and image content, instances: later milestones.
             _ => {}

@@ -2,6 +2,7 @@
 //! the measured memory returns to the expected value. The document changes through real
 //! commands and undo, as in the application.
 
+use patine_compositor::compositor::Compositor;
 use patine_compositor::gpu_document::{GpuDocument, expected_memory};
 use patine_core::channel::{Channel, ChannelDef};
 use patine_core::commands::{SetChannelDef, SetTextureSetResolution};
@@ -52,11 +53,14 @@ fn project() -> Project {
 struct Fixture {
     pool: TexturePool,
     document: GpuDocument,
+    compositor: Compositor,
 }
 
 impl Fixture {
     fn sync(&mut self, ctx: &GpuContext, project: &Project) -> Vec<TextureSetId> {
-        let changed = self.document.sync(ctx, &mut self.pool, project);
+        let changed = self
+            .document
+            .sync(ctx, &mut self.pool, &self.compositor, project);
         // Destructions are processed by the device at its next maintenance.
         let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
         assert_eq!(
@@ -76,6 +80,7 @@ gpu_test!(
         let mut gpu = Fixture {
             pool: TexturePool::new(u64::MAX),
             document: GpuDocument::new(),
+            compositor: Compositor::new(&ctx).expect("shaders compile"),
         };
         let first = gpu.sync(&ctx, &project);
         assert_eq!(first, [TextureSetId(0), TextureSetId(1)]);
@@ -135,7 +140,8 @@ gpu_test!(
         let mut project = project();
         let mut pool = TexturePool::new(u64::MAX);
         let mut document = GpuDocument::new();
-        document.sync(&ctx, &mut pool, &project);
+        let compositor = Compositor::new(&ctx).expect("shaders compile");
+        document.sync(&ctx, &mut pool, &compositor, &project);
 
         let check = |document: &GpuDocument, pool: &TexturePool, channel, expected: [f32; 4]| {
             let set = document.texture_set(TextureSetId(0)).expect("synced");
@@ -166,7 +172,8 @@ gpu_test!(
         patine_core::command::Command::apply(&mut SetChannelDef::set(TextureSetId(0), rough), &mut project)
             .unwrap();
         let memory = pool.memory();
-        assert_eq!(document.sync(&ctx, &mut pool, &project), [TextureSetId(0)]);
+        // The textures are reused (same bind groups): no texture set is reported.
+        assert!(document.sync(&ctx, &mut pool, &compositor, &project).is_empty());
         assert_eq!(pool.memory(), memory, "a new default value reuses the textures");
         check(&document, &pool, Channel::BaseColor, [0.75, 0.125, 0.25, 1.0]);
         check(&document, &pool, Channel::Roughness, [0.875, 0.0, 0.0, 0.0]);

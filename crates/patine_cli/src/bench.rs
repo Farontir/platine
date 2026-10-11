@@ -4,6 +4,7 @@
 use std::time::Instant;
 
 use anyhow::{Context as _, bail};
+use patine_compositor::compositor::Compositor;
 use patine_compositor::gpu_document::GpuDocument;
 use patine_core::channel::{Channel, ChannelDef};
 use patine_core::project::{Project, ProjectSettings, Resolution};
@@ -118,7 +119,8 @@ impl ViewportBench {
                         set.channels.push(ChannelDef::standard(channel));
                     }
                 }
-                document.sync(&ctx, &mut pool, &project);
+                let compositor = Compositor::new(&ctx)?;
+                document.sync(&ctx, &mut pool, &compositor, &project);
                 ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
                 let set = &document.texture_sets()[0];
                 let mut textures = MaterialTextures::default();

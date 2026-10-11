@@ -12,6 +12,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
 use winit::window::{Window, WindowId};
 
+use patine_compositor::compositor::Compositor;
 use patine_compositor::gpu_document::GpuDocument;
 use patine_core::channel::{Channel, ChannelDef};
 use patine_core::environment::{EnvironmentSettings, EnvironmentSource};
@@ -60,6 +61,8 @@ struct Graphics {
     pool: TexturePool,
     /// Final channel textures of the document.
     gpu_document: GpuDocument,
+    /// Blend passes evaluating the layer stacks.
+    compositor: Compositor,
     /// Material of each texture set, by material index.
     materials: Vec<GpuMaterial>,
     /// Inspected channel the materials were built with.
@@ -478,6 +481,7 @@ impl App {
         );
         let viewport = Viewport::new(&gpu).context("failed to create the viewport")?;
         let uv_view = UvView::new(&gpu).context("failed to create the 2D view")?;
+        let compositor = Compositor::new(&gpu).context("failed to create the compositor")?;
         let gpu_mesh = self
             .document
             .as_ref()
@@ -497,6 +501,7 @@ impl App {
             last_pick: None,
             pool: TexturePool::new(POOL_BUDGET),
             gpu_document: GpuDocument::new(),
+            compositor,
             materials: Vec::new(),
             materials_inspect: None,
             uv_view,
@@ -1072,7 +1077,9 @@ impl App {
         match &self.document {
             Some(document) => {
                 let project = &document.project;
-                let changed = gfx.gpu_document.sync(&gfx.gpu, &mut gfx.pool, project);
+                let changed =
+                    gfx.gpu_document
+                        .sync(&gfx.gpu, &mut gfx.pool, &gfx.compositor, project);
                 if !changed.is_empty()
                     || gfx.materials_inspect != inspect
                     || gfx.materials.len() != project.mesh.materials.len()
