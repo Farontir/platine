@@ -16,6 +16,7 @@ Le plan complet est dans `docs/PLAN.md` : c'est la source de vérité pour la st
 - Ouvrir un mesh au lancement : `cargo run -p patine_app -- <mesh>`
 - Captures pour la doc (options de vue, dialogues, `--capture out.png`) : `cargo run --release -p patine_app -- --help`
 - Fichiers de tests manuels : téléchargés dans `manual_tests/assets` (non versionné), puis `blender -b --factory-startup --python scripts/manual_tests/generate_assets.py`
+- Tutoriel PDF des tests manuels : `cargo build --release -p patine_app`, `python scripts/manual_tests/capture_tutorial.py`, puis `python scripts/manual_tests/build_tutorial.py` (écrit `manual_tests/Patine-tutoriel-M0-M2.pdf`)
 - Mesurer : `cargo run --release -p patine_cli -- bench viewport` ; `cargo run --release -p patine_cli -- inspect <mesh>`
 
 ## Méthode de travail
