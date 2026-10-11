@@ -6,10 +6,11 @@ use std::sync::Arc;
 
 use common::{fill, folder, ids, project};
 use patine_core::channel::Channel;
+use patine_core::channel::ChannelDef;
 use patine_core::command::{Command, CommandError};
 use patine_core::commands::{
     InsertLayer, MoveLayer, RemoveLayer, RenameLayer, RenameTextureSet, SetChannelBlend,
-    SetEnvironment, SetLayerVisible, SetTextureSetResolution,
+    SetChannelDef, SetEnvironment, SetLayerVisible, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::history::History;
@@ -416,4 +417,78 @@ fn a_background_save_marks_the_state_it_wrote() {
     history.undo(&mut project).unwrap();
     assert!(!history.is_dirty());
     assert_eq!(project.environment.exposure_ev, 1.0);
+}
+
+#[test]
+fn channel_definitions_are_added_changed_and_removed() {
+    let project = project();
+    let channels = |p: &Project| -> Vec<Channel> {
+        p.texture_sets[0]
+            .channels
+            .iter()
+            .map(|d| d.channel)
+            .collect()
+    };
+    // Added at its canonical place: after height, before the user channels.
+    let mut with_user = project.clone();
+    SetChannelDef::set(SET, ChannelDef::standard(Channel::User(1)))
+        .apply(&mut with_user)
+        .unwrap();
+    let after = round_trip(
+        &with_user,
+        Box::new(SetChannelDef::set(
+            SET,
+            ChannelDef::standard(Channel::AmbientOcclusion),
+        )),
+    );
+    assert_eq!(
+        channels(&after),
+        [
+            Channel::BaseColor,
+            Channel::Metallic,
+            Channel::Roughness,
+            Channel::Normal,
+            Channel::Height,
+            Channel::AmbientOcclusion,
+            Channel::User(1),
+        ]
+    );
+
+    let mut red = ChannelDef::standard(Channel::BaseColor);
+    red.default = [0.8, 0.1, 0.1, 1.0];
+    let after = round_trip(&project, Box::new(SetChannelDef::set(SET, red.clone())));
+    assert_eq!(after.texture_sets[0].channels[0], red);
+
+    let after = round_trip(
+        &project,
+        Box::new(SetChannelDef::remove(SET, Channel::Metallic)),
+    );
+    assert!(!channels(&after).contains(&Channel::Metallic));
+    // Removing an absent channel changes nothing.
+    round_trip(
+        &project,
+        Box::new(SetChannelDef::remove(SET, Channel::Opacity)),
+    );
+}
+
+#[test]
+fn dragging_a_default_value_makes_one_entry() {
+    let mut project = project();
+    let mut history = History::default();
+    for step in 0..10 {
+        let mut def = ChannelDef::standard(Channel::Roughness);
+        def.default[0] = step as f32 / 10.0;
+        history
+            .push(&mut project, Box::new(SetChannelDef::set(SET, def)))
+            .unwrap();
+    }
+    assert_eq!(history.applied(), 1);
+    assert_eq!(history.labels()[0].key, "command-channel-default");
+    // Adding a channel is its own entry, even right after.
+    let add = SetChannelDef::set(SET, ChannelDef::standard(Channel::Emissive));
+    history.push(&mut project, Box::new(add)).unwrap();
+    assert_eq!(history.applied(), 2);
+    assert_eq!(history.labels()[1].key, "command-add-channel");
+    history.go_to(&mut project, 0).unwrap();
+    assert_eq!(project, common::project());
 }

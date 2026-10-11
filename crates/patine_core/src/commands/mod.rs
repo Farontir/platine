@@ -13,7 +13,7 @@ pub use environment::{EnvironmentField, SetEnvironment};
 pub use layers::{
     InsertLayer, MoveLayer, RemoveLayer, RenameLayer, SetChannelBlend, SetLayerVisible,
 };
-pub use texture_set::{RenameTextureSet, SetTextureSetResolution};
+pub use texture_set::{RenameTextureSet, SetChannelDef, SetTextureSetResolution};
 
 use crate::command::CommandError;
 

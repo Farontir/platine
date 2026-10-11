@@ -1,10 +1,11 @@
 //! Random user actions turned into commands, for property tests.
 
 use patine_core::channel::Channel;
+use patine_core::channel::ChannelDef;
 use patine_core::command::Command;
 use patine_core::commands::{
     InsertLayer, MoveLayer, RemoveLayer, RenameLayer, RenameTextureSet, SetChannelBlend,
-    SetEnvironment, SetLayerVisible, SetTextureSetResolution,
+    SetChannelDef, SetEnvironment, SetLayerVisible, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::ids::LayerId;
@@ -53,6 +54,11 @@ pub enum Op {
         set: u8,
         resolution: u8,
     },
+    ChannelDef {
+        set: u8,
+        channel: u8,
+        default: Option<f32>,
+    },
     Rotation(f32),
     Exposure(f32),
     Source(u8),
@@ -75,6 +81,8 @@ pub fn op() -> impl Strategy<Value = Op> {
             .prop_map(|(layer, channel, mode, opacity)| Op::Blend { layer, channel, mode, opacity }),
         1 => (any::<u8>(), name).prop_map(|(set, name)| Op::RenameSet { set, name }),
         1 => (any::<u8>(), any::<u8>()).prop_map(|(set, resolution)| Op::Resolution { set, resolution }),
+        2 => (any::<u8>(), any::<u8>(), proptest::option::of(-1.0f32..2.0))
+            .prop_map(|(set, channel, default)| Op::ChannelDef { set, channel, default }),
         2 => (-10.0f32..10.0).prop_map(Op::Rotation),
         2 => (-6.0f32..6.0).prop_map(Op::Exposure),
         1 => any::<u8>().prop_map(Op::Source),
@@ -207,6 +215,22 @@ pub fn command(project: &Project, op: &Op) -> Option<Box<dyn Command>> {
             TextureSetId(u32::from(set % sets)),
             Resolution::ALL[*resolution as usize % Resolution::ALL.len()],
         )),
+        Op::ChannelDef {
+            set,
+            channel,
+            default,
+        } => {
+            let set = TextureSetId(u32::from(set % sets));
+            let channel = CHANNELS[*channel as usize % CHANNELS.len()];
+            match default {
+                Some(value) => {
+                    let mut def = ChannelDef::standard(channel);
+                    def.default = [*value; 4];
+                    Box::new(SetChannelDef::set(set, def))
+                }
+                None => Box::new(SetChannelDef::remove(set, channel)),
+            }
+        }
         Op::Rotation(radians) => Box::new(SetEnvironment::rotation(env, *radians)),
         Op::Exposure(ev) => Box::new(SetEnvironment::exposure(env, *ev)),
         Op::Source(index) => {

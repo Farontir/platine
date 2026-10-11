@@ -3,6 +3,7 @@
 use std::any::Any;
 
 use super::Applied;
+use crate::channel::{Channel, ChannelDef};
 use crate::command::{Command, CommandError, Label};
 use crate::project::{Project, Resolution, TextureSet, TextureSetId};
 
@@ -105,6 +106,117 @@ impl Command for SetTextureSetResolution {
     fn label(&self) -> Label {
         Label::new("command-texture-set-resolution")
             .arg("resolution", self.label_resolution.pixels())
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// What a [`SetChannelDef`] did, known once applied.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ChannelChange {
+    Added,
+    Removed,
+    Changed,
+    Nothing,
+}
+
+/// Adds a channel to a texture set, removes it, or changes its definition (format and
+/// default value). Successive changes of the same channel's definition merge.
+///
+/// Layers keep their settings for a removed channel, which serve again if it comes back.
+#[derive(Debug)]
+pub struct SetChannelDef {
+    set: TextureSetId,
+    channel: Channel,
+    /// New definition before `apply` (`None` removes), old one after.
+    def: Option<ChannelDef>,
+    change: Option<ChannelChange>,
+    applied: Applied,
+}
+
+impl SetChannelDef {
+    /// Adds `def` to the texture set `set`, or replaces the definition of its channel.
+    pub fn set(set: TextureSetId, def: ChannelDef) -> Self {
+        Self {
+            set,
+            channel: def.channel,
+            def: Some(def),
+            change: None,
+            applied: Applied::default(),
+        }
+    }
+
+    /// Removes `channel` from the texture set `set`.
+    pub fn remove(set: TextureSetId, channel: Channel) -> Self {
+        Self {
+            set,
+            channel,
+            def: None,
+            change: None,
+            applied: Applied::default(),
+        }
+    }
+
+    fn swap(&mut self, project: &mut Project, applied: bool) -> Result<(), CommandError> {
+        let set = texture_set(project, self.set)?;
+        self.applied.set(applied)?;
+        let channels = &mut set.channels;
+        let existing = channels.iter().position(|def| def.channel == self.channel);
+        let change = match (existing, self.def.take()) {
+            (Some(index), Some(def)) => {
+                self.def = Some(std::mem::replace(&mut channels[index], def));
+                ChannelChange::Changed
+            }
+            (Some(index), None) => {
+                self.def = Some(channels.remove(index));
+                ChannelChange::Removed
+            }
+            (None, Some(def)) => {
+                let index = channels
+                    .iter()
+                    .position(|other| other.channel > def.channel)
+                    .unwrap_or(channels.len());
+                channels.insert(index, def);
+                ChannelChange::Added
+            }
+            (None, None) => ChannelChange::Nothing,
+        };
+        // The label describes the first application.
+        self.change.get_or_insert(change);
+        Ok(())
+    }
+}
+
+impl Command for SetChannelDef {
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        self.swap(project, true)
+    }
+
+    fn revert(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        self.swap(project, false)
+    }
+
+    fn label(&self) -> Label {
+        let key = match self.change {
+            Some(ChannelChange::Added) => "command-add-channel",
+            Some(ChannelChange::Removed) => "command-remove-channel",
+            _ => "command-channel-default",
+        };
+        Label::new(key).arg("channel", self.channel.id())
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        // `self` holds the definition from before the gesture.
+        next.as_any()
+            .downcast_ref::<SetChannelDef>()
+            .is_some_and(|next| {
+                next.set == self.set
+                    && next.channel == self.channel
+                    && self.change == Some(ChannelChange::Changed)
+                    && next.change == Some(ChannelChange::Changed)
+            })
     }
 
     fn as_any(&self) -> &dyn Any {

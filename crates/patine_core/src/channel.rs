@@ -28,6 +28,44 @@ pub enum Channel {
 }
 
 impl Channel {
+    /// Every channel of a texture set except the user channels, in order.
+    pub const STANDARD: [Channel; 8] = [
+        Channel::BaseColor,
+        Channel::Metallic,
+        Channel::Roughness,
+        Channel::Normal,
+        Channel::Height,
+        Channel::AmbientOcclusion,
+        Channel::Emissive,
+        Channel::Opacity,
+    ];
+
+    /// Stable textual identifier, e.g. `base-color` or `user-3`, used in history labels
+    /// and translation keys.
+    pub fn id(self) -> String {
+        match self {
+            Channel::BaseColor => "base-color".into(),
+            Channel::Metallic => "metallic".into(),
+            Channel::Roughness => "roughness".into(),
+            Channel::Normal => "normal".into(),
+            Channel::Height => "height".into(),
+            Channel::AmbientOcclusion => "ambient-occlusion".into(),
+            Channel::Emissive => "emissive".into(),
+            Channel::Opacity => "opacity".into(),
+            Channel::User(index) => format!("user-{index}"),
+        }
+    }
+
+    /// The channel with identifier `id`.
+    pub fn from_id(id: &str) -> Option<Self> {
+        if let Some(index) = id.strip_prefix("user-") {
+            return index.parse().ok().map(Channel::User);
+        }
+        Channel::STANDARD
+            .into_iter()
+            .find(|channel| channel.id() == id)
+    }
+
     /// Number of meaningful components: 3 for colors and normals, 1 otherwise.
     pub fn components(self) -> usize {
         match self {
@@ -118,5 +156,17 @@ mod tests {
             ChannelDef::standard(Channel::Normal).default,
             [0.0, 0.0, 1.0, 0.0]
         );
+    }
+
+    #[test]
+    fn identifiers_round_trip() {
+        for channel in Channel::STANDARD
+            .into_iter()
+            .chain([Channel::User(0), Channel::User(7)])
+        {
+            assert_eq!(Channel::from_id(&channel.id()), Some(channel));
+        }
+        assert_eq!(Channel::from_id("user-x"), None);
+        assert_eq!(Channel::from_id("albedo"), None);
     }
 }

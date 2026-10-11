@@ -510,7 +510,7 @@ impl Command for SetChannelBlend {
     fn label(&self) -> Label {
         Label::new("command-channel-blend")
             .arg("name", &self.name)
-            .arg("channel", format!("{:?}", self.channel))
+            .arg("channel", self.channel.id())
     }
 
     fn merge(&mut self, next: &dyn Command) -> bool {
