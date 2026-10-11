@@ -8,4 +8,5 @@ pub mod mesh_gpu;
 pub mod picking;
 pub mod reference;
 pub mod settings;
+pub mod uv_view;
 pub mod viewport;

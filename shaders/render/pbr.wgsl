@@ -10,6 +10,7 @@
 // #import render/environment
 // #import render/material
 // #import render/color
+// #import render/display
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 
@@ -77,20 +78,12 @@ fn uv_checker(uv: vec2<f32>) -> vec3<f32> {
     return tint * select(0.35, 0.9, even);
 }
 
-// The inspected channel, display-encoded: colors in sRGB, data as is, normals as
-// n × 0.5 + 0.5; black when the texture set lacks the channel.
+// The inspected channel, display-encoded; black when the texture set lacks it.
 fn inspected(value: vec4<f32>) -> vec3<f32> {
     if material.inspect.y < 0.5 {
         return vec3<f32>(0.0);
     }
-    let kind = material.inspect.x;
-    if kind < 0.5 {
-        return srgb_encode(value.rgb);
-    }
-    if kind < 1.5 {
-        return vec3<f32>(clamp(value.r, 0.0, 1.0));
-    }
-    return clamp(value.xyz * 0.5 + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
+    return display_encode(value, material.inspect.x);
 }
 
 @fragment

@@ -11,9 +11,9 @@ pub struct GpuSubmesh {
     pub material: u32,
     /// Range in the triangle index buffer, in indices.
     pub indices: std::ops::Range<u32>,
-    /// Range in the wireframe index buffer, in indices: the polygon edges of this submesh
-    /// (edges shared with another submesh appear in both).
-    pub wire: std::ops::Range<u32>,
+    /// Range in the UV wireframe index buffer, in indices: the polygon edges of this
+    /// submesh in UV space (both sides of seams).
+    pub uv_wire: std::ops::Range<u32>,
 }
 
 /// Vertex buffers of a mesh: one buffer per attribute, in shader locations 0 to 3.
@@ -35,6 +35,8 @@ pub struct GpuMesh {
     pub wire_indices: wgpu::Buffer,
     /// Number of wire indices.
     pub wire_index_count: u32,
+    /// Line-list indices of the UV polygon edges, submesh by submesh.
+    pub uv_wire_indices: wgpu::Buffer,
     /// Ranges of each submesh, in order.
     pub submeshes: Vec<GpuSubmesh>,
     /// Bounds of the mesh.
@@ -158,27 +160,30 @@ impl GpuMesh {
             .clone()
             .unwrap_or_else(|| vec![[0.0; 4]; vertices]);
         let uvs = mesh.uv0.clone().unwrap_or_else(|| vec![[0.0; 2]; vertices]);
-        let mut edges = Vec::new();
+        let mut uv_edges = Vec::new();
         let submeshes = mesh
             .submeshes
             .iter()
             .map(|submesh| {
-                let start = (edges.len() * 2) as u32;
-                edges.extend(patine_mesh::topology::polygon_edges_in(
+                let start = (uv_edges.len() * 2) as u32;
+                uv_edges.extend(patine_mesh::topology::uv_polygon_edges(
                     mesh,
                     submesh.triangles.clone(),
                 ));
                 GpuSubmesh {
                     material: submesh.material,
                     indices: submesh.triangles.start * 3..submesh.triangles.end * 3,
-                    wire: start..(edges.len() * 2) as u32,
+                    uv_wire: start..(uv_edges.len() * 2) as u32,
                 }
             })
             .collect();
+        let mut edges = patine_mesh::topology::polygon_edges(mesh);
         let wire_index_count = (edges.len() * 2) as u32;
-        // At least one line so the buffer is never empty.
-        if edges.is_empty() {
-            edges.push([0, 0]);
+        // At least one line so the buffers are never empty.
+        for lines in [&mut edges, &mut uv_edges] {
+            if lines.is_empty() {
+                lines.push([0, 0]);
+            }
         }
         let vertex = wgpu::BufferUsages::VERTEX;
         let index = wgpu::BufferUsages::INDEX;
@@ -216,6 +221,12 @@ impl GpuMesh {
                 index,
             ),
             wire_index_count,
+            uv_wire_indices: buffer(
+                ctx,
+                "mesh uv wire indices",
+                bytemuck::cast_slice(&uv_edges),
+                index,
+            ),
             submeshes,
             bounds,
             flat_pick: flat_picking.then(|| FlatPickBuffers::new(ctx, mesh)),
