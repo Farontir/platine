@@ -3,8 +3,9 @@
 //! Commands:
 //! - `patine_cli inspect <mesh> [--allow-missing-uvs]`: import a mesh and print its
 //!   statistics and the duration of each step.
-//! - `patine_cli bench viewport [--triangles N] [--frames N] [--size WxH] [--no-shadows]`:
-//!   frames per second of the viewport on the hardware adapter.
+//! - `patine_cli bench viewport [--triangles N] [--frames N] [--size WxH] [--no-shadows]
+//!   [--textures N]`: frames per second of the viewport on the hardware adapter, with
+//!   the six lit channels at N² (4096 by default, 0 for the constant material).
 //! - `patine_cli bench project <mesh> [--out file.patine]`: creates a project from a mesh,
 //!   saves it, opens it again, checks that it is identical, and prints the durations and
 //!   the file size. `--out` keeps the file.
@@ -23,7 +24,7 @@ use patine_mesh::topology::MeshTopology;
 use patine_mesh::{BuildOptions, import};
 
 const USAGE: &str = "usage: patine_cli inspect <mesh> [--allow-missing-uvs]
-       patine_cli bench viewport [--triangles N] [--frames N] [--size WxH] [--no-shadows]
+       patine_cli bench viewport [--triangles N] [--frames N] [--size WxH] [--no-shadows] [--textures N]
        patine_cli bench project <mesh> [--out file.patine]
        patine_cli --version";
 
