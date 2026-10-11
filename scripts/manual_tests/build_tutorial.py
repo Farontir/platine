@@ -4,7 +4,7 @@ Run from the repository root after capture_tutorial.py:
     python scripts/manual_tests/build_tutorial.py
 
 Writes manual_tests/tutorial/ (HTML and cropped images) and
-manual_tests/Patine-tutoriel-M0-M3.pdf, printed by Microsoft Edge (or Chrome) headless.
+manual_tests/Patine-tutoriel-M0-M4.pdf, printed by Microsoft Edge (or Chrome) headless.
 """
 
 import html
@@ -19,7 +19,7 @@ from PIL import Image
 CAPTURES = os.path.join("manual_tests", "captures")
 OUT = os.path.join("manual_tests", "tutorial")
 IMAGES = os.path.join(OUT, "img")
-PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M3.pdf")
+PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M4.pdf")
 
 # Regions of the 1600 x 900 captures.
 FULL = None
@@ -102,7 +102,7 @@ ASSETS = [
     ["<b>vintage_suitcase_1k.fbx</b>", "FBX ; 16 466 triangles, 8 objets, 2 matériaux",
      "Poly Haven — Maximilian Schuster", "FBX multi-objets, fil de fer, projection"],
     ["<b>Lantern_01_1k.fbx</b>", "FBX ; 33 902 triangles, 2 matériaux (laiton, verre)",
-     "Poly Haven — Rajil Jose Macatangay", "matériau d'aperçu, environnements, exposition, fond"],
+     "Poly Haven — Rajil Jose Macatangay", "valeurs par défaut des canaux, environnements, exposition, fond"],
     ["<b>qwantani_noon_puresky_2k.exr</b>", "HDRI OpenEXR 2K, soleil de midi très intense",
      "Poly Haven — Greg Zaal, Jarod Guest", "chargement EXR, tone mapping des hautes lumières"],
     ["<b>brown_photostudio_02_2k.hdr</b>", "HDRI Radiance 2K, studio photo",
@@ -147,7 +147,9 @@ OPTIONS = [
     ["<code>--rotation DEG</code>, <code>--exposure EV</code>", "rotation de l'environnement, exposition"],
     ["<code>--tonemap agx|aces|neutral|linear</code>", "opérateur de tone mapping"],
     ["<code>--background env:FLOU|solid:R,V,B</code>", "fond"],
-    ["<code>--material R,V,B,METALLIC,ROUGHNESS</code>", "matériau d'aperçu"],
+    ["<code>--material R,V,B,METALLIC,ROUGHNESS</code>", "valeurs par défaut des canaux de tous les texture sets (commandes)"],
+    ["<code>--display lit|checker|channel:ID</code>", "mode d'affichage (ID : base-color, roughness, user-0…)"],
+    ["<code>--texture-set N</code>", "texture set courant (panneau Texture sets, vue 2D)"],
     ["<code>--wireframe</code>, <code>--no-shadows</code>, <code>--ortho</code>, <code>--fov DEG</code>", "superpositions et projection"],
     ["<code>--orbit LACET,TANGAGE</code>, <code>--zoom FACTEUR</code>", "position de la caméra après cadrage"],
     ["<code>--hover X,Y</code>", "simule le curseur sur ce pixel de la vue 3D"],
@@ -169,7 +171,7 @@ def body():
         '<div class="kicker">Tutoriel et cahier de tests manuels</div>'
         "<h1>Patine</h1>"
         '<p class="subtitle">Texturing PBR par calques sur mesh 3D<br>'
-        "Fonctionnalités des jalons M0 à M3</p>"
+        "Fonctionnalités des jalons M0 à M4</p>"
         + figure("helmet_texture_sets", FULL, "full", "Le casque d'aviateur importé, panneau Texture sets au premier plan.", "92%")
         + '<p class="meta">Version 0.1.0 — 11 octobre 2026 — captures réalisées sur RTX 3080 Ti (Vulkan), '
         "interface en français, fenêtre 1600 × 900.</p></section>")
@@ -181,6 +183,7 @@ def body():
         "<li>M1 — Import de meshes : nouveau projet, formats, texture sets, erreurs</li>"
         "<li>M2 — Viewport PBR : caméra, environnements, tone mapping, ombres, fil de fer, survol</li>"
         "<li>M3 — Document : annuler, historique, enregistrer, autosave</li>"
+        "<li>M4 — Texture sets et canaux : valeurs par défaut, modes d'affichage, vue 2D</li>"
         "<li>Checklist complète des tests manuels</li>"
         "<li>Annexe : options de lancement et régénération de ce document</li>"
         "</ol>"
@@ -338,22 +341,23 @@ def body():
                "Sous Windows, vérifier qu'Alt seul n'ouvre pas le menu système de la fenêtre.")
         + "<h3>4.2 Panneau Paramètres d'affichage</h3>"
         "<p>Il regroupe tous les réglages du rendu : environnement (liste, Charger une HDRI…, rotation, exposition, "
-        "tone mapping), fond, superpositions (ombres, fil de fer), projection et champ de vision, et le matériau "
-        "d'aperçu (couleur de base, metallic, roughness). Le rendu suit chaque réglage en direct.</p>"
+        "tone mapping), fond, superpositions (ombres, fil de fer), projection et champ de vision, et depuis le M4 "
+        "le mode d'affichage (chapitre 6). Le rendu suit chaque réglage en direct.</p>"
         + '<div class="grid c2a">'
         + figure("display_panel", VIEWPORT, "view", "La lanterne avec les réglages par défaut : studio généré, AgX, 0 EV.")
         + figure("display_panel", RIGHT_BOTTOM, "panel", "Le panneau Paramètres d'affichage.")
         + "</div></section>")
 
     add("<section>"
-        "<h3>4.3 Matériau d'aperçu</h3>"
+        "<h3>4.3 Matériau : metallic, roughness, couleur de base</h3>"
         "<p><b>Metallic</b> à 1 donne une surface métallique qui reflète l'environnement teinté par la couleur de base ; "
-        "à 0, une surface diélectrique (plastique, bois). <b>Roughness</b> règle la netteté des reflets.</p>"
+        "à 0, une surface diélectrique (plastique, bois). <b>Roughness</b> règle la netteté des reflets. Depuis le M4, "
+        "ces valeurs sont celles des canaux du texture set, réglées dans le panneau Texture sets (chapitre 6).</p>"
         + grid([("material_metal", "Laiton : couleur (0,95 ; 0,72 ; 0,35), metallic 1, roughness 0,25."),
                 ("material_plastic", "Plastique rouge : metallic 0, roughness 0,45."),
                 ("material_rough_metal", "Métal brossé : metallic 1, roughness 0,85 : reflets diffus."),
-                ("display_panel", "Matériau par défaut : gris clair, metallic 0, roughness 0,5.")])
-        + test(["Ouvrir Lantern_01_1k.fbx, onglet Paramètres d'affichage.",
+                ("display_panel", "Valeurs par défaut : gris moyen, metallic 0, roughness 0,5.")])
+        + test(["Ouvrir Lantern_01_1k.fbx, onglet Texture sets, chaque texture set à tour de rôle.",
                 "Faire varier metallic de 0 à 1, puis roughness de 0 à 1, et changer la couleur de base."],
                "Le reflet de l'environnement devient net à roughness 0 et diffus à 1 ; à metallic 1 la couleur teinte "
                "les reflets ; aucune zone noire ou saturée anormale.")
@@ -530,8 +534,68 @@ def body():
         + "<p><code>--out fichier.patine</code> garde le projet créé : c'est ainsi qu'est produit "
         "<code>manual_tests/casque.patine</code>.</p></section>")
 
-    # 6. Checklist.
-    add("<section><h2>6. Checklist complète des tests manuels</h2>"
+    # 6. M4.
+    add("<section><h2>6. M4 — Texture sets et canaux</h2>"
+        "<p>Chaque texture set a des <b>canaux</b> (couleur de base, metallic, roughness, normale, hauteur, et à la "
+        "demande occlusion ambiante, émissif, opacité, canaux utilisateur). Chaque canal est une texture GPU à la "
+        "résolution du texture set ; tant qu'il n'y a pas de calques (M5), elle contient la valeur par défaut du canal.</p>"
+        "<h3>6.1 Panneau Texture sets</h3>"
+        "<p>Un clic sur un nom choisit le <b>texture set courant</b> (ses canaux s'affichent dessous, la vue 2D le "
+        "montre) ; un double-clic le renomme. La liste de résolution change la taille de ses textures. Pour chaque "
+        "canal : sa valeur par défaut (couleur ou curseur ; la normale reste (0, 0, 1)) et la corbeille pour le "
+        "retirer ; <b>Ajouter un canal</b> propose ceux qui manquent. Le pied du panneau donne la mémoire GPU des canaux.</p>"
+        + '<div class="grid c2a">'
+        + figure("m4_texture_sets", VIEWPORT, "view", "Le casque, valeurs par défaut.")
+        + figure("m4_texture_sets", RIGHT_TOP, "panel", "LeatherPartsMat courant : ses cinq canaux.")
+        + "</div>"
+        + test(["Choisir un texture set, passer sa résolution de 2048 à 4096 puis Ctrl+Z.",
+                "Ajouter l'occlusion ambiante et l'émissif, régler l'émissif en orange, puis retirer metallic.",
+                "Faire glisser le curseur de roughness, puis regarder l'Historique."],
+               "La mémoire affichée augmente puis revient exactement à sa valeur ; la pièce s'éclaire en orange ; "
+               "un seul geste donne une seule entrée « Valeur par défaut : Roughness ».")
+        + "</section>")
+
+    add("<section>"
+        "<h3>6.2 Modes d'affichage</h3>"
+        "<p>Dans Paramètres d'affichage, ou au clavier : <b>F1</b> bascule entre le matériau éclairé et le canal "
+        "isolé, <b>C</b> passe au canal suivant du texture set courant. Le canal isolé s'affiche sans éclairage ni "
+        "tone mapping : couleurs telles quelles, données en niveaux de gris (0,5 = gris moyen), normales en couleur. "
+        "Le <b>damier UV</b> vérifie le dépliage. Le mode courant est rappelé en haut à gauche de la vue 3D.</p>"
+        + grid([("m4_channel_base", "Canal couleur de base (orange réglé par défaut)."),
+                ("m4_channel_roughness", "Canal roughness de la lanterne (0,65)."),
+                ("m4_checker", "Damier UV : taille et orientation des cases d'une pièce à l'autre.")])
+        + test(["Sur le casque : F1, puis C plusieurs fois, puis F1.",
+                "Choisir « Damier UV » dans Paramètres d'affichage."],
+               "Chaque canal s'affiche avec sa valeur, sans dépendre de l'environnement ni de l'exposition ; un canal "
+               "absent du texture set apparaît en noir ; le damier ne présente pas d'étirement anormal.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>6.3 Vue 2D</h3>"
+        "<p>L'onglet <b>Vue 2D</b> montre le texture set courant dans l'espace UV : la texture du canal affiché (la "
+        "couleur de base en mode éclairé) dans le carré 0–1, et le <b>wireframe UV</b> de ses polygones, sans "
+        "diagonales de triangulation, avec les deux bords de chaque couture. Molette : zoom sous le curseur ; "
+        "clic milieu : déplacer ; F (survol de la vue) : recadrer.</p>"
+        + '<div class="grid c2">'
+        + figure("m4_view_2d_helmet", (14, 61, 1174, 628), "view", "Le texture set LeatherPartsMat du casque.")
+        + figure("m4_view_2d_suitcase", (14, 61, 1174, 628), "view", "La valise (FBX).")
+        + "</div>"
+        + test(["Ouvrir le casque, onglet Vue 2D, choisir chaque texture set dans le panneau Texture sets.",
+                "Comparer avec les UV du même fichier dans Blender ; zoomer, déplacer, F."],
+               "Mêmes îles et mêmes arêtes que dans Blender ; le zoom reste centré sous le curseur.")
+        + "<h3>6.4 Mesure du viewport avec textures 4K</h3>"
+        + code("cargo run --release -p patine_cli -- bench viewport")
+        + "<p>Sphère de 500 000 triangles en 1920 × 1080 avec les 7 canaux éclairés en 4096² (716 Mo). Mesures sur la "
+        "RTX 3080 Ti :</p>"
+        + table(["Configuration", "Images/s"],
+                [["Textures 4096², ombres", "2 799"],
+                 ["Textures 4096², sans ombres", "4 269"],
+                 ["Matériau constant, ombres", "3 432"]])
+        + "<p>Budget : au moins 120 images/s (RTX 3080 Ti) et 60 (RTX A2000, <b>à mesurer</b>).</p>"
+        + "</section>")
+
+    # 7. Checklist.
+    add("<section><h2>7. Checklist complète des tests manuels</h2>"
         "<h3>M0 — Fondations</h3>"
         + checklist(["<code>cargo run -p patine_app</code> ouvre une fenêtre sans erreur dans le terminal.",
                      "Les 9 panneaux sont présents ; on peut les détacher, les déplacer et les réancrer.",
@@ -555,7 +619,7 @@ def body():
                      "Projection orthographique et champ de vision.",
                      "Environnements livrés, HDRI .hdr et .exr chargées, rotation (Maj + clic droit), exposition, "
                      "opérateurs : le rendu suit sans saccade.",
-                     "Matériau d'aperçu : metallic, roughness et couleur de base réagissent comme décrit en 4.3.",
+                     "Metallic, roughness et couleur de base (panneau Texture sets) réagissent comme décrit en 4.3.",
                      "Fond flouté et couleur unie.",
                      "Ombres : ombre portée cohérente avec le soleil ; sans ombres, aucune face noire ou bleutée.",
                      "Fil de fer : les quads et les n-gones apparaissent sans diagonale.",
@@ -573,10 +637,18 @@ def body():
                      "Crash simulé avec <code>--autosave-interval 10</code> : la récupération est proposée et rend le travail.",
                      "Deux instances ouvertes en même temps : aucune ne propose de récupérer l'autre.",
                      "<code>patine_app projet.patine</code> ouvre le projet ; un fichier qui n'en est pas un donne un message clair."])
+        + "<h3>M4 — Texture sets et canaux</h3>"
+        + checklist(["Changer la résolution d'un texture set : la mémoire affichée suit ; Ctrl+Z la ramène à sa valeur.",
+                     "Ajouter et retirer des canaux, régler les valeurs par défaut : le rendu suit, une entrée par geste.",
+                     "F1 et C : canal isolé et défilement ; le mode s'affiche dans la vue 3D.",
+                     "Damier UV sur le casque et la valise : pas d'étirement anormal.",
+                     "Vue 2D du casque et de la valise : wireframe UV conforme à Blender ; panoramique, zoom, F.",
+                     "Enregistrer, rouvrir : canaux, valeurs par défaut et résolutions conservés.",
+                     "<code>patine_cli bench viewport</code> sur la RTX A2000 : au moins 60 images/s avec les textures 4K."])
         + "</section>")
 
     # Appendix.
-    add("<section><h2>7. Annexe</h2>"
+    add("<section><h2>8. Annexe</h2>"
         "<h3>Options de lancement de patine_app</h3>"
         "<p>Ces options servent aux captures et aux tests ; <code>patine_app --help</code> les liste.</p>"
         + table(["Option", "Effet"], OPTIONS)
@@ -587,7 +659,7 @@ def body():
         + code("cargo build --release -p patine_app -p patine_cli\n"
                "python scripts/manual_tests/capture_tutorial.py\n"
                "python scripts/manual_tests/build_tutorial.py")
-        + "<p>Le premier script produit les 43 captures dans <code>manual_tests/captures/</code> (et le projet "
+        + "<p>Le premier script produit les 49 captures dans <code>manual_tests/captures/</code> (et le projet "
         "<code>manual_tests/casque.patine</code>) ; le second les "
         "recadre et imprime ce PDF avec Microsoft Edge (ou Chrome) sans interface.</p>"
         "<h3>Crédits</h3>"
@@ -672,7 +744,7 @@ def main():
     os.makedirs(IMAGES)
     document = (
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
-        f"<title>Patine — tutoriel M0 à M3</title><style>{STYLE}</style></head>"
+        f"<title>Patine — tutoriel M0 à M4</title><style>{STYLE}</style></head>"
         f"<body>{body()}</body></html>"
     )
     page = os.path.join(OUT, "index.html")

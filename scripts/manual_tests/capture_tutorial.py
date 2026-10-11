@@ -97,6 +97,12 @@ CAPTURES = {
     "m3_renamed": [HELMET, "--tab", "texture-sets", "--orbit", "30,10", "--edit", "rename=0:Verres"],
     "m3_opened": [PROJECT, "--tab", "history", "--orbit", "30,10"],
     "m3_recovery": [],
+    "m4_texture_sets": [HELMET, "--tab", "texture-sets", "--orbit", "30,10", "--texture-set", "1"],
+    "m4_channel_base": [HELMET, "--orbit", "30,10", "--display", "channel:base-color", "--material", "0.8,0.2,0.1,0,0.3"],
+    "m4_channel_roughness": [LANTERN, "--display", "channel:roughness", "--material", "0.95,0.72,0.35,1,0.65"] + LANTERN_VIEW,
+    "m4_checker": [HELMET, "--orbit", "30,10", "--display", "checker"],
+    "m4_view_2d_helmet": [HELMET, "--tab", "view-2d", "--texture-set", "1"],
+    "m4_view_2d_suitcase": [SUITCASE, "--tab", "view-2d"],
 }
 
 # Captures run with extra environment variables.
