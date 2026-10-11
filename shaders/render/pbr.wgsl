@@ -9,6 +9,7 @@
 // #import render/brdf
 // #import render/environment
 // #import render/material
+// #import render/color
 
 @group(0) @binding(0) var<uniform> frame: Frame;
 
@@ -61,9 +62,48 @@ fn shadow_factor(world_position: vec3<f32>, n: vec3<f32>) -> f32 {
     return lit / 9.0;
 }
 
+// Display-encoded value (what the screen must show) written as linear radiance: the
+// display pass of the non-lit modes only encodes it back to sRGB.
+fn show(encoded: vec3<f32>) -> vec4<f32> {
+    return vec4<f32>(srgb_decode(encoded), 1.0);
+}
+
+// Checker of 8 × 8 squares over the UV square, tinted by the UV coordinates so that
+// orientation and stretching show.
+fn uv_checker(uv: vec2<f32>) -> vec3<f32> {
+    let cell = floor(uv * 8.0);
+    let even = (i32(cell.x) + i32(cell.y)) % 2 == 0;
+    let tint = vec3<f32>(0.55 + 0.45 * fract(uv.x), 0.55 + 0.45 * fract(uv.y), 0.75);
+    return tint * select(0.35, 0.9, even);
+}
+
+// The inspected channel, display-encoded: colors in sRGB, data as is, normals as
+// n × 0.5 + 0.5; black when the texture set lacks the channel.
+fn inspected(value: vec4<f32>) -> vec3<f32> {
+    if material.inspect.y < 0.5 {
+        return vec3<f32>(0.0);
+    }
+    let kind = material.inspect.x;
+    if kind < 0.5 {
+        return srgb_encode(value.rgb);
+    }
+    if kind < 1.5 {
+        return vec3<f32>(clamp(value.r, 0.0, 1.0));
+    }
+    return clamp(value.xyz * 0.5 + 0.5, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
 @fragment
 fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
     let surface = sample_surface(in.uv);
+    let inspect_value = textureSample(inspect_texture, material_sampler, in.uv);
+    let mode = frame.display.x;
+    if mode > 1.5 {
+        return show(uv_checker(in.uv));
+    }
+    if mode > 0.5 {
+        return show(inspected(inspect_value));
+    }
     let n = perturb_normal(surface.normal, in.normal, in.tangent);
     let v = normalize(frame.camera_position.xyz - in.world_position);
     let base_color = surface.base_color;

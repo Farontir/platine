@@ -21,4 +21,6 @@ struct Frame {
     environment: vec4<f32>,
     // World to shadow map clip space of the dominant light (standard depth, 0 near).
     light_view_proj: mat4x4<f32>,
+    // x: display mode (0 lit, 1 inspected channel, 2 UV checker).
+    display: vec4<f32>,
 }

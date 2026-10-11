@@ -12,7 +12,7 @@ use crate::environment_gpu::{BrdfLut, EnvironmentSizes, GpuEnvironment, linear_s
 use crate::material::{GpuMaterial, MaterialResources, MaterialTextures};
 use crate::mesh_gpu::{GpuMesh, VERTEX_LAYOUTS};
 use crate::picking::{PickImage, PickResult, Picker};
-use crate::settings::{Background, ViewSettings};
+use crate::settings::{Background, DisplayMode, ToneMapper, ViewSettings};
 
 /// Linear HDR format of the scene.
 pub const HDR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba16Float;
@@ -37,6 +37,7 @@ pub struct FrameUniforms {
     background: [f32; 4],
     environment: [f32; 4],
     light_view_proj: [[f32; 4]; 4],
+    display: [f32; 4],
 }
 
 /// Shadow projection of the dominant light, fitted to the mesh bounds.
@@ -83,9 +84,18 @@ impl FrameUniforms {
         let aspect = width as f32 / height as f32;
         let view_proj = camera.view_projection(aspect);
         let material = &settings.material;
+        let lit = settings.display == DisplayMode::Lit;
         let (background, blur) = match settings.background {
+            // The unlit modes show their values on a neutral gray.
+            _ if !lit => ([0.05, 0.05, 0.05, 0.0], 0.0),
             Background::Solid(color) => ([color[0], color[1], color[2], 0.0], 0.0),
             Background::Environment { blur } => ([0.0, 0.0, 0.0, 1.0], blur),
+        };
+        // The unlit modes write display-encoded values: no exposure, no tone curve.
+        let (exposure, tone_mapper) = if lit {
+            (settings.exposure_ev.exp2(), settings.tone_mapper)
+        } else {
+            (1.0, ToneMapper::Linear)
         };
         Self {
             view_proj: view_proj.to_cols_array_2d(),
@@ -100,8 +110,8 @@ impl FrameUniforms {
             material: [
                 material.metallic,
                 material.roughness,
-                settings.exposure_ev.exp2(),
-                settings.tone_mapper.index() as f32,
+                exposure,
+                tone_mapper.index() as f32,
             ],
             wire_color: [0.02, 0.02, 0.02, 1.0],
             viewport: [
@@ -118,6 +128,7 @@ impl FrameUniforms {
                 light.texel_world,
             ],
             light_view_proj: light.view_proj.to_cols_array_2d(),
+            display: [settings.display.index() as f32, 0.0, 0.0, 0.0],
         }
     }
 }
@@ -886,7 +897,9 @@ impl Viewport {
         puffin::profile_function!();
         let (width, height) = (width.max(1), height.max(1));
         let reallocated = self.ensure_targets(ctx, width, height);
-        let shadows = scene.settings.shadows && scene.mesh.is_some();
+        let shadows = scene.settings.shadows
+            && scene.settings.display == DisplayMode::Lit
+            && scene.mesh.is_some();
         self.write_frame(ctx, scene, width, height);
         let environment =
             EnvironmentUniforms::new(&self.environment, scene.settings.environment_rotation);

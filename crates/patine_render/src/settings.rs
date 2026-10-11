@@ -70,6 +70,30 @@ impl Default for ConstantMaterial {
     }
 }
 
+/// What the mesh shows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum DisplayMode {
+    /// The lit material.
+    #[default]
+    Lit,
+    /// The inspected channel of each material, unlit (see
+    /// [`crate::material::MaterialTextures::inspect`]).
+    Channel,
+    /// A checker on the UVs.
+    UvChecker,
+}
+
+impl DisplayMode {
+    /// Index passed to the shaders.
+    pub fn index(self) -> u32 {
+        match self {
+            DisplayMode::Lit => 0,
+            DisplayMode::Channel => 1,
+            DisplayMode::UvChecker => 2,
+        }
+    }
+}
+
 /// Everything the viewport needs besides the camera and the mesh.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct ViewSettings {
@@ -85,8 +109,10 @@ pub struct ViewSettings {
     pub shadows: bool,
     /// Polygon edges over the shaded mesh.
     pub wireframe: bool,
-    /// Material of the mesh.
+    /// Material of the mesh without document materials.
     pub material: ConstantMaterial,
+    /// What the mesh shows.
+    pub display: DisplayMode,
 }
 
 impl Default for ViewSettings {
@@ -99,6 +125,7 @@ impl Default for ViewSettings {
             shadows: true,
             wireframe: false,
             material: ConstantMaterial::default(),
+            display: DisplayMode::Lit,
         }
     }
 }
