@@ -8,7 +8,7 @@ use super::Applied;
 use crate::channel::Channel;
 use crate::command::{Command, CommandError, Label};
 use crate::ids::{AnchorId, LayerId};
-use crate::layer::{ChannelBlend, Layer, LayerKind, LayerPosition};
+use crate::layer::{ChannelBlend, FillSource, Layer, LayerKind, LayerPosition};
 use crate::mask::MaskEffect;
 use crate::project::{Project, TextureSetId};
 
@@ -516,6 +516,84 @@ impl Command for SetChannelBlend {
     fn merge(&mut self, next: &dyn Command) -> bool {
         next.as_any()
             .downcast_ref::<SetChannelBlend>()
+            .is_some_and(|next| next.id == self.id && next.channel == self.channel)
+    }
+
+    fn heap_size(&self) -> usize {
+        self.name.len()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Sets the value a uniform fill gives to one channel, or removes it (`None`: the fill no
+/// longer contributes to that channel). Continuous changes of the same channel merge.
+#[derive(Debug)]
+pub struct SetFillValue {
+    id: LayerId,
+    channel: Channel,
+    /// New value before `apply`, old one after.
+    value: Option<[f32; 4]>,
+    name: String,
+    applied: Applied,
+}
+
+impl SetFillValue {
+    /// Sets `channel` of the fill layer `id`. `name` is shown in the history.
+    pub fn new(
+        id: LayerId,
+        channel: Channel,
+        value: Option<[f32; 4]>,
+        name: impl Into<String>,
+    ) -> Self {
+        Self {
+            id,
+            channel,
+            value,
+            name: name.into(),
+            applied: Applied::default(),
+        }
+    }
+
+    fn swap(&mut self, project: &mut Project, applied: bool) -> Result<(), CommandError> {
+        let layer = find_mut(project, self.id)?;
+        let LayerKind::Fill {
+            source: FillSource::Uniform(values),
+            ..
+        } = &mut layer.kind
+        else {
+            return Err(CommandError::NotAUniformFill(self.id));
+        };
+        self.applied.set(applied)?;
+        let previous = match self.value.take() {
+            Some(value) => values.insert(self.channel, value),
+            None => values.remove(&self.channel),
+        };
+        self.value = previous;
+        Ok(())
+    }
+}
+
+impl Command for SetFillValue {
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        self.swap(project, true)
+    }
+
+    fn revert(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        self.swap(project, false)
+    }
+
+    fn label(&self) -> Label {
+        Label::new("command-fill-value")
+            .arg("name", &self.name)
+            .arg("channel", self.channel.id())
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        next.as_any()
+            .downcast_ref::<SetFillValue>()
             .is_some_and(|next| next.id == self.id && next.channel == self.channel)
     }
 

@@ -63,6 +63,9 @@ pub enum CommandError {
     /// A folder cannot move into itself or one of its descendants.
     #[error("layer {0} cannot move into itself")]
     MoveIntoItself(LayerId),
+    /// The layer is not a uniform fill.
+    #[error("layer {0} is not a uniform fill")]
+    NotAUniformFill(LayerId),
     /// Another layer depends on this one (instance or anchor reference).
     #[error("layer {0} is used by another layer")]
     LayerInUse(LayerId),

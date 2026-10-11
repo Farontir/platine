@@ -5,7 +5,7 @@ use patine_core::channel::ChannelDef;
 use patine_core::command::Command;
 use patine_core::commands::{
     InsertLayer, MoveLayer, RemoveLayer, RenameLayer, RenameTextureSet, SetChannelBlend,
-    SetChannelDef, SetEnvironment, SetLayerVisible, SetTextureSetResolution,
+    SetChannelDef, SetEnvironment, SetFillValue, SetLayerVisible, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::ids::LayerId;
@@ -54,6 +54,11 @@ pub enum Op {
         set: u8,
         resolution: u8,
     },
+    FillValue {
+        layer: u8,
+        channel: u8,
+        value: Option<f32>,
+    },
     ChannelDef {
         set: u8,
         channel: u8,
@@ -83,6 +88,8 @@ pub fn op() -> impl Strategy<Value = Op> {
         1 => (any::<u8>(), any::<u8>()).prop_map(|(set, resolution)| Op::Resolution { set, resolution }),
         2 => (any::<u8>(), any::<u8>(), proptest::option::of(-1.0f32..2.0))
             .prop_map(|(set, channel, default)| Op::ChannelDef { set, channel, default }),
+        2 => (any::<u8>(), any::<u8>(), proptest::option::of(0.0f32..1.0))
+            .prop_map(|(layer, channel, value)| Op::FillValue { layer, channel, value }),
         2 => (-10.0f32..10.0).prop_map(Op::Rotation),
         2 => (-6.0f32..6.0).prop_map(Op::Exposure),
         1 => any::<u8>().prop_map(Op::Source),
@@ -215,6 +222,15 @@ pub fn command(project: &Project, op: &Op) -> Option<Box<dyn Command>> {
             TextureSetId(u32::from(set % sets)),
             Resolution::ALL[*resolution as usize % Resolution::ALL.len()],
         )),
+        Op::FillValue {
+            layer,
+            channel,
+            value,
+        } => {
+            let (_, id, _, name) = pick(&all, *layer)?;
+            let channel = CHANNELS[*channel as usize % CHANNELS.len()];
+            Box::new(SetFillValue::new(id, channel, value.map(|v| [v; 4]), name))
+        }
         Op::ChannelDef {
             set,
             channel,

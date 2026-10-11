@@ -11,7 +11,8 @@ mod texture_set;
 
 pub use environment::{EnvironmentField, SetEnvironment};
 pub use layers::{
-    InsertLayer, MoveLayer, RemoveLayer, RenameLayer, SetChannelBlend, SetLayerVisible,
+    InsertLayer, MoveLayer, RemoveLayer, RenameLayer, SetChannelBlend, SetFillValue,
+    SetLayerVisible,
 };
 pub use texture_set::{RenameTextureSet, SetChannelDef, SetTextureSetResolution};
 

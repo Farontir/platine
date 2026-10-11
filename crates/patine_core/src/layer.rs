@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
-use crate::channel::{Channel, ChannelMap};
+use crate::channel::{Channel, ChannelDef, ChannelMap};
 use crate::ids::{AnchorId, LayerId};
 use crate::mask::{EffectEntry, MaskStack, Params};
 use crate::resource::ResourceHash;
@@ -218,6 +218,42 @@ impl Layer {
             effects: Vec::new(),
             anchor: None,
         }
+    }
+
+    /// A uniform fill affecting every channel of `channels`, with their default values as
+    /// content: it changes nothing until edited.
+    pub fn fill_for(id: LayerId, name: impl Into<String>, channels: &[ChannelDef]) -> Self {
+        let affected: Vec<Channel> = channels.iter().map(|def| def.channel).collect();
+        Self::new(
+            id,
+            name,
+            LayerKind::Fill {
+                source: FillSource::Uniform(
+                    channels
+                        .iter()
+                        .map(|def| (def.channel, def.default))
+                        .collect(),
+                ),
+                projection: Projection::default(),
+            },
+            &affected,
+        )
+    }
+
+    /// An empty folder affecting `channels` (normals blend as Normal in a folder).
+    pub fn folder(id: LayerId, name: impl Into<String>, channels: &[Channel]) -> Self {
+        let mut folder = Self::new(
+            id,
+            name,
+            LayerKind::Folder {
+                children: Vec::new(),
+            },
+            channels,
+        );
+        for blend in folder.channels.values_mut() {
+            blend.mode = BlendMode::Normal;
+        }
+        folder
     }
 
     /// Children of a folder; empty for other layers.

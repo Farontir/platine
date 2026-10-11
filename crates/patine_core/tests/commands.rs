@@ -10,7 +10,7 @@ use patine_core::channel::ChannelDef;
 use patine_core::command::{Command, CommandError};
 use patine_core::commands::{
     InsertLayer, MoveLayer, RemoveLayer, RenameLayer, RenameTextureSet, SetChannelBlend,
-    SetChannelDef, SetEnvironment, SetLayerVisible, SetTextureSetResolution,
+    SetChannelDef, SetEnvironment, SetFillValue, SetLayerVisible, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::history::History;
@@ -491,4 +491,64 @@ fn dragging_a_default_value_makes_one_entry() {
     assert_eq!(history.labels()[1].key, "command-add-channel");
     history.go_to(&mut project, 0).unwrap();
     assert_eq!(project, common::project());
+}
+
+#[test]
+fn fill_values_are_set_removed_and_merged() {
+    let project = layered();
+    let red = [0.9, 0.1, 0.1, 1.0];
+    let command = SetFillValue::new(LayerId(3), Channel::BaseColor, Some(red), "outer");
+    let after = round_trip(&project, Box::new(command));
+    let LayerKind::Fill {
+        source: patine_core::layer::FillSource::Uniform(values),
+        ..
+    } = &after.texture_sets[0].stack.find(LayerId(3)).unwrap().kind
+    else {
+        panic!("a fill");
+    };
+    assert_eq!(values.get(&Channel::BaseColor), Some(&red));
+    round_trip(
+        &project,
+        Box::new(SetFillValue::new(
+            LayerId(3),
+            Channel::BaseColor,
+            None,
+            "outer",
+        )),
+    );
+    // A folder has no fill value.
+    let mut folder = SetFillValue::new(LayerId(1), Channel::BaseColor, Some(red), "group");
+    assert_eq!(
+        folder.apply(&mut project.clone()),
+        Err(CommandError::NotAUniformFill(LayerId(1)))
+    );
+
+    let mut project = project;
+    let mut history = History::default();
+    for step in 0..5 {
+        let value = [step as f32 / 5.0; 4];
+        let command = SetFillValue::new(LayerId(3), Channel::Roughness, Some(value), "outer");
+        history.push(&mut project, Box::new(command)).unwrap();
+    }
+    assert_eq!(history.applied(), 1, "a slider drag is one entry");
+}
+
+#[test]
+fn new_layers_change_nothing_until_edited() {
+    let project = project();
+    let defs = &project.texture_sets[0].channels;
+    let layer = patine_core::layer::Layer::fill_for(LayerId(1), "fill", defs);
+    assert_eq!(layer.channels.len(), defs.len());
+    assert_eq!(
+        layer.channels.get(&Channel::Normal).map(|b| b.mode),
+        Some(BlendMode::NormalMapCombine)
+    );
+    let channels: Vec<Channel> = defs.iter().map(|d| d.channel).collect();
+    let folder = patine_core::layer::Layer::folder(LayerId(2), "folder", &channels);
+    assert!(
+        folder
+            .channels
+            .values()
+            .all(|b| b.mode == BlendMode::Normal)
+    );
 }
