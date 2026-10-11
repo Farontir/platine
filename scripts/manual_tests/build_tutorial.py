@@ -4,7 +4,7 @@ Run from the repository root after capture_tutorial.py:
     python scripts/manual_tests/build_tutorial.py
 
 Writes manual_tests/tutorial/ (HTML and cropped images) and
-manual_tests/Patine-tutoriel-M0-M4.pdf, printed by Microsoft Edge (or Chrome) headless.
+manual_tests/Patine-tutoriel-M0-M5.pdf, printed by Microsoft Edge (or Chrome) headless.
 """
 
 import html
@@ -19,7 +19,7 @@ from PIL import Image
 CAPTURES = os.path.join("manual_tests", "captures")
 OUT = os.path.join("manual_tests", "tutorial")
 IMAGES = os.path.join(OUT, "img")
-PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M4.pdf")
+PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M5.pdf")
 
 # Regions of the 1600 x 900 captures.
 FULL = None
@@ -32,6 +32,8 @@ CONSOLE = (0, 640, 1180, 820)
 STATUS = (0, 872, 700, 900)
 HISTORY = (1178, 405, 1600, 575)
 RECOVERY = (520, 380, 1080, 540)
+LAYERS = (1178, 30, 1600, 215)
+PROPERTIES = (1178, 405, 1600, 862)
 
 BROWSERS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -132,6 +134,7 @@ SHORTCUTS = [
     ["Ctrl+S, Ctrl+Maj+S", "Fichier › Enregistrer, Enregistrer sous… (M3)"],
     ["Ctrl+Q", "Fichier › Quitter"],
     ["Ctrl+Z, Ctrl+Y", "Édition › Annuler, Rétablir (M3)"],
+    ["Suppr, Ctrl+G", "Édition › Supprimer le calque, Grouper dans un dossier (M5)"],
     ["F", "Affichage › Cadrer le mesh"],
     ["Ctrl+Maj+P", "Affichage › Profileur"],
     ["—", "Affichage › Orthographique, Fil de fer, Ombres, Réinitialiser la disposition"],
@@ -142,7 +145,7 @@ OPTIONS = [
     ["<code>[mesh]</code>", "ouvre ce mesh comme projet"],
     ["<code>--language fr|en</code>", "langue de l'interface"],
     ["<code>--window LxH</code>", "taille de la fenêtre"],
-    ["<code>--tab PANNEAU</code>", "met un panneau au premier plan (texture-sets, display, console…)"],
+    ["<code>--tab PANNEAU</code>", "met un panneau au premier plan (texture-sets, display, console, layers, properties, history…)"],
     ["<code>--hdri CHEMIN|studio</code>", "environnement"],
     ["<code>--rotation DEG</code>, <code>--exposure EV</code>", "rotation de l'environnement, exposition"],
     ["<code>--tonemap agx|aces|neutral|linear</code>", "opérateur de tone mapping"],
@@ -157,6 +160,7 @@ OPTIONS = [
     ["<code>--capture PNG</code>, <code>--capture-frames N</code>", "enregistre la fenêtre en PNG puis quitte"],
     ["<code>projet.patine</code>", "ouvre un projet au lieu d'importer un mesh"],
     ["<code>--edit rotation=DEG|exposure=EV|rename=SET:NOM|undo=N</code>", "applique des commandes au projet ouvert (une entrée d'historique chacune)"],
+    ["<code>--edit fill=R,V,B,ROUGHNESS|mode=MODE,OPACITÉ|group=</code>", "ajoute un fill au-dessus de la sélection et le sélectionne ; règle le mélange de la couleur de base du calque sélectionné ; le groupe dans un dossier (M5)"],
     ["<code>--autosave-interval SECS</code>", "délai entre deux autosaves (300 par défaut)"],
     ["variable <code>PATINE_AUTOSAVE_DIR</code>", "dossier des autosaves (par défaut %APPDATA%\\Patine\\autosave)"],
 ]
@@ -171,7 +175,7 @@ def body():
         '<div class="kicker">Tutoriel et cahier de tests manuels</div>'
         "<h1>Patine</h1>"
         '<p class="subtitle">Texturing PBR par calques sur mesh 3D<br>'
-        "Fonctionnalités des jalons M0 à M4</p>"
+        "Fonctionnalités des jalons M0 à M5</p>"
         + figure("helmet_texture_sets", FULL, "full", "Le casque d'aviateur importé, panneau Texture sets au premier plan.", "92%")
         + '<p class="meta">Version 0.1.0 — 11 octobre 2026 — captures réalisées sur RTX 3080 Ti (Vulkan), '
         "interface en français, fenêtre 1600 × 900.</p></section>")
@@ -184,6 +188,7 @@ def body():
         "<li>M2 — Viewport PBR : caméra, environnements, tone mapping, ombres, fil de fer, survol</li>"
         "<li>M3 — Document : annuler, historique, enregistrer, autosave</li>"
         "<li>M4 — Texture sets et canaux : valeurs par défaut, modes d'affichage, vue 2D</li>"
+        "<li>M5 — Calques : fills, dossiers, blend modes et opacité par canal</li>"
         "<li>Checklist complète des tests manuels</li>"
         "<li>Annexe : options de lancement et régénération de ce document</li>"
         "</ol>"
@@ -594,8 +599,100 @@ def body():
         + "<p>Budget : au moins 120 images/s (RTX 3080 Ti) et 60 (RTX A2000, <b>à mesurer</b>).</p>"
         + "</section>")
 
-    # 7. Checklist.
-    add("<section><h2>7. Checklist complète des tests manuels</h2>"
+    # 7. M5.
+    add("<section><h2>7. M5 — Calques</h2>"
+        "<p>Chaque texture set a une <b>pile de calques</b>. Pour chaque canal, la pile part de la valeur par défaut "
+        "du canal, puis chaque calque visible s'y mêle, du bas vers le haut, avec son <b>blend mode</b> et son "
+        "<b>opacité</b> pour ce canal. Au M5, les calques sont des <b>fills</b> (une valeur uniforme par canal) et "
+        "des <b>dossiers</b>. Les masques arrivent au M6, les matériaux procéduraux au M7 et la peinture au M8.</p>"
+        "<h3>7.1 Panneau Calques</h3>"
+        "<p>Les calques du texture set courant s'affichent du haut vers le bas. <b>Fill</b> et <b>Dossier</b> "
+        "ajoutent un calque au-dessus de la sélection, et la corbeille supprime le calque sélectionné (Suppr). "
+        "L'œil masque un calque. Un double-clic renomme. Le glisser-déposer réordonne la pile, y compris dans et "
+        "hors des dossiers. La flèche replie un dossier et Ctrl+G groupe la sélection dans un nouveau dossier. "
+        "La ligne du haut choisit le <b>canal courant</b> et donne, pour le calque sélectionné, son mode et son "
+        "opacité sur ce canal.</p>"
+        + '<div class="grid c2">'
+        + figure("m5_empty", LAYERS, "layers", "Pile vide : le texture set garde ses valeurs par défaut.")
+        + figure("m5_stack", LAYERS, "layers", "Deux fills dans un dossier, un fill en Produit à 50 % au-dessus.")
+        + "</div>"
+        + test(["Sur le casque (texture set LeatherPartsMat), cliquer deux fois sur Fill, puis Dossier.",
+                "Glisser « Calque fill 1 » dans le dossier, puis le ressortir ; renommer le dossier par double-clic.",
+                "Masquer un calque avec l'œil ; sélectionner un fill et faire Ctrl+G, puis Suppr ; Ctrl+Z après chaque étape."],
+               "Le panneau suit chaque opération ; chaque opération donne une entrée d'Historique et Ctrl+Z la défait. "
+               "Un nouveau fill reprend les valeurs par défaut : le rendu ne change pas tant qu'on ne le règle pas.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>7.2 Panneau Propriétés</h3>"
+        "<p>Pour le fill sélectionné, chaque canal du texture set a :</p>"
+        "<ul><li>une case d'activation (un canal décoché ne contribue pas) ;</li>"
+        "<li>sa valeur : une couleur, un curseur, ou l'inclinaison x, y pour la normale ;</li>"
+        "<li>son blend mode et son opacité.</li></ul>"
+        "<p>Le rendu et la vue 2D suivent en direct, et un geste sur un curseur donne une seule entrée d'historique.</p>"
+        + '<div class="grid c2a">'
+        + figure("m5_fill", VIEWPORT, "view", "Un fill rouge (roughness 0,35) sur la lanterne.")
+        + figure("m5_fill", PROPERTIES, "props", "Ses propriétés : un mode et une opacité par canal.")
+        + "</div>"
+        + test(["Sur la lanterne : Fill, puis régler sa couleur de base et sa roughness dans Propriétés.",
+                "Décocher Roughness, puis la recocher ; incliner la normale (x = 0,5).",
+                "Ouvrir la Vue 2D, F1 puis C pour voir chaque canal."],
+               "La lanterne prend la couleur et la netteté réglées ; sans Roughness, la valeur du dessous revient. "
+               "La normale inclinée déplace les reflets. Une seule entrée d'Historique par geste.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>7.3 Blend modes</h3>"
+        "<p>La formule de chaque calque est <code>dst = mix(dst, blend(dst, C), opacité)</code>. Les 25 modes "
+        "ont une référence CPU, et les tests vérifient que le GPU la suit à 1/512 près :</p>"
+        "<ul><li>Normal, Remplacer, Produit, Diviser, Superposition écran, Incrustation, Lumière tamisée et Lumière crue ;</li>"
+        "<li>Addition, Densité linéaire +, Soustraction, Différence et Exclusion ;</li>"
+        "<li>Obscurcir, Éclaircir, Densité couleur - et Densité couleur + ;</li>"
+        "<li>Teinte, Saturation, Couleur et Luminosité ;</li>"
+        "<li>Désactivé et Transparent (passthrough).</li></ul>"
+        "<p>Sur la normale, le mode par défaut est <b>Combiner les normales</b> (reoriented normal mapping), et "
+        "<b>Détail de normale</b> est l'autre choix ; les modes de couleur s'y comportent comme Normal. Captures : "
+        "un fill cuivre, puis un fill bleu au-dessus avec le mode indiqué.</p>"
+        + '<div class="grid c2">'
+        + figure("m5_mode_normal", (330, 61, 860, 628), "view", "Normal à 50 % : moyenne des deux couleurs.")
+        + figure("m5_mode_multiply", (330, 61, 860, 628), "view", "Produit : plus sombre que chacune.")
+        + figure("m5_mode_screen", (330, 61, 860, 628), "view", "Superposition écran : plus clair que chacune.")
+        + figure("m5_mode_overlay", (330, 61, 860, 628), "view", "Incrustation : le contraste de la couleur du dessous est renforcé.")
+        + "</div>"
+        + test(["Deux fills de couleurs différentes ; sur celui du haut, essayer chaque mode à 100 %, puis l'opacité à 0 %.",
+                "Sur la normale, incliner deux fills en sens opposés, en Combiner les normales puis en Normal."],
+               "Chaque mode donne un résultat cohérent avec son nom ; à 0 % le calque du haut n'a aucun effet. "
+               "Désactivé l'ignore.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>7.4 Dossiers</h3>"
+        "<p>Un dossier compose ses enfants sur la composition du dessous, puis mêle le résultat avec son opacité "
+        "par canal. À 50 %, tout le groupe s'atténue ; à 100 %, le dossier équivaut à ses enfants posés "
+        "directement, et Transparent (passthrough) donne le même résultat. Désactivé ignore le dossier. Au M5, il "
+        "n'y a pas encore de couverture par pixel : les autres modes d'un dossier se comportent comme Normal. La "
+        "peinture (M8) précisera ce point.</p>"
+        + '<div class="grid c2a">'
+        + figure("m5_stack", VIEWPORT, "view", "Teinte cuir et éclaircissement en Incrustation dans un dossier, "
+                 "puis un bleu en Produit à 50 %.")
+        + figure("m5_stack_history", (1178, 430, 1600, 720), "history", "Une entrée d'historique par opération.")
+        + "</div>"
+        + test(["Mettre deux fills dans un dossier, puis passer l'opacité du dossier (en tête du panneau Calques) à 50 %.",
+                "Mettre le dossier en Transparent, puis en Désactivé ; masquer le dossier avec l'œil."],
+               "À 50 %, tout le groupe s'atténue ; Transparent rend comme à 100 % ; Désactivé et l'œil le retirent.")
+        + "<h3>7.5 Mesure du compositeur</h3>"
+        + code("cargo run --release -p patine_cli -- bench compositor [--layers 30] [--resolution 4096]")
+        + "<p>Sur la sphère, 30 fills en modes variés évalués sur 5 canaux en 4096². On modifie le fill du bas "
+        "20 fois, attente GPU et mips comprises. Mesures sur la RTX 3080 Ti :</p>"
+        + table(["Pile", "Première évaluation", "Valeur d'un canal", "Visibilité (5 canaux)"],
+                [["30 fills, 4096²", "55 ms", "7,9 ms", "32,7 ms"],
+                 ["30 fills, 2048²", "36 ms", "2,8 ms", "12,5 ms"],
+                 ["60 fills, 4096²", "93 ms", "14,4 ms", "63,7 ms"]])
+        + "<p>Budget : moins de 100 ms (RTX 3080 Ti) et moins de 250 ms (RTX A2000, <b>à mesurer</b>).</p>"
+        + "</section>")
+
+    # 8. Checklist.
+    add("<section><h2>8. Checklist complète des tests manuels</h2>"
         "<h3>M0 — Fondations</h3>"
         + checklist(["<code>cargo run -p patine_app</code> ouvre une fenêtre sans erreur dans le terminal.",
                      "Les 9 panneaux sont présents ; on peut les détacher, les déplacer et les réancrer.",
@@ -645,10 +742,22 @@ def body():
                      "Vue 2D du casque et de la valise : wireframe UV conforme à Blender ; panoramique, zoom, F.",
                      "Enregistrer, rouvrir : canaux, valeurs par défaut et résolutions conservés.",
                      "<code>patine_cli bench viewport</code> sur la RTX A2000 : au moins 60 images/s avec les textures 4K."])
+        + "<h3>M5 — Calques</h3>"
+        + checklist(["Créer des fills et des dossiers ; glisser-déposer dans et hors des dossiers ; renommer ; "
+                     "supprimer (corbeille et Suppr) ; Ctrl+G.",
+                     "Masquer un calque avec l'œil : le rendu et la vue 2D suivent.",
+                     "Régler les valeurs d'un fill, ses modes et opacités par canal : le rendu suit en direct, une entrée "
+                     "d'historique par geste.",
+                     "Produit, Superposition écran et Incrustation sur la couleur ; Combiner les normales sur la "
+                     "normale : rendu cohérent.",
+                     "Dossier à 50 % : tout le groupe s'atténue ; Transparent : comme à 100 %.",
+                     "Ctrl+Z et Ctrl+Y sur chaque opération.",
+                     "Enregistrer, rouvrir : pile identique (ordre, noms, visibilité, valeurs, modes).",
+                     "<code>patine_cli bench compositor</code> sur la RTX A2000 : moins de 250 ms."])
         + "</section>")
 
     # Appendix.
-    add("<section><h2>8. Annexe</h2>"
+    add("<section><h2>9. Annexe</h2>"
         "<h3>Options de lancement de patine_app</h3>"
         "<p>Ces options servent aux captures et aux tests ; <code>patine_app --help</code> les liste.</p>"
         + table(["Option", "Effet"], OPTIONS)
@@ -659,7 +768,7 @@ def body():
         + code("cargo build --release -p patine_app -p patine_cli\n"
                "python scripts/manual_tests/capture_tutorial.py\n"
                "python scripts/manual_tests/build_tutorial.py")
-        + "<p>Le premier script produit les 49 captures dans <code>manual_tests/captures/</code> (et le projet "
+        + "<p>Le premier script produit les 57 captures dans <code>manual_tests/captures/</code> (et le projet "
         "<code>manual_tests/casque.patine</code>) ; le second les "
         "recadre et imprime ce PDF avec Microsoft Edge (ou Chrome) sans interface.</p>"
         "<h3>Crédits</h3>"
@@ -744,7 +853,7 @@ def main():
     os.makedirs(IMAGES)
     document = (
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
-        f"<title>Patine — tutoriel M0 à M4</title><style>{STYLE}</style></head>"
+        f"<title>Patine — tutoriel M0 à M5</title><style>{STYLE}</style></head>"
         f"<body>{body()}</body></html>"
     )
     page = os.path.join(OUT, "index.html")
