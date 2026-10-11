@@ -191,3 +191,46 @@ texture-sets-normal-default = (0, 0, 1)
 ## 2D view
 view-2d-empty = No project open.
 view-2d-hint = Wheel: zoom · middle click: pan · F: frame
+
+## Layers panel
+layers-empty = No project open.
+layers-no-layer = No layer: the stack gives the default values of the channels. Add a fill layer.
+layers-new-fill = Fill
+layers-new-folder = Folder
+layers-new-fill-name = Fill layer { $number }
+layers-new-folder-name = Folder { $number }
+layers-channel-unused = (channel not affected)
+action-layer-delete = Delete layer
+action-layer-group = Group into a folder
+command-fill-value = Value of “{ $name }”: { $channel }
+command-group-layers = Group “{ $name }”
+command-activate-channel = Enable { $channel } on “{ $name }”
+properties-empty = Select a layer in the Layers panel.
+properties-channels = Channels of texture set “{ $set }”
+
+## Blend modes
+blend-normal = Normal
+blend-replace = Replace
+blend-passthrough = Passthrough
+blend-multiply = Multiply
+blend-divide = Divide
+blend-screen = Screen
+blend-overlay = Overlay
+blend-soft-light = Soft light
+blend-hard-light = Hard light
+blend-linear-dodge = Linear dodge (add)
+blend-linear-burn = Linear burn
+blend-subtract = Subtract
+blend-difference = Difference
+blend-exclusion = Exclusion
+blend-darken = Darken
+blend-lighten = Lighten
+blend-color-dodge = Color dodge
+blend-color-burn = Color burn
+blend-hue = Hue
+blend-saturation = Saturation
+blend-color = Color
+blend-luminosity = Luminosity
+blend-disable = Disabled
+blend-normal-map-combine = Normal map combine
+blend-normal-map-detail = Normal map detail

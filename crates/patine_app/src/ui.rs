@@ -19,8 +19,10 @@ use crate::display_panel::{self, EnvironmentView, PickedHdri};
 use crate::document::EnvironmentChange;
 use crate::history_panel::{self, HistoryView};
 use crate::i18n::I18n;
+use crate::layers_panel::{self, LayersState};
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, DialogOutcome, NewProjectDialog};
+use crate::properties_panel;
 use crate::texture_sets_panel::{self, TextureSetsState};
 use crate::view_2d::{self, View2dState};
 use crate::viewport_panel::{self, ViewState};
@@ -128,6 +130,8 @@ pub struct UiState {
     pub texture_sets: TextureSetsState,
     /// The 2D view.
     pub view_2d: View2dState,
+    /// Layers panel: selection, renaming, current channel, closed folders.
+    pub layers: LayersState,
     /// Name of the document whose unsaved changes the user must decide about.
     pub unsaved_prompt: Option<String>,
     /// Error shown in a dialog until dismissed.
@@ -157,6 +161,7 @@ impl Default for UiState {
             view: ViewState::default(),
             texture_sets: TextureSetsState::default(),
             view_2d: View2dState::default(),
+            layers: LayersState::default(),
             unsaved_prompt: None,
             error_message: None,
             recovery_prompt: None,
@@ -282,6 +287,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> UiOutput 
             view: &mut state.view,
             texture_sets: &mut state.texture_sets,
             view_2d: &mut state.view_2d,
+            layers: &mut state.layers,
             output: &mut output,
         };
         DockArea::new(&mut state.dock)
@@ -403,6 +409,9 @@ fn menu_bar(ui: &mut Ui, info: &FrameInfo<'_>, triggered: &mut Vec<ActionId>) {
     ui.menu_button(i18n.tr("menu-edit"), |ui| {
         action_item(ui, info, ActionId::Undo, triggered);
         action_item(ui, info, ActionId::Redo, triggered);
+        ui.separator();
+        action_item(ui, info, ActionId::DeleteLayer, triggered);
+        action_item(ui, info, ActionId::GroupLayer, triggered);
     });
     ui.menu_button(i18n.tr("menu-view"), |ui| {
         action_item(ui, info, ActionId::FrameMesh, triggered);
@@ -465,6 +474,7 @@ struct PanelViewer<'a, 'b> {
     view: &'a mut ViewState,
     texture_sets: &'a mut TextureSetsState,
     view_2d: &'a mut View2dState,
+    layers: &'a mut LayersState,
     output: &'a mut UiOutput,
 }
 
@@ -522,6 +532,28 @@ impl TabViewer for PanelViewer<'_, '_> {
                     self.info.gpu_memory,
                 );
                 self.output.commands.extend(panel.command);
+                self.output.seal |= panel.seal;
+            }
+            Panel::Layers => {
+                let panel = layers_panel::show(
+                    ui,
+                    self.info.i18n,
+                    self.info.project,
+                    self.texture_sets.selected,
+                    self.layers,
+                );
+                self.output.commands.extend(panel.commands);
+                self.output.seal |= panel.seal;
+            }
+            Panel::Properties => {
+                let panel = properties_panel::show(
+                    ui,
+                    self.info.i18n,
+                    self.info.project,
+                    self.texture_sets.selected,
+                    self.layers.selected,
+                );
+                self.output.commands.extend(panel.commands);
                 self.output.seal |= panel.seal;
             }
             Panel::View2D => {

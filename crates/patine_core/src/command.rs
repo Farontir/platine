@@ -111,3 +111,55 @@ pub trait Command: Debug + Send + 'static {
     /// The command as `Any`, so that `merge` can downcast `next`.
     fn as_any(&self) -> &dyn Any;
 }
+
+/// Several commands applied as one history entry, in order, and reverted in reverse.
+/// If one fails to apply, those already applied are reverted and the error returned.
+#[derive(Debug)]
+pub struct CommandGroup {
+    label: Label,
+    commands: Vec<Box<dyn Command>>,
+}
+
+impl CommandGroup {
+    /// A group shown in the history as `label`.
+    pub fn new(label: Label, commands: Vec<Box<dyn Command>>) -> Self {
+        Self { label, commands }
+    }
+}
+
+impl Command for CommandGroup {
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        for index in 0..self.commands.len() {
+            if let Err(error) = self.commands[index].apply(project) {
+                for applied in self.commands[..index].iter_mut().rev() {
+                    // Reverting what was just applied cannot meet a changed document.
+                    let _ = applied.revert(project);
+                }
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
+
+    fn revert(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        for command in self.commands.iter_mut().rev() {
+            command.revert(project)?;
+        }
+        Ok(())
+    }
+
+    fn label(&self) -> Label {
+        self.label.clone()
+    }
+
+    fn heap_size(&self) -> usize {
+        self.commands
+            .iter()
+            .map(|command| command.heap_size())
+            .sum()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}

@@ -44,6 +44,10 @@ pub enum ActionId {
     ToggleChannelView,
     /// Show the next channel of the current texture set.
     NextChannel,
+    /// Delete the selected layer.
+    DeleteLayer,
+    /// Put the selected layer into a new folder.
+    GroupLayer,
 }
 
 /// Application state that actions read to decide whether they are enabled or checked.
@@ -69,6 +73,8 @@ pub struct ActionContext {
     pub can_redo: bool,
     /// Whether the viewport shows an isolated channel.
     pub channel_view: bool,
+    /// Whether a layer is selected in the Layers panel.
+    pub layer_selected: bool,
 }
 
 /// Declaration of an action.
@@ -256,6 +262,24 @@ impl Default for ActionRegistry {
                     yields_to_text: false,
                 },
                 Action {
+                    id: ActionId::DeleteLayer,
+                    name: "layer.delete",
+                    label_key: "action-layer-delete",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::Delete)),
+                    enabled: |ctx| ctx.layer_selected,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::GroupLayer,
+                    name: "layer.group",
+                    label_key: "action-layer-group",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::G)),
+                    enabled: |ctx| ctx.layer_selected,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
                     id: ActionId::Undo,
                     name: "edit.undo",
                     label_key: "action-edit-undo",
@@ -372,6 +396,8 @@ mod tests {
             ActionId::Redo,
             ActionId::ToggleChannelView,
             ActionId::NextChannel,
+            ActionId::DeleteLayer,
+            ActionId::GroupLayer,
         ] {
             assert_eq!(registry.get(id).id, id);
         }

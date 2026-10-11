@@ -40,7 +40,8 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
   --display MODE                lit, checker or channel:<id> (base-color, roughness, user-0...)
   --texture-set N               current texture set (Texture Sets panel, 2D view)
   --edit EDIT                   apply a command to the opened project (repeatable):
-                                rotation=DEG, exposure=EV, rename=SET:NAME, undo=N
+                                rotation=DEG, exposure=EV, rename=SET:NAME, undo=N,
+                                fill=R,G,B,ROUGHNESS, mode=MODE,OPACITY, group=
 
   A project file (.patine) can be given instead of a mesh.";
 
@@ -55,6 +56,13 @@ pub enum StartupEdit {
     RenameTextureSet(u32, String),
     /// Undo this many commands.
     Undo(u32),
+    /// Add a fill layer above the selection (base color and roughness) and select it.
+    Fill([f32; 3], f32),
+    /// Set the base color blend of the selected layer: mode name (as in the translation
+    /// keys, without `blend-`) and opacity.
+    Mode(String, f32),
+    /// Put the selected layer into a new folder.
+    Group,
 }
 
 impl StartupEdit {
@@ -68,6 +76,21 @@ impl StartupEdit {
                 StartupEdit::RenameTextureSet(set.parse().ok()?, name.to_owned())
             }
             "undo" => StartupEdit::Undo(value.parse().ok()?),
+            "fill" => {
+                let numbers: Vec<f32> = value
+                    .split(',')
+                    .map(|v| v.parse().ok())
+                    .collect::<Option<_>>()?;
+                let [r, g, b, roughness] = numbers.as_slice() else {
+                    return None;
+                };
+                StartupEdit::Fill([*r, *g, *b], *roughness)
+            }
+            "mode" => {
+                let (mode, opacity) = value.split_once(',')?;
+                StartupEdit::Mode(mode.to_owned(), opacity.parse().ok()?)
+            }
+            "group" => StartupEdit::Group,
             _ => return None,
         })
     }
@@ -385,6 +408,24 @@ mod tests {
             ]
         );
         assert!(parse(&["--edit", "scale=2"]).is_err());
+        let options = parse(&[
+            "--edit",
+            "fill=1,0,0,0.3",
+            "--edit",
+            "mode=multiply,0.5",
+            "--edit",
+            "group=",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.edits,
+            [
+                StartupEdit::Fill([1.0, 0.0, 0.0], 0.3),
+                StartupEdit::Mode("multiply".into(), 0.5),
+                StartupEdit::Group,
+            ]
+        );
+        assert!(parse(&["--edit", "fill=1,0"]).is_err());
         let options = parse(&["--display", "channel:roughness", "--texture-set", "2"]).unwrap();
         assert_eq!(
             options.display,

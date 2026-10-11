@@ -346,6 +346,77 @@ impl App {
                         }
                         continue;
                     }
+                    StartupEdit::Fill(rgb, roughness) => {
+                        let set_id = self.ui.texture_sets.selected;
+                        let Some(set) = document.project.texture_set(set_id) else {
+                            continue;
+                        };
+                        let insert = crate::layers_panel::new_fill(
+                            &self.i18n,
+                            &document.project,
+                            set,
+                            self.ui.layers.selected,
+                        );
+                        let id = patine_core::ids::LayerId(document.project.next_id);
+                        document.execute(Box::new(insert));
+                        document.history.seal();
+                        self.ui.layers.selected = Some(id);
+                        let [r, g, b] = *rgb;
+                        let values = [
+                            (Channel::BaseColor, [r, g, b, 1.0]),
+                            (Channel::Roughness, [*roughness; 4]),
+                        ];
+                        Box::new(patine_core::command::CommandGroup::new(
+                            patine_core::command::Label::new("command-fill-value"),
+                            values
+                                .into_iter()
+                                .map(|(channel, value)| {
+                                    Box::new(patine_core::commands::SetFillValue::new(
+                                        id,
+                                        channel,
+                                        Some(value),
+                                        "",
+                                    ))
+                                        as Box<dyn patine_core::command::Command>
+                                })
+                                .collect(),
+                        ))
+                    }
+                    StartupEdit::Mode(name, opacity) => {
+                        let Some(id) = self.ui.layers.selected else {
+                            continue;
+                        };
+                        let Some(mode) =
+                            patine_compositor::reference::ALL_MODES
+                                .into_iter()
+                                .find(|mode| {
+                                    crate::layers_panel::mode_key(*mode) == format!("blend-{name}")
+                                })
+                        else {
+                            anyhow::bail!("unknown blend mode {name}");
+                        };
+                        Box::new(patine_core::commands::SetChannelBlend::new(
+                            id,
+                            Channel::BaseColor,
+                            Some(patine_core::layer::ChannelBlend {
+                                mode,
+                                opacity: *opacity,
+                            }),
+                            "",
+                        ))
+                    }
+                    StartupEdit::Group => {
+                        let (Some(id), Some(set)) = (
+                            self.ui.layers.selected,
+                            document.project.texture_set(self.ui.texture_sets.selected),
+                        ) else {
+                            continue;
+                        };
+                        match crate::layers_panel::group(&self.i18n, &document.project, set, id) {
+                            Some(group) => Box::new(group),
+                            None => continue,
+                        }
+                    }
                 };
                 document.execute(command);
                 document.history.seal();
@@ -416,6 +487,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|document| document.history.can_redo()),
             channel_view: view.settings.display == DisplayMode::Channel,
+            layer_selected: self.ui.layers.selected.is_some() && self.document.is_some(),
             orthographic: view.camera.projection == Projection::Orthographic,
             wireframe: view.settings.wireframe,
             shadows: view.settings.shadows,
@@ -691,6 +763,7 @@ impl App {
         // Framed at the next render, when the panel size is known.
         self.ui.view.frame_pending = true;
         self.ui.texture_sets = Default::default();
+        self.ui.layers = Default::default();
         self.ui.view_2d.framed = false;
         self.document = Some(document);
     }
@@ -858,6 +931,30 @@ impl App {
             ActionId::ToggleShadows => {
                 let settings = &mut self.ui.view.settings;
                 settings.shadows = !settings.shadows;
+            }
+            ActionId::DeleteLayer | ActionId::GroupLayer => {
+                let (Some(document), Some(selected)) =
+                    (&mut self.document, self.ui.layers.selected)
+                else {
+                    return;
+                };
+                let Some(set) = document.project.texture_set(self.ui.texture_sets.selected) else {
+                    return;
+                };
+                let command: Option<Box<dyn patine_core::command::Command>> = match action {
+                    ActionId::DeleteLayer => crate::layers_panel::delete(set, selected)
+                        .map(|c| Box::new(c) as Box<dyn patine_core::command::Command>),
+                    _ => crate::layers_panel::group(&self.i18n, &document.project, set, selected)
+                        .map(|c| Box::new(c) as Box<dyn patine_core::command::Command>),
+                };
+                if let Some(command) = command {
+                    document.history.seal();
+                    document.execute(command);
+                    document.history.seal();
+                    if action == ActionId::DeleteLayer {
+                        self.ui.layers.selected = None;
+                    }
+                }
             }
             ActionId::ToggleChannelView => {
                 let channels = self.current_channels();

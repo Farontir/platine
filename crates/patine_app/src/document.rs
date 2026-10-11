@@ -182,7 +182,10 @@ pub fn environment_command(
 }
 
 /// Every translation key of command labels, for tests.
-pub const COMMAND_LABEL_KEYS: [&str; 17] = [
+pub const COMMAND_LABEL_KEYS: [&str; 20] = [
+    "command-fill-value",
+    "command-group-layers",
+    "command-activate-channel",
     "command-add-channel",
     "command-remove-channel",
     "command-channel-default",

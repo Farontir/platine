@@ -191,3 +191,46 @@ texture-sets-normal-default = (0, 0, 1)
 ## 2D view
 view-2d-empty = Aucun projet ouvert.
 view-2d-hint = Molette : zoom · clic milieu : déplacer · F : cadrer
+
+## Layers panel
+layers-empty = Aucun projet ouvert.
+layers-no-layer = Aucun calque : la pile donne les valeurs par défaut des canaux. Ajoutez un calque fill.
+layers-new-fill = Fill
+layers-new-folder = Dossier
+layers-new-fill-name = Calque fill { $number }
+layers-new-folder-name = Dossier { $number }
+layers-channel-unused = (canal non affecté)
+action-layer-delete = Supprimer le calque
+action-layer-group = Grouper dans un dossier
+command-fill-value = Valeur de « { $name } » : { $channel }
+command-group-layers = Grouper « { $name } »
+command-activate-channel = Activer { $channel } sur « { $name } »
+properties-empty = Sélectionnez un calque dans le panneau Calques.
+properties-channels = Canaux du texture set « { $set } »
+
+## Blend modes
+blend-normal = Normal
+blend-replace = Remplacer
+blend-passthrough = Transparent (passthrough)
+blend-multiply = Produit
+blend-divide = Diviser
+blend-screen = Superposition écran
+blend-overlay = Incrustation
+blend-soft-light = Lumière tamisée
+blend-hard-light = Lumière crue
+blend-linear-dodge = Addition (densité linéaire -)
+blend-linear-burn = Densité linéaire +
+blend-subtract = Soustraction
+blend-difference = Différence
+blend-exclusion = Exclusion
+blend-darken = Obscurcir
+blend-lighten = Éclaircir
+blend-color-dodge = Densité couleur -
+blend-color-burn = Densité couleur +
+blend-hue = Teinte
+blend-saturation = Saturation
+blend-color = Couleur
+blend-luminosity = Luminosité
+blend-disable = Désactivé
+blend-normal-map-combine = Combiner les normales
+blend-normal-map-detail = Détail de normale

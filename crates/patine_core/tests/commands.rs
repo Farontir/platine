@@ -552,3 +552,48 @@ fn new_layers_change_nothing_until_edited() {
             .all(|b| b.mode == BlendMode::Normal)
     );
 }
+
+#[test]
+fn command_groups_apply_together_and_roll_back() {
+    use patine_core::command::{CommandGroup, Label};
+    let project = layered();
+    // Group the outer fill into a new folder: insert the folder, move the fill into it.
+    let mut ids = ids(&project);
+    let folder_id = ids.layer();
+    let group = CommandGroup::new(
+        Label::new("command-group-layers"),
+        vec![
+            Box::new(InsertLayer::new(
+                SET,
+                top(2),
+                folder(folder_id, "new folder"),
+            )),
+            Box::new(MoveLayer::new(
+                LayerId(3),
+                LayerPosition {
+                    parent: Some(folder_id),
+                    index: 0,
+                },
+                "outer",
+            )),
+        ],
+    );
+    let after = round_trip(&project, Box::new(group));
+    let new_folder = after.texture_sets[0].stack.find(folder_id).unwrap();
+    assert_eq!(new_folder.children()[0].id, LayerId(3));
+
+    // A failing member undoes the members before it.
+    let mut failing = CommandGroup::new(
+        Label::new("command-group-layers"),
+        vec![
+            Box::new(RenameLayer::new(LayerId(2), "renamed")),
+            Box::new(RenameLayer::new(LayerId(99), "missing")),
+        ],
+    );
+    let mut unchanged = project.clone();
+    assert_eq!(
+        failing.apply(&mut unchanged),
+        Err(CommandError::MissingLayer(LayerId(99)))
+    );
+    assert_eq!(unchanged, project);
+}
