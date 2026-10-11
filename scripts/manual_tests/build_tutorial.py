@@ -4,7 +4,7 @@ Run from the repository root after capture_tutorial.py:
     python scripts/manual_tests/build_tutorial.py
 
 Writes manual_tests/tutorial/ (HTML and cropped images) and
-manual_tests/Patine-tutoriel-M0-M2.pdf, printed by Microsoft Edge (or Chrome) headless.
+manual_tests/Patine-tutoriel-M0-M3.pdf, printed by Microsoft Edge (or Chrome) headless.
 """
 
 import html
@@ -19,7 +19,7 @@ from PIL import Image
 CAPTURES = os.path.join("manual_tests", "captures")
 OUT = os.path.join("manual_tests", "tutorial")
 IMAGES = os.path.join(OUT, "img")
-PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M2.pdf")
+PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M3.pdf")
 
 # Regions of the 1600 x 900 captures.
 FULL = None
@@ -30,6 +30,8 @@ RIGHT_TOP = (1178, 30, 1600, 260)
 RIGHT_BOTTOM = (1178, 405, 1600, 790)
 CONSOLE = (0, 640, 1180, 820)
 STATUS = (0, 872, 700, 900)
+HISTORY = (1178, 405, 1600, 575)
+RECOVERY = (520, 380, 1080, 540)
 
 BROWSERS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -126,7 +128,10 @@ CONTROLS = [
 
 SHORTCUTS = [
     ["Ctrl+N", "Fichier › Nouveau projet…"],
+    ["Ctrl+O", "Fichier › Ouvrir… (M3)"],
+    ["Ctrl+S, Ctrl+Maj+S", "Fichier › Enregistrer, Enregistrer sous… (M3)"],
     ["Ctrl+Q", "Fichier › Quitter"],
+    ["Ctrl+Z, Ctrl+Y", "Édition › Annuler, Rétablir (M3)"],
     ["F", "Affichage › Cadrer le mesh"],
     ["Ctrl+Maj+P", "Affichage › Profileur"],
     ["—", "Affichage › Orthographique, Fil de fer, Ombres, Réinitialiser la disposition"],
@@ -148,6 +153,10 @@ OPTIONS = [
     ["<code>--hover X,Y</code>", "simule le curseur sur ce pixel de la vue 3D"],
     ["<code>--dialog new-project|about</code>, <code>--dialog-path</code>, <code>--dialog-create</code>", "ouvre et remplit un dialogue"],
     ["<code>--capture PNG</code>, <code>--capture-frames N</code>", "enregistre la fenêtre en PNG puis quitte"],
+    ["<code>projet.patine</code>", "ouvre un projet au lieu d'importer un mesh"],
+    ["<code>--edit rotation=DEG|exposure=EV|rename=SET:NOM|undo=N</code>", "applique des commandes au projet ouvert (une entrée d'historique chacune)"],
+    ["<code>--autosave-interval SECS</code>", "délai entre deux autosaves (300 par défaut)"],
+    ["variable <code>PATINE_AUTOSAVE_DIR</code>", "dossier des autosaves (par défaut %APPDATA%\\Patine\\autosave)"],
 ]
 
 
@@ -160,7 +169,7 @@ def body():
         '<div class="kicker">Tutoriel et cahier de tests manuels</div>'
         "<h1>Patine</h1>"
         '<p class="subtitle">Texturing PBR par calques sur mesh 3D<br>'
-        "Fonctionnalités des jalons M0, M1 et M2</p>"
+        "Fonctionnalités des jalons M0 à M3</p>"
         + figure("helmet_texture_sets", FULL, "full", "Le casque d'aviateur importé, panneau Texture sets au premier plan.", "92%")
         + '<p class="meta">Version 0.1.0 — 11 octobre 2026 — captures réalisées sur RTX 3080 Ti (Vulkan), '
         "interface en français, fenêtre 1600 × 900.</p></section>")
@@ -171,6 +180,7 @@ def body():
         "<li>M0 — L'interface : panneaux, langue, console, profileur</li>"
         "<li>M1 — Import de meshes : nouveau projet, formats, texture sets, erreurs</li>"
         "<li>M2 — Viewport PBR : caméra, environnements, tone mapping, ombres, fil de fer, survol</li>"
+        "<li>M3 — Document : annuler, historique, enregistrer, autosave</li>"
         "<li>Checklist complète des tests manuels</li>"
         "<li>Annexe : options de lancement et régénération de ce document</li>"
         "</ol>"
@@ -444,8 +454,84 @@ def body():
         "Budget : au moins 120 images/s sur la RTX 3080 Ti (mesuré : 3 372) et au moins 60 sur la RTX A2000 "
         "(<b>à mesurer</b>).</p></section>")
 
-    # 5. Checklist.
-    add("<section><h2>5. Checklist complète des tests manuels</h2>"
+    # 5. M3.
+    add("<section><h2>5. M3 — Document, annulation et sauvegarde</h2>"
+        "<p>Depuis le M3, toute modification du projet passe par une <b>commande</b> annulable, et le projet "
+        "s'enregistre dans un fichier <code>.patine</code>. Les réglages d'environnement (HDRI, rotation, "
+        "exposition) font désormais partie du projet ; le tone mapping, le fond, les ombres, le fil de fer et "
+        "la caméra restent des préférences d'affichage.</p>"
+        "<h3>5.1 Annuler, rétablir et panneau Historique</h3>"
+        "<p>Édition › Annuler (Ctrl+Z) et Rétablir (Ctrl+Y). Le panneau <b>Historique</b> liste les commandes, "
+        "de la plus ancienne à la plus récente, sous la ligne « Ouverture du projet ». L'état courant est en "
+        "surbrillance, les commandes annulées sont grisées ; un clic sur une ligne revient à cet état. Un geste "
+        "continu (glisser un curseur, Maj + clic droit) ne crée qu'une seule entrée.</p>"
+        + '<div class="grid c2a">'
+        + figure("m3_history", VIEWPORT, "view", "Rotation 60°, exposition 0,7, renommage, rotation 140° puis Ctrl+Z.")
+        + figure("m3_history", HISTORY, "panel", "L'Historique : la dernière rotation, annulée, est grisée.")
+        + "</div>"
+        + test(["Ouvrir le casque. Faire glisser le curseur Rotation, puis Exposition, puis Maj + clic droit dans la vue.",
+                "Ctrl+Z deux fois, Ctrl+Y une fois, puis cliquer « Ouverture du projet » et la dernière ligne.",
+                "Après un Ctrl+Z, modifier l'exposition."],
+               "Une entrée par geste ; le rendu suit chaque annulation, HDRI comprise ; une nouvelle modification "
+               "après une annulation efface les entrées grisées.")
+        + "<h3>5.2 Renommer un texture set</h3>"
+        "<p>Double-clic sur un nom dans le panneau Texture sets, puis Entrée (ou clic ailleurs) pour valider, "
+        "Échap pour annuler. Pendant la saisie, Ctrl+Z annule la frappe, pas le document.</p>"
+        + '<div class="grid c2a">'
+        + figure("m3_renamed", VIEWPORT, "view", "Le casque après le renommage.")
+        + figure("m3_renamed", RIGHT_TOP, "panel", "LensesMat renommé en « Verres ».")
+        + "</div>"
+        + test(["Double-cliquer LensesMat, taper « Verres », Entrée.", "Ctrl+Z, puis Ctrl+Y."],
+               "Le nom change, revient, puis change à nouveau ; l'Historique affiche « Renommer le texture set en « Verres » ».")
+        + "</section>")
+
+    add("<section>"
+        "<h3>5.3 Enregistrer et ouvrir</h3>"
+        "<p>Fichier › Enregistrer (Ctrl+S), Enregistrer sous… (Ctrl+Maj+S) et Ouvrir… (Ctrl+O). L'enregistrement "
+        "se fait en arrière-plan sur une copie du projet : on peut continuer à travailler, la barre d'état "
+        "affiche « Enregistrement… ». Le titre de la fenêtre porte le nom du projet, suivi de <b>*</b> tant "
+        "qu'il y a des modifications non enregistrées. Une HDRI chargée par l'utilisateur est copiée dans le "
+        "fichier : le projet reste complet si on le déplace.</p>"
+        + figure("m3_opened", FULL, "full", "manual_tests/casque.patine rouvert : même mesh, mêmes texture sets ; l'Historique repart de « Ouverture du projet ».")
+        + test(["Ouvrir le casque, charger brown_photostudio_02_2k.hdr, tourner l'environnement, Ctrl+S.",
+                "Fermer Patine, déplacer le .patine dans un autre dossier, l'ouvrir (Ctrl+O, ou en argument de patine_app).",
+                "Ouvrir un fichier qui n'est pas un projet (un .glb renommé en .patine)."],
+               "Le projet se rouvre à l'identique, HDRI et rotation compris, et le titre perd son * après "
+               "l'enregistrement ; le faux projet donne « ce fichier n'est pas un projet Patine ».")
+        + "<h3>5.4 Modifications non enregistrées</h3>"
+        "<p>Nouveau projet, Ouvrir, Quitter et la fermeture de la fenêtre demandent quoi faire des modifications "
+        "non enregistrées : <b>Enregistrer</b> (puis continuer), <b>Ne pas enregistrer</b> ou <b>Annuler</b>.</p>"
+        + test(["Modifier l'exposition, puis Ctrl+Q : essayer chacun des trois boutons.",
+                "Recommencer avec la croix de la fenêtre, Ctrl+N et Ctrl+O."],
+               "Annuler ne fait rien ; Ne pas enregistrer continue ; Enregistrer demande un fichier si le projet "
+               "n'en a pas, enregistre, puis continue.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>5.5 Autosave et récupération après un crash</h3>"
+        "<p>Toutes les 5 minutes, si le projet a des modifications non enregistrées, Patine en écrit une copie "
+        "dans <code>%APPDATA%\\Patine\\autosave</code>. Une fermeture normale la supprime. Après un crash, "
+        "le lancement suivant propose de <b>récupérer</b> le projet (marqué modifié, avec son chemin d'origine) "
+        "ou de <b>supprimer la copie</b>. Deux instances ouvertes en même temps ne se gênent pas.</p>"
+        + figure("m3_recovery", RECOVERY, "dialog", "Le dialogue de récupération au lancement suivant un crash.", "62%")
+        + test(["Lancer <code>patine_app manual_tests/assets/FlightHelmet.gltf --autosave-interval 10</code>.",
+                "Modifier l'exposition, attendre 15 s, puis tuer patine_app.exe dans le Gestionnaire des tâches.",
+                "Relancer Patine, cliquer Récupérer.",
+                "Ouvrir deux instances en même temps, en fermer une normalement, relancer."],
+               "Le projet revient avec l'exposition modifiée et un * dans le titre ; aucune récupération n'est "
+               "proposée entre deux instances vivantes, ni après une fermeture normale.")
+        + "<h3>5.6 Mesure des fichiers projet</h3>"
+        + code("cargo run --release -p patine_cli -- bench project manual_tests/assets/generated/suzanne_1m.glb")
+        + "<p>Crée un projet, l'enregistre, le rouvre, vérifie qu'il est identique et affiche les durées. "
+        "Mesures sur la RTX 3080 Ti :</p>"
+        + table(["Mesh", "Triangles", "Import", "Enregistrement", "Ouverture", "Fichier"],
+                [["FlightHelmet.gltf", "94 722", "170 ms", "26 ms", "22 ms", "2,6 Mo"],
+                 ["suzanne_1m.glb", "1 007 616", "1 876 ms", "229 ms", "105 ms", "25,9 Mo"]])
+        + "<p><code>--out fichier.patine</code> garde le projet créé : c'est ainsi qu'est produit "
+        "<code>manual_tests/casque.patine</code>.</p></section>")
+
+    # 6. Checklist.
+    add("<section><h2>6. Checklist complète des tests manuels</h2>"
         "<h3>M0 — Fondations</h3>"
         + checklist(["<code>cargo run -p patine_app</code> ouvre une fenêtre sans erreur dans le terminal.",
                      "Les 9 panneaux sont présents ; on peut les détacher, les déplacer et les réancrer.",
@@ -476,10 +562,21 @@ def body():
                      "Survol : la barre d'état affiche le triangle sous le curseur.",
                      "Redimensionner et détacher le panneau Vue 3D.",
                      "<code>patine_cli bench viewport</code> sur la RTX A2000 : au moins 60 images/s."])
+        + "<h3>M3 — Document, commandes et sauvegarde</h3>"
+        + checklist(["Rotation, exposition, HDRI et renommage : une seule entrée d'Historique par geste.",
+                     "Ctrl+Z et Ctrl+Y annulent et rétablissent, rendu compris ; un clic dans l'Historique revient à cet état.",
+                     "Ctrl+Z pendant le renommage d'un texture set annule la saisie, pas le document.",
+                     "Enregistrer, fermer, rouvrir : mesh, texture sets et environnement identiques ; le * du titre disparaît.",
+                     "Une HDRI personnelle est restituée après le déplacement du .patine.",
+                     "Quitter, fermer la fenêtre, ouvrir ou créer un projet avec des modifications : la confirmation s'affiche, "
+                     "et chaque bouton fait ce qu'il dit.",
+                     "Crash simulé avec <code>--autosave-interval 10</code> : la récupération est proposée et rend le travail.",
+                     "Deux instances ouvertes en même temps : aucune ne propose de récupérer l'autre.",
+                     "<code>patine_app projet.patine</code> ouvre le projet ; un fichier qui n'en est pas un donne un message clair."])
         + "</section>")
 
     # Appendix.
-    add("<section><h2>6. Annexe</h2>"
+    add("<section><h2>7. Annexe</h2>"
         "<h3>Options de lancement de patine_app</h3>"
         "<p>Ces options servent aux captures et aux tests ; <code>patine_app --help</code> les liste.</p>"
         + table(["Option", "Effet"], OPTIONS)
@@ -487,10 +584,11 @@ def body():
         + code("target/release/patine_app manual_tests/assets/FlightHelmet.gltf --orbit 30,10 \\\n"
                "    --hover 580,240 --language fr --window 1600x900 --capture survol.png")
         + "<h3>Régénérer ce document</h3>"
-        + code("cargo build --release -p patine_app\n"
+        + code("cargo build --release -p patine_app -p patine_cli\n"
                "python scripts/manual_tests/capture_tutorial.py\n"
                "python scripts/manual_tests/build_tutorial.py")
-        + "<p>Le premier script produit les 39 captures dans <code>manual_tests/captures/</code> ; le second les "
+        + "<p>Le premier script produit les 43 captures dans <code>manual_tests/captures/</code> (et le projet "
+        "<code>manual_tests/casque.patine</code>) ; le second les "
         "recadre et imprime ce PDF avec Microsoft Edge (ou Chrome) sans interface.</p>"
         "<h3>Crédits</h3>"
         "<p>Modèles et HDRI sous licence CC0 : Khronos Group glTF Sample Assets (Gary Hsu, Microsoft), "
@@ -574,7 +672,7 @@ def main():
     os.makedirs(IMAGES)
     document = (
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
-        f"<title>Patine — tutoriel M0 à M2</title><style>{STYLE}</style></head>"
+        f"<title>Patine — tutoriel M0 à M3</title><style>{STYLE}</style></head>"
         f"<body>{body()}</body></html>"
     )
     page = os.path.join(OUT, "index.html")

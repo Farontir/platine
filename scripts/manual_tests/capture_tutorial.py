@@ -1,17 +1,22 @@
 """Captures the screenshots of the manual-test tutorial with patine_app's capture mode.
 
-Run from the repository root after `cargo build --release -p patine_app` and the
-manual-test assets (see generate_assets.py):
+Run from the repository root after `cargo build --release -p patine_app -p patine_cli`
+and the manual-test assets (see generate_assets.py):
     python scripts/manual_tests/capture_tutorial.py
 
 Writes manual_tests/captures/<name>.png (1600 x 900 client area, French interface).
+Also writes manual_tests/casque.patine (a project made from the flight helmet) and a
+simulated crashed session in manual_tests/autosave_demo, for the M3 captures.
 """
 
 import os
+import shutil
 import subprocess
 import sys
 
-APP = os.path.join("target", "release", "patine_app.exe" if os.name == "nt" else "patine_app")
+EXE = ".exe" if os.name == "nt" else ""
+APP = os.path.join("target", "release", "patine_app" + EXE)
+CLI = os.path.join("target", "release", "patine_cli" + EXE)
 OUT = os.path.join("manual_tests", "captures")
 A = os.path.join("manual_tests", "assets")
 G = os.path.join(A, "generated")
@@ -30,6 +35,16 @@ STUDIO_HDR = os.path.join(ENV, "studio_small_08_1k.hdr")
 KLOOFENDAL = os.path.join(ENV, "kloofendal_48d_partly_cloudy_puresky_1k.hdr")
 
 LANTERN_VIEW = ["--orbit", "35,12", "--zoom", "0.85"]
+
+PROJECT = os.path.join("manual_tests", "casque.patine")
+AUTOSAVE_DEMO = os.path.join("manual_tests", "autosave_demo")
+HISTORY_EDITS = [
+    "--edit", "rotation=60",
+    "--edit", "exposure=0.7",
+    "--edit", "rename=0:Verres",
+    "--edit", "rotation=140",
+    "--edit", "undo=1",
+]
 
 # name -> arguments (mesh first, if any)
 CAPTURES = {
@@ -78,11 +93,37 @@ CAPTURES = {
     "projection_perspective": [SUITCASE, "--orbit", "45,30", "--fov", "70"],
     "projection_ortho": [SUITCASE, "--orbit", "45,30", "--ortho"],
     "picking_hover": [HELMET, "--orbit", "30,10", "--hover", "580,240", "--capture-frames", "45"],
+    "m3_history": [HELMET, "--tab", "history", "--orbit", "30,10"] + HISTORY_EDITS,
+    "m3_renamed": [HELMET, "--tab", "texture-sets", "--orbit", "30,10", "--edit", "rename=0:Verres"],
+    "m3_opened": [PROJECT, "--tab", "history", "--orbit", "30,10"],
+    "m3_recovery": [],
 }
+
+# Captures run with extra environment variables.
+ENVIRONMENT = {
+    "m3_recovery": {"PATINE_AUTOSAVE_DIR": AUTOSAVE_DEMO},
+}
+
+
+def prepare_m3():
+    """The project file and the crashed session the M3 captures need."""
+    subprocess.run(
+        [CLI, "bench", "project", HELMET, "--out", PROJECT],
+        check=True, capture_output=True, timeout=300,
+    )
+    # A session folder whose lock nobody holds: what a crash leaves behind.
+    shutil.rmtree(AUTOSAVE_DEMO, ignore_errors=True)
+    session = os.path.join(AUTOSAVE_DEMO, "1760000000000-4242")
+    os.makedirs(session)
+    shutil.copy(PROJECT, os.path.join(session, "project.patine"))
+    with open(os.path.join(session, "info.ron"), "w", encoding="utf-8") as info:
+        info.write('(name: "casque", original_path: Some("manual_tests/casque.patine"))')
+    open(os.path.join(session, "session.lock"), "w").close()
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
+    prepare_m3()
     only = set(sys.argv[1:])
     failures = []
     for name, args in CAPTURES.items():
@@ -93,7 +134,8 @@ def main():
         # The last --language wins: interface_en passes its own before.
         if "--language" in args:
             command = [APP] + args + ["--window", "1600x900", "--capture", target]
-        result = subprocess.run(command, capture_output=True, text=True, timeout=300)
+        env = dict(os.environ, **ENVIRONMENT.get(name, {}))
+        result = subprocess.run(command, capture_output=True, text=True, timeout=300, env=env)
         ok = result.returncode == 0 and os.path.exists(target)
         print(("ok    " if ok else "FAIL  ") + name)
         if not ok:
