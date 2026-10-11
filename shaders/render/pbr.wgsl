@@ -1,7 +1,7 @@
 // Metal/roughness shading: Cook-Torrance (GGX, height-correlated Smith, Schlick) lit by
 // the environment. Diffuse from spherical harmonics, specular from the prefiltered cube
-// and the split-sum LUT. With shadows on, the dominant light is taken out of the
-// harmonics and added back as a shadowed directional light (diffuse only: the
+// and the split-sum LUT. The dominant light is taken out of the harmonics and added
+// back as a directional light, shadowed when shadows are on (diffuse only: the
 // environment's specular reflection is not shadowed).
 
 // #import render/frame
@@ -79,19 +79,18 @@ fn fs_main(in: VertexOutput) -> @location(0) vec4<f32> {
 
     // Diffuse: energy not reflected specularly.
     let diffuse_weight = diffuse_color * (vec3<f32>(1.0) - specular_albedo);
-    var irradiance: vec3<f32>;
-    if shadows {
-        let l = environment.light_direction.xyz;
-        let n_dot_l = max(dot(n, l), 0.0);
-        var shadow = 1.0;
-        if n_dot_l > 0.0 {
-            shadow = shadow_factor(in.world_position, n);
-        }
-        let direct = environment.light_color.rgb * n_dot_l * shadow;
-        irradiance = sh_diffuse(environment.residual, to_environment(n, rotation)) + direct;
-    } else {
-        irradiance = sh_diffuse(environment.sh, to_environment(n, rotation));
+    // The dominant light is always taken out of the harmonics and evaluated exactly: an
+    // order-2 projection of an intense sun rings into negative values on the far side,
+    // which clamping turns into wrongly colored shading. Disabling shadows only skips
+    // the shadow map.
+    let l = environment.light_direction.xyz;
+    let n_dot_l = max(dot(n, l), 0.0);
+    var shadow = 1.0;
+    if shadows && n_dot_l > 0.0 {
+        shadow = shadow_factor(in.world_position, n);
     }
+    let direct = environment.light_color.rgb * n_dot_l * shadow;
+    let irradiance = sh_diffuse(environment.residual, to_environment(n, rotation)) + direct;
     // Ambient occlusion would scale the indirect terms only (channel added in M4).
     let color = diffuse_weight * irradiance + specular;
     return vec4<f32>(color, 1.0);

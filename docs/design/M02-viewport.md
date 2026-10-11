@@ -59,7 +59,7 @@ La lumière directionnelle est extraite des SH de l'environnement (méthode de S
 - direction = bande L1 de la luminance ;
 - intensité = projection aux moindres carrés d'une lumière directionnelle sur les 9 coefficients.
 
-Elle est retirée de l'irradiance diffuse, puis rajoutée avec N·L et le facteur d'ombre (shadow map 2048², ortho ajustée au mesh, PCF). Sans occlusion, le résultat est identique à l'IBL pure, à l'approximation SH près. Quand les ombres sont désactivées, on utilise directement les SH complètes.
+Elle est retirée de l'irradiance diffuse, puis rajoutée avec N·L et le facteur d'ombre (shadow map 2048², ortho ajustée au mesh, PCF). Sans occlusion, le résultat est identique à l'IBL pure, à l'approximation SH près. **Correctif (11/10/2026)** : la lumière est extraite même quand les ombres sont désactivées ; seul le facteur d'ombre vaut alors 1. Évaluer un soleil intense (HDRI EXR) dans les SH d'ordre 2 produisait des valeurs négatives fortes du côté opposé, rabotées à zéro : faces noires ou bleutées. Défaut vu pendant les captures du tutoriel, couvert par un test.
 
 Limite assumée : le reflet spéculaire de l'environnement n'est pas ombré.
 

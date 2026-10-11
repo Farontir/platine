@@ -36,6 +36,8 @@ pub struct ViewState {
     pub hovered: Option<u32>,
     /// Frame the mesh at the next render, once the panel size is known.
     pub frame_pending: bool,
+    /// Panel size at the previous render, to detect a settled layout.
+    pub previous_size: [u32; 2],
 }
 
 impl Default for ViewState {
@@ -49,6 +51,7 @@ impl Default for ViewState {
             hover_pixel: None,
             hovered: None,
             frame_pending: false,
+            previous_size: [0, 0],
         }
     }
 }

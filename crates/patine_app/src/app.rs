@@ -396,7 +396,14 @@ impl App {
             return;
         };
         let view = &mut self.ui.view;
-        if view.frame_pending && view.size[0] > 1 && view.size[1] > 1 {
+        // Frame once the panel size has settled (the same two frames in a row): the first
+        // layouts of a new window or dock can report intermediate sizes.
+        let size_settled = view.size == view.previous_size && view.size[0] > 1 && view.size[1] > 1;
+        view.previous_size = view.size;
+        if view.frame_pending && !size_settled {
+            gfx.window.request_redraw();
+        }
+        if view.frame_pending && size_settled {
             view.frame_pending = false;
             if let Some(bounds) = self.project.as_ref().and_then(|p| p.mesh.bounds()) {
                 let aspect = view.aspect();

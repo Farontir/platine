@@ -211,8 +211,49 @@ gpu_test!(
 );
 
 gpu_test!(
-    /// Without occluders, shadows on (residual harmonics + directional light) matches
-    /// shadows off (full harmonics) up to the order-2 approximation of the clamped cosine.
+    /// Shadows off must not change the lighting model: with an intense sun on the right,
+    /// the left half of a sphere (facing away from it) still receives the sky. Evaluating
+    /// the sun through the order-2 harmonics rang to large negative values there, clamped
+    /// to black.
+    fn intense_sun_keeps_the_sky_light_on_the_far_side_without_shadows(ctx) {
+        let mut viewport = Viewport::with_options(&ctx, ViewportOptions::small()).unwrap();
+        let camera = OrbitCamera::default();
+        // The camera's right vector (first row of the view matrix).
+        let sun = camera.view().row(0).truncate().normalize();
+        let sky = [0.1, 0.12, 0.3];
+        let environment = EquirectImage::from_fn(256, 128, |d| {
+            if d.dot(sun) > 0.9995 { [5e4; 3] } else { sky }
+        });
+        viewport.set_environment(&ctx, &environment).unwrap();
+        let pixels = render_sphere(&ctx, &mut viewport, white(0.0, 1.0), false);
+        // Sphere pixels of the left third of the image, away from the silhouette rows.
+        let mut far_side = Vec::new();
+        for y in SIZE / 4..3 * SIZE / 4 {
+            for x in 0..SIZE / 3 {
+                let p = pixels[(y * SIZE + x) as usize];
+                if p[1] > 0.0 {
+                    far_side.push(p);
+                }
+            }
+        }
+        assert!(far_side.len() > 30, "too few far-side pixels: {}", far_side.len());
+        // Pixels may be brighter than the sky alone (the split-sum specular of a rough
+        // surface lets a little of this extreme sun through), never darker.
+        let lit = far_side
+            .iter()
+            .filter(|p| p.iter().zip(sky).all(|(c, s)| *c > 0.5 * s))
+            .count();
+        assert!(
+            lit * 100 >= far_side.len() * 95,
+            "{lit} of {} far-side pixels keep the sky light",
+            far_side.len()
+        );
+    }
+);
+
+gpu_test!(
+    /// Without occluders, the shadow map changes nothing: a convex sphere renders the same
+    /// with shadows on and off (no acne, no light leaks).
     fn shadows_without_occluders_preserve_the_lighting(ctx) {
         let mut viewport = Viewport::with_options(&ctx, ViewportOptions::small()).unwrap();
         viewport.set_environment(&ctx, &studio_sky(128)).unwrap();
