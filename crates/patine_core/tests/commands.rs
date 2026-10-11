@@ -399,3 +399,21 @@ fn budget_evicts_the_oldest_entries() {
     assert_ne!(project.texture_sets[0].name, "paint");
     assert!(history.is_dirty());
 }
+
+#[test]
+fn a_background_save_marks_the_state_it_wrote() {
+    let mut project = project();
+    let mut history = History::default();
+    let command = SetEnvironment::exposure(&project.environment, 1.0);
+    history.push(&mut project, Box::new(command)).unwrap();
+    // The save starts on a snapshot; the user keeps editing the same gesture.
+    let state = history.begin_save();
+    let command = SetEnvironment::exposure(&project.environment, 2.0);
+    history.push(&mut project, Box::new(command)).unwrap();
+    assert_eq!(history.applied(), 2, "the gesture was split by the save");
+    history.mark_saved_as(state);
+    assert!(history.is_dirty(), "the later edit is not saved");
+    history.undo(&mut project).unwrap();
+    assert!(!history.is_dirty());
+    assert_eq!(project.environment.exposure_ev, 1.0);
+}

@@ -12,5 +12,6 @@ pub mod i18n;
 pub mod logging;
 pub mod new_project;
 pub mod profiling;
+pub mod project_io;
 pub mod ui;
 pub mod viewport_panel;

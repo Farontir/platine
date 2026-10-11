@@ -192,6 +192,18 @@ impl History {
         self.sealed = true;
     }
 
+    /// Starts a save in the background: ends the current gesture, so that the saved state
+    /// stays reachable, and returns its number for [`History::mark_saved_as`].
+    pub fn begin_save(&mut self) -> u64 {
+        self.sealed = true;
+        self.current_state()
+    }
+
+    /// Records that state `state` was saved, when the save finishes after more edits.
+    pub fn mark_saved_as(&mut self, state: u64) {
+        self.saved_state = Some(state);
+    }
+
     /// Records that the document matches no saved file (a recovered autosave).
     pub fn mark_unsaved(&mut self) {
         self.saved_state = None;

@@ -29,7 +29,8 @@ use crate::i18n::{I18n, Language};
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, NewProjectDialog};
 use crate::profiling::Profiler;
-use crate::ui::{self, FrameInfo, UiState};
+use crate::project_io::{self, FileJobs, JobResult};
+use crate::ui::{self, FrameInfo, UiState, UnsavedChoice};
 
 /// Everything that only exists while the window is open.
 struct Graphics {
@@ -47,6 +48,17 @@ struct Graphics {
     /// What the last pick request looked at (pixel, image size, camera): a new request is
     /// only sent when it changes, so hovering does not redraw continuously.
     last_pick: Option<([u32; 2], [u32; 2], OrbitCamera)>,
+}
+
+/// What to do once the user has decided about unsaved changes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum PendingAction {
+    /// Open the New Project dialog.
+    NewProject,
+    /// Open a project file (picked in a dialog when `None`).
+    Open(Option<PathBuf>),
+    /// Quit the application.
+    Quit,
 }
 
 /// Application state.
@@ -70,6 +82,16 @@ pub struct App {
     startup: StartupOptions,
     /// Window capture in progress: PNG path and frames left before it.
     capture: Option<(PathBuf, u32)>,
+    /// Project file being opened or saved.
+    file_jobs: FileJobs,
+    /// Action waiting for the answer about unsaved changes.
+    pending: Option<PendingAction>,
+    /// Action to run once the running save succeeds.
+    after_save: Option<PendingAction>,
+    /// Set when the application must exit at the end of the frame.
+    quit_requested: bool,
+    /// Title currently shown by the window.
+    title: String,
 }
 
 /// Opens the main window and runs until it is closed.
@@ -98,15 +120,29 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
             .clone()
             .map(|path| (path, options.capture_frames)),
         startup: options,
+        file_jobs: FileJobs::default(),
+        pending: None,
+        after_save: None,
+        quit_requested: false,
+        title: String::new(),
     };
     app.apply_startup_environment()?;
-    if let Some(path) = app.startup.mesh.clone() {
-        let imported = patine_mesh::import(&path, BuildOptions::default())
-            .with_context(|| format!("cannot import {}", path.display()))?;
-        app.open_project(CreatedProject {
-            project: Project::new(imported.mesh, path, ProjectSettings::default()),
-            report: imported.report,
-        });
+    match app.startup.mesh.clone() {
+        Some(path) if is_project_file(&path) => {
+            let project = patine_core::file::load(&path)
+                .with_context(|| format!("cannot open {}", path.display()))?;
+            tracing::info!(path = %path.display(), "project opened");
+            app.replace_document(Document::opened(project, path));
+        }
+        Some(path) => {
+            let imported = patine_mesh::import(&path, BuildOptions::default())
+                .with_context(|| format!("cannot import {}", path.display()))?;
+            app.open_project(CreatedProject {
+                project: Project::new(imported.mesh, path, ProjectSettings::default()),
+                report: imported.report,
+            });
+        }
+        None => {}
     }
     app.apply_startup_options()?;
     event_loop.run_app(&mut app).context("event loop failed")?;
@@ -114,6 +150,12 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
         Some(error) => Err(error),
         None => Ok(()),
     }
+}
+
+/// Whether `path` names a project file rather than a mesh.
+fn is_project_file(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case(patine_core::file::EXTENSION))
 }
 
 /// Saves the surface texture `texture` (8-bit RGBA or BGRA) to a PNG file.
@@ -233,6 +275,7 @@ impl App {
             profiler_enabled: self.profiler.is_enabled(),
             language: self.i18n.language(),
             has_project: self.document.is_some(),
+            busy: self.file_jobs.busy(),
             can_undo: self
                 .document
                 .as_ref()
@@ -432,26 +475,152 @@ impl App {
         for warning in &report.warnings {
             tracing::warn!("{warning}");
         }
+        self.replace_document(Document::new(project));
+    }
+
+    /// Makes `document` the open document: uploads its mesh and frames it.
+    fn replace_document(&mut self, document: Document) {
         if let Some(gfx) = self.graphics.as_mut() {
-            gfx.gpu_mesh = upload_mesh(&gfx.gpu, &gfx.viewport, &project.mesh);
+            gfx.gpu_mesh = upload_mesh(&gfx.gpu, &gfx.viewport, &document.project.mesh);
             gfx.last_pick = None;
-            self.ui.view.hovered = None;
         }
+        self.ui.view.hovered = None;
         // Framed at the next render, when the panel size is known.
         self.ui.view.frame_pending = true;
         self.ui.renaming = None;
-        self.document = Some(Document::new(project));
+        self.document = Some(document);
     }
 
-    fn execute(&mut self, action: ActionId, event_loop: &ActiveEventLoop) {
-        tracing::debug!(action = self.actions.get(action).name, "action");
+    /// Runs `action` now, or first asks what to do with unsaved changes.
+    fn request(&mut self, action: PendingAction) {
+        match &self.document {
+            Some(document) if document.history.is_dirty() => {
+                self.ui.unsaved_prompt = Some(document.name());
+                self.pending = Some(action);
+            }
+            _ => self.perform(action),
+        }
+    }
+
+    /// Runs an action that may discard the document.
+    fn perform(&mut self, action: PendingAction) {
         match action {
-            ActionId::NewProject => {
+            PendingAction::NewProject => {
                 if self.ui.new_project.is_none() {
                     self.ui.new_project = Some(NewProjectDialog::default());
                 }
             }
-            ActionId::Quit => event_loop.exit(),
+            PendingAction::Open(path) => {
+                let filter = self.i18n.tr("file-filter").into_owned();
+                self.file_jobs.open(&self.egui_ctx, path, filter);
+            }
+            PendingAction::Quit => self.quit_requested = true,
+        }
+    }
+
+    /// Answer of the unsaved changes dialog.
+    fn answer_unsaved(&mut self, choice: UnsavedChoice) {
+        self.ui.unsaved_prompt = None;
+        let Some(action) = self.pending.take() else {
+            return;
+        };
+        match choice {
+            UnsavedChoice::Save => {
+                self.after_save = Some(action);
+                self.save(false);
+            }
+            UnsavedChoice::Discard => self.perform(action),
+            UnsavedChoice::Cancel => {}
+        }
+    }
+
+    /// Saves the document in the background, to its file or to one picked in a dialog
+    /// (always with `choose_path`).
+    fn save(&mut self, choose_path: bool) {
+        if self.file_jobs.busy() {
+            return;
+        }
+        let thumbnail = self.thumbnail();
+        let Some(document) = &mut self.document else {
+            self.after_save = None;
+            return;
+        };
+        let state = document.history.begin_save();
+        let path = if choose_path {
+            None
+        } else {
+            document.path.clone()
+        };
+        let filter = self.i18n.tr("file-filter").into_owned();
+        self.file_jobs.save(
+            &self.egui_ctx,
+            document.project.clone(),
+            state,
+            path,
+            thumbnail,
+            filter,
+            document.name(),
+        );
+    }
+
+    /// The last viewport image, for the project thumbnail.
+    fn thumbnail(&self) -> Option<image::RgbaImage> {
+        let gfx = self.graphics.as_ref()?;
+        let (texture, _) = gfx.viewport.output()?;
+        let pixels = patine_gpu::readback::read_texture(&gfx.gpu, texture).ok()?;
+        image::RgbaImage::from_raw(texture.width(), texture.height(), pixels)
+    }
+
+    /// Handles a finished open or save.
+    fn finish_file_job(&mut self, result: JobResult) {
+        match result {
+            JobResult::Saved { path, state } => {
+                if let Some(document) = &mut self.document {
+                    document.path = Some(path);
+                    document.history.mark_saved_as(state);
+                }
+                if let Some(action) = self.after_save.take() {
+                    self.perform(action);
+                }
+            }
+            JobResult::Opened { path, project } => {
+                tracing::info!(path = %path.display(), "project opened");
+                self.replace_document(Document::opened(*project, path));
+            }
+            JobResult::Failed {
+                saving,
+                path,
+                error,
+            } => {
+                tracing::error!(path = %path.display(), %error, "project file error");
+                self.ui.error_message =
+                    Some(project_io::error_message(&self.i18n, saving, &path, &error));
+                self.after_save = None;
+            }
+            JobResult::Cancelled => self.after_save = None,
+        }
+    }
+
+    /// Window title: application, document name, and `*` when modified.
+    fn window_title(&self) -> String {
+        let app = self.i18n.tr("app-title");
+        match &self.document {
+            Some(document) => {
+                let modified = if document.history.is_dirty() { "*" } else { "" };
+                format!("{}{modified} — {app}", document.name())
+            }
+            None => app.into_owned(),
+        }
+    }
+
+    fn execute(&mut self, action: ActionId) {
+        tracing::debug!(action = self.actions.get(action).name, "action");
+        match action {
+            ActionId::NewProject => self.request(PendingAction::NewProject),
+            ActionId::Open => self.request(PendingAction::Open(None)),
+            ActionId::Save => self.save(false),
+            ActionId::SaveAs => self.save(true),
+            ActionId::Quit => self.request(PendingAction::Quit),
             ActionId::ResetLayout => self.ui.dock = ui::default_layout(),
             ActionId::ToggleProfiler => {
                 let enabled = !self.profiler.is_enabled();
@@ -504,6 +673,9 @@ impl App {
     /// Executes what the interface asked for this frame: a new project, commands and
     /// environment changes.
     fn apply_ui_output(&mut self, output: ui::UiOutput) {
+        if let Some(choice) = output.unsaved_choice {
+            self.answer_unsaved(choice);
+        }
         if let Some(created) = output.created_project {
             self.open_project(created);
         }
@@ -649,6 +821,9 @@ impl App {
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         puffin::profile_function!();
+        if let Some(result) = self.file_jobs.poll() {
+            self.finish_file_job(result);
+        }
         let action_context = self.action_context();
         let environment_name = self.environment_name();
         let Some(gfx) = self.graphics.as_mut() else {
@@ -678,6 +853,13 @@ impl App {
                 name: environment_name,
                 loading: self.environment_sync.loading(),
                 error: self.environment_sync.error.as_deref(),
+            },
+            file_status: if self.file_jobs.saving() {
+                Some("file-busy-saving")
+            } else if self.file_jobs.opening() {
+                Some("file-busy-opening")
+            } else {
+                None
             },
         };
         let ui_state = &mut self.ui;
@@ -740,7 +922,21 @@ impl App {
         self.profiler.new_frame();
 
         for action in triggered {
-            self.execute(action, event_loop);
+            self.execute(action);
+        }
+        if self.quit_requested {
+            // A save in progress finishes before the application exits.
+            if let Some(result) = self.file_jobs.wait() {
+                self.finish_file_job(result);
+            }
+            event_loop.exit();
+        }
+        let title = self.window_title();
+        if let Some(gfx) = &self.graphics
+            && title != self.title
+        {
+            gfx.window.set_title(&title);
+            self.title = title;
         }
 
         match repaint_delay {
@@ -890,7 +1086,12 @@ impl ApplicationHandler for App {
             }
         }
         match event {
-            WindowEvent::CloseRequested => event_loop.exit(),
+            WindowEvent::CloseRequested => {
+                self.request(PendingAction::Quit);
+                if let Some(gfx) = &self.graphics {
+                    gfx.window.request_redraw();
+                }
+            }
             WindowEvent::Resized(size) => self.resize(size),
             WindowEvent::RedrawRequested => self.redraw(event_loop),
             _ => {}

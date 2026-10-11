@@ -122,6 +122,21 @@ pub struct UiState {
     pub view: ViewState,
     /// Texture set being renamed in the Texture Sets panel, with the edited name.
     pub renaming: Option<(TextureSetId, String)>,
+    /// Name of the document whose unsaved changes the user must decide about.
+    pub unsaved_prompt: Option<String>,
+    /// Error shown in a dialog until dismissed.
+    pub error_message: Option<String>,
+}
+
+/// Answer to the unsaved changes dialog.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnsavedChoice {
+    /// Save, then continue.
+    Save,
+    /// Continue without saving.
+    Discard,
+    /// Do nothing.
+    Cancel,
 }
 
 impl Default for UiState {
@@ -133,6 +148,8 @@ impl Default for UiState {
             new_project: None,
             view: ViewState::default(),
             renaming: None,
+            unsaved_prompt: None,
+            error_message: None,
         }
     }
 }
@@ -157,6 +174,8 @@ pub struct FrameInfo<'a> {
     pub hovered: Option<u32>,
     /// Environment of the document, or of the draft without a project.
     pub environment: EnvironmentView<'a>,
+    /// Translation key of the file operation in progress, for the status bar.
+    pub file_status: Option<&'static str>,
 }
 
 /// What the interface asks the application to do after a frame.
@@ -174,6 +193,8 @@ pub struct UiOutput {
     pub picked_hdri: Option<PickedHdri>,
     /// A gesture ended: the next command starts a new history entry.
     pub seal: bool,
+    /// Answer to the unsaved changes dialog.
+    pub unsaved_choice: Option<UnsavedChoice>,
 }
 
 /// Applies the Patine theme and adds the icon font. Call once on the egui context.
@@ -204,6 +225,11 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> UiOutput 
         args.set("name", info.gpu_name);
         args.set("backend", info.gpu_backend);
         ui.horizontal(|ui| {
+            if let Some(key) = info.file_status {
+                ui.spinner();
+                ui.label(RichText::new(info.i18n.tr(key)).small());
+                ui.separator();
+            }
             ui.label(RichText::new(info.i18n.tr_args("status-gpu", &args)).small());
             if let Some(project) = info.project {
                 ui.separator();
@@ -263,14 +289,69 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> UiOutput 
         }
     }
 
+    if let Some(name) = &state.unsaved_prompt {
+        output.unsaved_choice = unsaved_dialog(ui.ctx(), info.i18n, name);
+    }
+    if let Some(message) = &state.error_message
+        && message_dialog(ui.ctx(), info.i18n, message)
+    {
+        state.error_message = None;
+    }
+
     output.actions = triggered;
     output
+}
+
+/// Asks what to do with unsaved changes; `None` while the user has not answered.
+fn unsaved_dialog(ctx: &egui::Context, i18n: &I18n, name: &str) -> Option<UnsavedChoice> {
+    let mut choice = None;
+    let response = egui::Modal::new(egui::Id::new("unsaved_changes")).show(ctx, |ui| {
+        ui.heading(i18n.tr("unsaved-title"));
+        let mut args = FluentArgs::new();
+        args.set("name", name.to_owned());
+        ui.label(i18n.tr_args("unsaved-message", &args));
+        ui.add_space(8.0);
+        ui.horizontal(|ui| {
+            if ui.button(i18n.tr("unsaved-save")).clicked() {
+                choice = Some(UnsavedChoice::Save);
+            }
+            if ui.button(i18n.tr("unsaved-discard")).clicked() {
+                choice = Some(UnsavedChoice::Discard);
+            }
+            if ui.button(i18n.tr("unsaved-cancel")).clicked() {
+                choice = Some(UnsavedChoice::Cancel);
+            }
+        });
+    });
+    if choice.is_none() && response.should_close() {
+        choice = Some(UnsavedChoice::Cancel);
+    }
+    choice
+}
+
+/// Shows an error; returns `true` when dismissed.
+fn message_dialog(ctx: &egui::Context, i18n: &I18n, message: &str) -> bool {
+    let mut close = false;
+    let response = egui::Modal::new(egui::Id::new("error_message")).show(ctx, |ui| {
+        ui.set_max_width(520.0);
+        ui.heading(i18n.tr("error-title"));
+        ui.label(message);
+        ui.add_space(8.0);
+        if ui.button(i18n.tr("error-ok")).clicked() {
+            close = true;
+        }
+    });
+    close || response.should_close()
 }
 
 fn menu_bar(ui: &mut Ui, info: &FrameInfo<'_>, triggered: &mut Vec<ActionId>) {
     let i18n = info.i18n;
     ui.menu_button(i18n.tr("menu-file"), |ui| {
         action_item(ui, info, ActionId::NewProject, triggered);
+        action_item(ui, info, ActionId::Open, triggered);
+        ui.separator();
+        action_item(ui, info, ActionId::Save, triggered);
+        action_item(ui, info, ActionId::SaveAs, triggered);
         ui.separator();
         action_item(ui, info, ActionId::Quit, triggered);
     });
@@ -591,6 +672,8 @@ mod tests {
             let mut state = UiState {
                 show_about: true,
                 new_project: Some(NewProjectDialog::default()),
+                unsaved_prompt: Some("helmet".into()),
+                error_message: Some("cannot open".into()),
                 ..UiState::default()
             };
             let info = FrameInfo {
@@ -613,6 +696,7 @@ mod tests {
                     loading: true,
                     error: Some("test error"),
                 },
+                file_status: Some("file-busy-saving"),
             };
             for _ in 0..3 {
                 let input = egui::RawInput {

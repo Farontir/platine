@@ -10,6 +10,12 @@ use crate::i18n::Language;
 pub enum ActionId {
     /// Open the New Project dialog.
     NewProject,
+    /// Open a project file.
+    Open,
+    /// Save the project to its file.
+    Save,
+    /// Save the project to a new file.
+    SaveAs,
     /// Quit the application.
     Quit,
     /// Restore the default panel layout.
@@ -45,6 +51,8 @@ pub struct ActionContext {
     pub language: Language,
     /// Whether a project is open.
     pub has_project: bool,
+    /// Whether a project file is being opened or saved.
+    pub busy: bool,
     /// Whether the viewport uses an orthographic projection.
     pub orthographic: bool,
     /// Whether the wireframe overlay is shown.
@@ -96,7 +104,37 @@ impl Default for ActionRegistry {
                     name: "file.new_project",
                     label_key: "action-file-new-project",
                     shortcut: Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::N)),
-                    enabled: always,
+                    enabled: |ctx| !ctx.busy,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::Open,
+                    name: "file.open",
+                    label_key: "action-file-open",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::O)),
+                    enabled: |ctx| !ctx.busy,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::Save,
+                    name: "file.save",
+                    label_key: "action-file-save",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::COMMAND, Key::S)),
+                    enabled: |ctx| ctx.has_project && !ctx.busy,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::SaveAs,
+                    name: "file.save_as",
+                    label_key: "action-file-save-as",
+                    shortcut: Some(KeyboardShortcut::new(
+                        Modifiers::COMMAND.plus(Modifiers::SHIFT),
+                        Key::S,
+                    )),
+                    enabled: |ctx| ctx.has_project && !ctx.busy,
                     checked: None,
                     yields_to_text: false,
                 },
@@ -293,6 +331,9 @@ mod tests {
         let registry = ActionRegistry::default();
         for id in [
             ActionId::NewProject,
+            ActionId::Open,
+            ActionId::Save,
+            ActionId::SaveAs,
             ActionId::Quit,
             ActionId::ResetLayout,
             ActionId::ToggleProfiler,
