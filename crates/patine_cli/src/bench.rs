@@ -201,15 +201,18 @@ pub struct CompositorBench {
     pub resolution: Resolution,
     /// Measured edits.
     pub edits: u32,
+    /// Whether every fill has a mask (a fill and a levels).
+    pub masks: bool,
 }
 
 impl CompositorBench {
-    /// Parses `--layers N --resolution N --edits N`.
+    /// Parses `--layers N --resolution N --edits N --masks`.
     pub fn parse(args: &[String]) -> anyhow::Result<Self> {
         let mut bench = Self {
             layers: 30,
             resolution: Resolution::new(4096).context("supported")?,
             edits: 20,
+            masks: false,
         };
         let mut args = args.iter();
         while let Some(arg) = args.next() {
@@ -221,6 +224,7 @@ impl CompositorBench {
                     bench.resolution = Resolution::new(pixels).context("resolution 512 to 8192")?;
                 }
                 "--edits" => bench.edits = value()?.parse()?,
+                "--masks" => bench.masks = true,
                 other => bail!("unknown option {other}"),
             }
         }
@@ -230,9 +234,12 @@ impl CompositorBench {
     /// Runs the benchmark and prints the results.
     pub fn run(&self) -> anyhow::Result<()> {
         use patine_core::command::Command;
-        use patine_core::commands::{SetFillValue, SetLayerVisible};
+        use patine_core::commands::{SetFillValue, SetLayerVisible, SetMaskEffect};
         use patine_core::ids::{IdSequence, LayerId};
         use patine_core::layer::{BlendMode, Layer};
+        use patine_core::mask::{
+            LevelsParams, MaskEffect, MaskEffectEntry, MaskInitial, MaskStack,
+        };
 
         let ctx = GpuContext::new_headless(AdapterChoice::Hardware)?;
         let info = ctx.adapter_info();
@@ -264,11 +271,28 @@ impl CompositorBench {
                     }
                     blend.opacity = 0.7;
                 }
+                if self.masks {
+                    let mut mask = MaskStack::new(MaskInitial::White);
+                    let fill = MaskEffectEntry {
+                        blend: BlendMode::Multiply,
+                        ..MaskEffectEntry::new(ids.effect(), MaskEffect::uniform(0.8))
+                    };
+                    let levels = MaskEffectEntry::new(
+                        ids.effect(),
+                        MaskEffect::Levels(LevelsParams {
+                            gamma: 1.5,
+                            ..LevelsParams::default()
+                        }),
+                    );
+                    mask.effects = vec![fill, levels];
+                    layer.mask = Some(mask);
+                }
                 layer
             })
             .collect();
         project.next_id = ids.next_raw();
         let bottom = set.stack.layers[0].id;
+        let bottom_mask = set.stack.layers[0].mask.clone();
         let channel_count = channels.len();
 
         let compositor = Compositor::new(&ctx)?;
@@ -278,11 +302,17 @@ impl CompositorBench {
         document.sync(&ctx, &mut pool, &compositor, &project);
         ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
         println!(
-            "stack      {} fills, {} channels of {}², first evaluation {:.0} ms",
+            "stack      {} fills{}, {} channels of {}², first evaluation {:.0} ms",
             self.layers,
+            if self.masks { " with masks" } else { "" },
             channel_count,
             self.resolution.pixels(),
             start.elapsed().as_secs_f64() * 1e3
+        );
+        println!(
+            "memory     {:.0} MB in the pool, of which {:.0} MB of masks",
+            pool.memory() as f64 / 1e6,
+            document.mask_memory() as f64 / 1e6
         );
 
         let mut measure =
@@ -320,6 +350,18 @@ impl CompositorBench {
                     .expect("the bottom layer exists");
             },
         )?;
+        if let Some(mask) = bottom_mask {
+            measure(
+                "mask       fill value in the mask of the bottom fill (every channel):",
+                &mut |project, step| {
+                    let mut entry = mask.effects[0].clone();
+                    entry.effect = MaskEffect::uniform(0.3 + 0.02 * step as f32);
+                    SetMaskEffect::new(bottom, entry, "")
+                        .apply(project)
+                        .expect("the bottom fill has a mask");
+                },
+            )?;
+        }
         println!("budget     < 100 ms on the RTX 3080 Ti, < 250 ms on the RTX A2000");
         Ok(())
     }
