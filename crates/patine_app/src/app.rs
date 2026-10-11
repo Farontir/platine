@@ -360,32 +360,38 @@ impl App {
                         let id = patine_core::ids::LayerId(document.project.next_id);
                         document.execute(Box::new(insert));
                         document.history.seal();
+                        let name = document
+                            .project
+                            .texture_set(set_id)
+                            .and_then(|set| set.stack.find(id))
+                            .map(|layer| layer.name.clone())
+                            .unwrap_or_default();
                         self.ui.layers.selected = Some(id);
+                        document.execute(Box::new(patine_core::commands::SetFillValue::new(
+                            id,
+                            Channel::Roughness,
+                            Some([*roughness; 4]),
+                            name.clone(),
+                        )));
+                        document.history.seal();
                         let [r, g, b] = *rgb;
-                        let values = [
-                            (Channel::BaseColor, [r, g, b, 1.0]),
-                            (Channel::Roughness, [*roughness; 4]),
-                        ];
-                        Box::new(patine_core::command::CommandGroup::new(
-                            patine_core::command::Label::new("command-fill-value"),
-                            values
-                                .into_iter()
-                                .map(|(channel, value)| {
-                                    Box::new(patine_core::commands::SetFillValue::new(
-                                        id,
-                                        channel,
-                                        Some(value),
-                                        "",
-                                    ))
-                                        as Box<dyn patine_core::command::Command>
-                                })
-                                .collect(),
+                        Box::new(patine_core::commands::SetFillValue::new(
+                            id,
+                            Channel::BaseColor,
+                            Some([r, g, b, 1.0]),
+                            name,
                         ))
                     }
                     StartupEdit::Mode(name, opacity) => {
                         let Some(id) = self.ui.layers.selected else {
                             continue;
                         };
+                        let layer_name = document
+                            .project
+                            .texture_set(self.ui.texture_sets.selected)
+                            .and_then(|set| set.stack.find(id))
+                            .map(|layer| layer.name.clone())
+                            .unwrap_or_default();
                         let Some(mode) =
                             patine_compositor::reference::ALL_MODES
                                 .into_iter()
@@ -402,7 +408,7 @@ impl App {
                                 mode,
                                 opacity: *opacity,
                             }),
-                            "",
+                            layer_name,
                         ))
                     }
                     StartupEdit::Group => {

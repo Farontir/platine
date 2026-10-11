@@ -46,6 +46,22 @@ HISTORY_EDITS = [
     "--edit", "undo=1",
 ]
 
+# A copper fill, then a blue fill whose base color blend each mode capture sets.
+MODE_BASE = [
+    "--tab", "layers",
+    "--edit", "fill=0.85,0.5,0.25,0.4",
+    "--edit", "fill=0.2,0.45,0.85,0.4",
+]
+# Leather tint, light fill in Overlay, both grouped, then a blue fill in Multiply.
+M5_STACK = [
+    "--edit", "fill=0.55,0.3,0.15,0.6",
+    "--edit", "fill=0.9,0.85,0.7,0.4",
+    "--edit", "mode=overlay,0.7",
+    "--edit", "group=",
+    "--edit", "fill=0.2,0.5,0.9,0.2",
+    "--edit", "mode=multiply,0.5",
+]
+
 # name -> arguments (mesh first, if any)
 CAPTURES = {
     "interface_fr": [],
@@ -103,6 +119,14 @@ CAPTURES = {
     "m4_checker": [HELMET, "--orbit", "30,10", "--display", "checker"],
     "m4_view_2d_helmet": [HELMET, "--tab", "view-2d", "--texture-set", "1"],
     "m4_view_2d_suitcase": [SUITCASE, "--tab", "view-2d"],
+    "m5_empty": [HELMET, "--tab", "layers", "--tab", "properties", "--orbit", "30,10", "--texture-set", "1"],
+    "m5_fill": [LANTERN, "--tab", "layers", "--tab", "properties", "--edit", "fill=0.75,0.12,0.08,0.35"] + LANTERN_VIEW,
+    "m5_mode_normal": [LANTERN] + MODE_BASE + ["--edit", "mode=normal,0.5"] + LANTERN_VIEW,
+    "m5_mode_multiply": [LANTERN] + MODE_BASE + ["--edit", "mode=multiply,1"] + LANTERN_VIEW,
+    "m5_mode_screen": [LANTERN] + MODE_BASE + ["--edit", "mode=screen,1"] + LANTERN_VIEW,
+    "m5_mode_overlay": [LANTERN] + MODE_BASE + ["--edit", "mode=overlay,1"] + LANTERN_VIEW,
+    "m5_stack": [HELMET, "--tab", "layers", "--tab", "properties", "--orbit", "30,10", "--texture-set", "1"] + M5_STACK,
+    "m5_stack_history": [HELMET, "--tab", "layers", "--tab", "history", "--orbit", "30,10", "--texture-set", "1"] + M5_STACK,
 }
 
 # Captures run with extra environment variables.
