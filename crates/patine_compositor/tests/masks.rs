@@ -321,7 +321,8 @@ gpu_test!(
         // Deleting a masked layer releases its mask.
         let masked_memory = pool.memory();
         push(&mut project, Box::new(RemoveLayer::new(first, "fill")));
-        document.sync(&ctx, &mut pool, &compositor, &project);
+        let changed = document.sync(&ctx, &mut pool, &compositor, &project);
+        assert_eq!(changed, [TextureSetId(0)], "a released mask: rebind");
         assert!(document.mask(first).is_none());
         assert!(pool.memory() < masked_memory);
         check(&document, &pool, &project);

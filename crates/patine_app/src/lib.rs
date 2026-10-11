@@ -13,6 +13,7 @@ pub mod history_panel;
 pub mod i18n;
 pub mod layers_panel;
 pub mod logging;
+pub mod masks;
 pub mod new_project;
 pub mod profiling;
 pub mod project_io;

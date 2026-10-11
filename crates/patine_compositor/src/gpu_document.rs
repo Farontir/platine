@@ -92,6 +92,8 @@ pub fn expected_memory(project: &Project) -> u64 {
 /// The evaluated mask of one layer.
 #[derive(Debug)]
 struct MaskTexture {
+    /// Texture set of the layer.
+    set: TextureSetId,
     /// Stack it was evaluated from.
     stack: MaskStack,
     /// Side in pixels.
@@ -436,15 +438,7 @@ impl GpuDocument {
         let mut masked = HashSet::new();
         for set in &project.texture_sets {
             let size = set.resolution.pixels();
-            if self.sync_masks(
-                ctx,
-                pool,
-                compositor,
-                &mut encoder,
-                &set.stack.layers,
-                size,
-                &mut masked,
-            ) {
+            if self.sync_masks(ctx, pool, compositor, &mut encoder, set, &mut masked) {
                 changed.push(set.id);
             }
             let mut old = previous
@@ -522,11 +516,15 @@ impl GpuDocument {
                 release_channel(pool, texture);
             }
         }
-        // Masks of layers that were deleted or lost their mask.
+        // Masks of layers that were deleted or lost their mask: their views must leave
+        // the bind groups too.
         self.masks.retain(|id, mask| {
             let keep = masked.contains(id);
             if !keep {
                 pool.release(mask.texture);
+                if !changed.contains(&mask.set) {
+                    changed.push(mask.set);
+                }
             }
             keep
         });
@@ -534,22 +532,21 @@ impl GpuDocument {
         changed
     }
 
-    /// Evaluates the masks of `layers` and their descendants that changed since their last
-    /// evaluation, at `size`². Adds the masked layers to `masked`. Returns whether a mask
-    /// texture was allocated (its view is new).
-    #[allow(clippy::too_many_arguments)]
+    /// Evaluates the masks of the layers of `set` that changed since their last
+    /// evaluation. Adds the masked layers to `masked`. Returns whether a mask texture was
+    /// allocated (its view is new).
     fn sync_masks(
         &mut self,
         ctx: &GpuContext,
         pool: &mut TexturePool,
         compositor: &Compositor,
         encoder: &mut wgpu::CommandEncoder,
-        layers: &[Layer],
-        size: u32,
+        set: &patine_core::project::TextureSet,
         masked: &mut HashSet<LayerId>,
     ) -> bool {
+        let size = set.resolution.pixels();
         let mut stacks = Vec::new();
-        for layer in layers {
+        for layer in &set.stack.layers {
             layer.visit(&mut |layer| {
                 if let Some(mask) = &layer.mask {
                     stacks.push((layer.id, mask));
@@ -586,6 +583,7 @@ impl GpuDocument {
                         .create_view(&wgpu::TextureViewDescriptor::default());
                     allocated = true;
                     MaskTexture {
+                        set: set.id,
                         stack: stack.clone(),
                         size,
                         texture,

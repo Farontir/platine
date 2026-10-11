@@ -254,3 +254,35 @@ command-mask-effect = { $effect ->
         [invert] Inversion
        *[other] Effet
     } du masque de « { $name } »
+
+## Masks in the interface
+action-view-toggle-mask = Masque du calque sélectionné
+display-mask-no-layer = Masque : aucun calque sélectionné
+display-mask-of = Masque de « { $name } »
+display-mask-none = « { $name } » n'a pas de masque (tout visible)
+mask-add-black = Ajouter un masque noir
+mask-add-white = Ajouter un masque blanc
+mask-remove = Supprimer le masque
+mask-add-fill = Ajouter un fill
+mask-add-levels = Ajouter un levels
+mask-add-invert = Ajouter une inversion
+mask-remove-effect = Supprimer l'effet
+mask-row-black = Masque (noir)
+mask-row-white = Masque (blanc)
+mask-effect-fill = Fill
+mask-effect-levels = Levels
+mask-effect-invert = Inversion
+mask-effect-other = Effet
+mask-properties = Masque
+mask-initial = Valeur initiale
+mask-initial-black = Noir
+mask-initial-white = Blanc
+mask-hint = Clic droit sur le masque pour lui ajouter des effets. Touche M : afficher le masque.
+mask-visible = Visible
+mask-value = Valeur
+mask-levels-in-low = Noir d'entrée
+mask-levels-in-high = Blanc d'entrée
+mask-levels-gamma = Gamma
+mask-levels-out-low = Noir de sortie
+mask-levels-out-high = Blanc de sortie
+mask-no-parameter = Pas de paramètre.

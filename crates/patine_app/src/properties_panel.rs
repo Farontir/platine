@@ -1,6 +1,7 @@
 //! Properties panel: the selected layer. For a uniform fill, each channel of the texture
 //! set with its activation, its value, its blend mode and its opacity; for a folder, the
-//! blend of each channel.
+//! blend of each channel. When its mask or a mask effect is selected, their editors
+//! (see [`crate::masks`]).
 //!
 //! The panel never writes into the project: it returns commands.
 
@@ -17,6 +18,7 @@ use crate::display_panel::gesture_ended;
 use crate::document::channel_name;
 use crate::i18n::I18n;
 use crate::layers_panel::{LayersOutput, blend_editor};
+use crate::masks::{self, LayerPart};
 
 /// Editor of a fill value: a color, a slider, or the tilt of a normal.
 fn value_editor(ui: &mut Ui, channel: Channel, value: [f32; 4]) -> (Option<[f32; 4]>, bool) {
@@ -93,6 +95,7 @@ pub fn show(
     project: Option<&Project>,
     set: TextureSetId,
     selected: Option<LayerId>,
+    part: LayerPart,
 ) -> LayersOutput {
     let mut output = LayersOutput::default();
     let found = project.and_then(|p| p.texture_set(set)).and_then(|set| {
@@ -106,6 +109,19 @@ pub fn show(
         });
         return output;
     };
+    match part {
+        LayerPart::Mask => {
+            ui.label(RichText::new(&layer.name).weak());
+            masks::mask_properties(ui, i18n, layer, &mut output);
+            return output;
+        }
+        LayerPart::MaskEffect(effect) => {
+            ui.label(RichText::new(&layer.name).weak());
+            masks::effect_properties(ui, i18n, layer, effect, &mut output);
+            return output;
+        }
+        LayerPart::Content => {}
+    }
     ui.heading(&layer.name);
     let values = match &layer.kind {
         LayerKind::Fill {

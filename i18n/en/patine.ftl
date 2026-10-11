@@ -254,3 +254,35 @@ command-mask-effect = { $effect ->
         [invert] Invert
        *[other] Effect
     } of the mask of “{ $name }”
+
+## Masks in the interface
+action-view-toggle-mask = Mask of the selected layer
+display-mask-no-layer = Mask: no layer selected
+display-mask-of = Mask of “{ $name }”
+display-mask-none = “{ $name }” has no mask (fully visible)
+mask-add-black = Add a black mask
+mask-add-white = Add a white mask
+mask-remove = Remove the mask
+mask-add-fill = Add a fill
+mask-add-levels = Add a levels
+mask-add-invert = Add an invert
+mask-remove-effect = Remove the effect
+mask-row-black = Mask (black)
+mask-row-white = Mask (white)
+mask-effect-fill = Fill
+mask-effect-levels = Levels
+mask-effect-invert = Invert
+mask-effect-other = Effect
+mask-properties = Mask
+mask-initial = Initial value
+mask-initial-black = Black
+mask-initial-white = White
+mask-hint = Right-click the mask to add effects to it. M key: show the mask.
+mask-visible = Visible
+mask-value = Value
+mask-levels-in-low = Input black
+mask-levels-in-high = Input white
+mask-levels-gamma = Gamma
+mask-levels-out-low = Output black
+mask-levels-out-high = Output white
+mask-no-parameter = No parameter.

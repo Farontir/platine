@@ -37,11 +37,15 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
   --capture PNG                 save the window to PNG after a few frames, then quit
   --capture-frames N            frames to wait before capturing (default 30)
   --autosave-interval SECS      time between autosaves (default 300)
-  --display MODE                lit, checker or channel:<id> (base-color, roughness, user-0...)
+  --display MODE                lit, checker, mask or channel:<id> (base-color, roughness,
+                                user-0...)
   --texture-set N               current texture set (Texture Sets panel, 2D view)
   --edit EDIT                   apply a command to the opened project (repeatable):
                                 rotation=DEG, exposure=EV, rename=SET:NAME, undo=N,
-                                fill=R,G,B,ROUGHNESS, mode=MODE,OPACITY, group=
+                                fill=R,G,B,ROUGHNESS, mode=MODE,OPACITY, group=,
+                                mask=black|white, mask-fill=VALUE,MODE,OPACITY,
+                                mask-levels=IN_LOW,IN_HIGH,GAMMA,OUT_LOW,OUT_HIGH,
+                                mask-invert=
 
   A project file (.patine) can be given instead of a mesh.";
 
@@ -63,6 +67,14 @@ pub enum StartupEdit {
     Mode(String, f32),
     /// Put the selected layer into a new folder.
     Group,
+    /// Give the selected layer a mask: white (`true`) or black.
+    Mask(bool),
+    /// Add a fill to the selected layer's mask: value, mode name, opacity.
+    MaskFill(f32, String, f32),
+    /// Add levels to the selected layer's mask: in_low, in_high, gamma, out_low, out_high.
+    MaskLevels([f32; 5]),
+    /// Add an inversion to the selected layer's mask.
+    MaskInvert,
 }
 
 impl StartupEdit {
@@ -91,6 +103,28 @@ impl StartupEdit {
                 StartupEdit::Mode(mode.to_owned(), opacity.parse().ok()?)
             }
             "group" => StartupEdit::Group,
+            "mask" => match value {
+                "black" => StartupEdit::Mask(false),
+                "white" => StartupEdit::Mask(true),
+                _ => return None,
+            },
+            "mask-fill" => {
+                let mut parts = value.split(',');
+                let (Some(v), Some(mode), Some(opacity), None) =
+                    (parts.next(), parts.next(), parts.next(), parts.next())
+                else {
+                    return None;
+                };
+                StartupEdit::MaskFill(v.parse().ok()?, mode.to_owned(), opacity.parse().ok()?)
+            }
+            "mask-levels" => {
+                let numbers: Vec<f32> = value
+                    .split(',')
+                    .map(|v| v.parse().ok())
+                    .collect::<Option<_>>()?;
+                StartupEdit::MaskLevels(numbers.try_into().ok()?)
+            }
+            "mask-invert" => StartupEdit::MaskInvert,
             _ => return None,
         })
     }
@@ -301,6 +335,7 @@ impl StartupOptions {
                     options.display = Some(match v.as_str() {
                         "lit" => (DisplayMode::Lit, None),
                         "checker" => (DisplayMode::UvChecker, None),
+                        "mask" => (DisplayMode::Mask, None),
                         other => {
                             let channel = other
                                 .strip_prefix("channel:")
@@ -426,6 +461,32 @@ mod tests {
             ]
         );
         assert!(parse(&["--edit", "fill=1,0"]).is_err());
+        let options = parse(&[
+            "--edit",
+            "mask=black",
+            "--edit",
+            "mask-fill=0.5,multiply,0.8",
+            "--edit",
+            "mask-levels=0,1,2,0.1,0.9",
+            "--edit",
+            "mask-invert=",
+            "--display",
+            "mask",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.edits,
+            [
+                StartupEdit::Mask(false),
+                StartupEdit::MaskFill(0.5, "multiply".into(), 0.8),
+                StartupEdit::MaskLevels([0.0, 1.0, 2.0, 0.1, 0.9]),
+                StartupEdit::MaskInvert,
+            ]
+        );
+        assert_eq!(options.display, Some((DisplayMode::Mask, None)));
+        assert!(parse(&["--edit", "mask=grey"]).is_err());
+        assert!(parse(&["--edit", "mask-levels=0,1,2"]).is_err());
+        assert!(parse(&["--edit", "mask-fill=0.5,normal"]).is_err());
         let options = parse(&["--display", "channel:roughness", "--texture-set", "2"]).unwrap();
         assert_eq!(
             options.display,

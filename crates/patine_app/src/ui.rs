@@ -421,6 +421,7 @@ fn menu_bar(ui: &mut Ui, info: &FrameInfo<'_>, triggered: &mut Vec<ActionId>) {
         ui.separator();
         action_item(ui, info, ActionId::ToggleChannelView, triggered);
         action_item(ui, info, ActionId::NextChannel, triggered);
+        action_item(ui, info, ActionId::ToggleMaskView, triggered);
         ui.separator();
         action_item(ui, info, ActionId::ResetLayout, triggered);
         action_item(ui, info, ActionId::ToggleProfiler, triggered);
@@ -503,13 +504,19 @@ impl TabViewer for PanelViewer<'_, '_> {
     fn ui(&mut self, ui: &mut Ui, tab: &mut Panel) {
         match tab {
             Panel::Viewport3D => {
-                let overlay = (self.view.settings.display != DisplayMode::Lit).then(|| {
-                    display_panel::display_mode_label(
+                let overlay = match self.view.settings.display {
+                    DisplayMode::Lit => None,
+                    DisplayMode::Mask => Some(crate::masks::mask_view_label(
                         self.info.i18n,
-                        self.view.settings.display,
+                        self.info.project,
+                        self.layers.selected,
+                    )),
+                    display => Some(display_panel::display_mode_label(
+                        self.info.i18n,
+                        display,
                         self.view.inspect_channel,
-                    )
-                });
+                    )),
+                };
                 let viewport = viewport_panel::show(ui, self.view, overlay.as_deref());
                 if let Some(rotation) = viewport.environment_rotation {
                     self.output.environment = Some(EnvironmentChange::Rotation(rotation));
@@ -552,6 +559,7 @@ impl TabViewer for PanelViewer<'_, '_> {
                     self.info.project,
                     self.texture_sets.selected,
                     self.layers.selected,
+                    self.layers.part,
                 );
                 self.output.commands.extend(panel.commands);
                 self.output.seal |= panel.seal;

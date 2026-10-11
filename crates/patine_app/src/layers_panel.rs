@@ -3,7 +3,9 @@
 //! Rows select (click), rename (double click), show or hide (eye) and move by drag and
 //! drop: dropped on a layer, the dragged layer goes just above it; on a folder, inside it
 //! at the top; below the last row, at the bottom of the stack. The header sets the blend
-//! mode and opacity of the current channel for the selected layer.
+//! mode and opacity of the current channel for the selected layer. A masked layer shows
+//! its mask and the mask's effects below it (see [`crate::masks`]); right-clicking a
+//! layer adds or removes its mask.
 //!
 //! The panel never writes into the project: it returns commands.
 
@@ -25,6 +27,7 @@ use patine_core::project::{Project, TextureSet, TextureSetId};
 use crate::display_panel::gesture_ended;
 use crate::document::channel_name;
 use crate::i18n::I18n;
+use crate::masks::{self, LayerPart};
 
 /// Interface state of the panel.
 #[derive(Debug)]
@@ -37,6 +40,8 @@ pub struct LayersState {
     pub channel: Channel,
     /// Folders shown closed.
     pub collapsed: HashSet<LayerId>,
+    /// Part of the selected layer that is selected (content, mask or mask effect).
+    pub part: LayerPart,
 }
 
 impl Default for LayersState {
@@ -46,6 +51,7 @@ impl Default for LayersState {
             renaming: None,
             channel: Channel::BaseColor,
             collapsed: HashSet::new(),
+            part: LayerPart::Content,
         }
     }
 }
@@ -138,6 +144,12 @@ pub fn modes_for(layer: &Layer, channel: Channel) -> Vec<BlendMode> {
             BlendMode::Disable,
         ];
     }
+    scalar_modes()
+}
+
+/// Modes of color and scalar channels, and of mask effects: every mode but those of
+/// folders and normals.
+pub fn scalar_modes() -> Vec<BlendMode> {
     ALL_MODES
         .into_iter()
         .filter(|mode| {
@@ -341,11 +353,22 @@ pub fn show(
         });
         return output;
     };
-    if state
-        .selected
-        .is_some_and(|id| set.stack.find(id).is_none())
-    {
-        state.selected = None;
+    match state.selected.and_then(|id| set.stack.find(id)) {
+        None => {
+            state.selected = None;
+            state.part = LayerPart::Content;
+        }
+        Some(layer) => {
+            let mask = layer.mask.as_ref();
+            let valid = match state.part {
+                LayerPart::Content => true,
+                LayerPart::Mask => mask.is_some(),
+                LayerPart::MaskEffect(id) => mask.and_then(|mask| mask.index_of(id)).is_some(),
+            };
+            if !valid {
+                state.part = LayerPart::Content;
+            }
+        }
     }
     if !set.channels.iter().any(|def| def.channel == state.channel)
         && let Some(first) = set.channels.first()
@@ -383,6 +406,7 @@ pub fn show(
                 .commands
                 .push(Box::new(new_fill(i18n, project, set, state.selected)));
             state.selected = Some(patine_core::ids::LayerId(project.next_id));
+            state.part = LayerPart::Content;
             output.seal = true;
         }
         if ui
@@ -397,6 +421,7 @@ pub fn show(
                 .commands
                 .push(Box::new(new_folder(i18n, project, set, state.selected)));
             state.selected = Some(patine_core::ids::LayerId(project.next_id));
+            state.part = LayerPart::Content;
             output.seal = true;
         }
         let selected = state.selected;
@@ -404,10 +429,14 @@ pub fn show(
             .add_enabled(selected.is_some(), egui::Button::new(icons::TRASH))
             .on_hover_text(i18n.tr("action-layer-delete"))
             .clicked()
-            && let Some(command) = selected.and_then(|id| delete(set, id))
+            && let Some(command) =
+                selected.and_then(|id| masks::delete_selection(set, id, state.part))
         {
-            output.commands.push(Box::new(command));
-            state.selected = None;
+            output.commands.push(command);
+            if state.part == LayerPart::Content {
+                state.selected = None;
+            }
+            state.part = LayerPart::Content;
             output.seal = true;
         }
     });
@@ -488,7 +517,8 @@ pub fn show(
                                 };
                                 let response = ui.add(
                                     egui::Button::selectable(
-                                        state.selected == Some(layer.id),
+                                        state.selected == Some(layer.id)
+                                            && state.part == LayerPart::Content,
                                         text,
                                     )
                                     .sense(Sense::click_and_drag()),
@@ -496,6 +526,7 @@ pub fn show(
                                 response.dnd_set_drag_payload(layer.id);
                                 if response.clicked() {
                                     state.selected = Some(layer.id);
+                                    state.part = LayerPart::Content;
                                 }
                                 if response.double_clicked() {
                                     state.renaming = Some((layer.id, layer.name.clone()));
@@ -506,6 +537,7 @@ pub fn show(
                     })
                     .inner;
                 if let Some(response) = response {
+                    response.context_menu(|ui| masks::layer_menu(ui, i18n, layer, &mut output));
                     if let Some(payload) = response.dnd_hover_payload::<LayerId>()
                         && *payload != layer.id
                     {
@@ -520,6 +552,7 @@ pub fn show(
                         dropped = Some((*payload, Some(index)));
                     }
                 }
+                masks::mask_rows(ui, i18n, project, layer, row.depth + 1, state, &mut output);
             }
             // The space below the rows drops at the bottom of the stack.
             let rest = ui.allocate_response(

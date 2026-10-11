@@ -16,6 +16,7 @@ use patine_compositor::compositor::Compositor;
 use patine_compositor::gpu_document::GpuDocument;
 use patine_core::channel::{Channel, ChannelDef};
 use patine_core::environment::{EnvironmentSettings, EnvironmentSource};
+use patine_core::ids::LayerId;
 use patine_core::project::{Project, ProjectSettings};
 use patine_core::resource::ResourceHash;
 use patine_gpu::pool::TexturePool;
@@ -65,8 +66,10 @@ struct Graphics {
     compositor: Compositor,
     /// Material of each texture set, by material index.
     materials: Vec<GpuMaterial>,
-    /// Inspected channel the materials were built with.
-    materials_inspect: Option<Channel>,
+    /// What the materials were built to inspect.
+    materials_inspect: Option<Inspect>,
+    /// Shown as the mask of a layer without mask: 1×1 white.
+    white_mask: wgpu::TextureView,
     /// Renderer of the 2D view.
     uv_view: UvView,
 }
@@ -75,33 +78,106 @@ struct Graphics {
 /// only bounds discardable caches (M5 onwards).
 const POOL_BUDGET: u64 = 8 << 30;
 
-/// Binds the channel textures of every texture set, by material index. `inspect` is the
-/// channel shown by the channel display mode.
+/// What the unlit display modes show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Inspect {
+    /// A channel of every texture set.
+    Channel(Channel),
+    /// The mask of the selected layer, if any, on its texture set.
+    Mask(Option<LayerId>),
+}
+
+/// What the display mode `display` inspects.
+fn inspect_of(
+    display: DisplayMode,
+    channel: Channel,
+    selected: Option<LayerId>,
+) -> Option<Inspect> {
+    match display {
+        DisplayMode::Channel => Some(Inspect::Channel(channel)),
+        DisplayMode::Mask => Some(Inspect::Mask(selected)),
+        DisplayMode::Lit | DisplayMode::UvChecker => None,
+    }
+}
+
+/// The texture shown for `inspect` on texture set `set`: a channel, or the mask of the
+/// selected layer when it belongs to `set` (white when it has no mask).
+fn inspected<'a>(
+    inspect: Inspect,
+    set: &patine_core::project::TextureSet,
+    document: &'a GpuDocument,
+    white_mask: &'a wgpu::TextureView,
+) -> Option<(&'a wgpu::TextureView, InspectKind)> {
+    match inspect {
+        Inspect::Channel(channel) => document
+            .texture_set(set.id)
+            .and_then(|gpu| gpu.channel(channel))
+            .map(|texture| (&texture.view, InspectKind::of(channel))),
+        Inspect::Mask(Some(layer)) if set.stack.find(layer).is_some() => Some((
+            document.mask(layer).unwrap_or(white_mask),
+            InspectKind::Scalar,
+        )),
+        Inspect::Mask(_) => None,
+    }
+}
+
+/// A 1×1 `R16Float` texture of value 1.
+fn white_pixel(gpu: &GpuContext) -> wgpu::TextureView {
+    let texture = gpu.device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("white mask"),
+        size: wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::R16Float,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+    gpu.queue.write_texture(
+        texture.as_image_copy(),
+        // 1.0 in f16 (sign 0, exponent 15, mantissa 0), little-endian.
+        &0x3C00u16.to_le_bytes(),
+        wgpu::TexelCopyBufferLayout {
+            offset: 0,
+            bytes_per_row: None,
+            rows_per_image: None,
+        },
+        texture.size(),
+    );
+    texture.create_view(&Default::default())
+}
+
+/// Binds the channel textures of every texture set, by material index. `inspect` is what
+/// the unlit display modes show.
 fn build_materials(
     gpu: &GpuContext,
     viewport: &Viewport,
     document: &GpuDocument,
     project: &Project,
-    inspect: Option<Channel>,
+    inspect: Option<Inspect>,
+    white_mask: &wgpu::TextureView,
 ) -> Vec<GpuMaterial> {
     (0..project.mesh.materials.len() as u32)
         .map(|material| {
             let set = project
                 .texture_sets
                 .iter()
-                .find(|set| set.material_index == material)
-                .and_then(|set| document.texture_set(set.id));
+                .find(|set| set.material_index == material);
             let mut textures = MaterialTextures::default();
-            if let Some(set) = set {
-                for texture in &set.channels {
+            if let Some((set, gpu_set)) =
+                set.and_then(|set| document.texture_set(set.id).map(|gpu| (set, gpu)))
+            {
+                for texture in &gpu_set.channels {
                     if let Some(slot) = Slot::of(texture.def.channel) {
                         textures = textures.with(slot, &texture.view);
                     }
                 }
-                textures.inspect = inspect.and_then(|channel| {
-                    set.channel(channel)
-                        .map(|texture| (&texture.view, InspectKind::of(channel)))
-                });
+                textures.inspect =
+                    inspect.and_then(|inspect| inspected(inspect, set, document, white_mask));
             }
             viewport.material(gpu, &textures)
         })
@@ -423,6 +499,93 @@ impl App {
                             None => continue,
                         }
                     }
+                    StartupEdit::Mask(white) => {
+                        let Some(layer) = self.ui.layers.selected.and_then(|id| {
+                            document
+                                .project
+                                .texture_sets
+                                .iter()
+                                .find_map(|set| set.stack.find(id))
+                        }) else {
+                            continue;
+                        };
+                        let initial = if *white {
+                            patine_core::mask::MaskInitial::White
+                        } else {
+                            patine_core::mask::MaskInitial::Black
+                        };
+                        self.ui.layers.part = crate::masks::LayerPart::Mask;
+                        Box::new(crate::masks::add_mask(layer, initial))
+                    }
+                    StartupEdit::MaskFill(..)
+                    | StartupEdit::MaskLevels(_)
+                    | StartupEdit::MaskInvert => {
+                        let Some(layer) = self.ui.layers.selected.and_then(|id| {
+                            document
+                                .project
+                                .texture_sets
+                                .iter()
+                                .find_map(|set| set.stack.find(id))
+                        }) else {
+                            continue;
+                        };
+                        let (effect, mode, opacity) = match edit {
+                            StartupEdit::MaskFill(value, name, opacity) => {
+                                let Some(mode) = patine_compositor::reference::ALL_MODES
+                                    .into_iter()
+                                    .find(|mode| {
+                                        crate::layers_panel::mode_key(*mode)
+                                            == format!("blend-{name}")
+                                    })
+                                else {
+                                    anyhow::bail!("unknown blend mode {name}");
+                                };
+                                (
+                                    patine_core::mask::MaskEffect::uniform(*value),
+                                    mode,
+                                    *opacity,
+                                )
+                            }
+                            StartupEdit::MaskLevels(
+                                [in_low, in_high, gamma, out_low, out_high],
+                            ) => (
+                                patine_core::mask::MaskEffect::Levels(
+                                    patine_core::mask::LevelsParams {
+                                        in_low: *in_low,
+                                        in_high: *in_high,
+                                        gamma: *gamma,
+                                        out_low: *out_low,
+                                        out_high: *out_high,
+                                    },
+                                ),
+                                patine_core::layer::BlendMode::Normal,
+                                1.0,
+                            ),
+                            _ => (
+                                patine_core::mask::MaskEffect::invert(),
+                                patine_core::layer::BlendMode::Normal,
+                                1.0,
+                            ),
+                        };
+                        let above = match self.ui.layers.part {
+                            crate::masks::LayerPart::MaskEffect(effect) => Some(effect),
+                            _ => None,
+                        };
+                        let Some(insert) = crate::masks::insert_effect(
+                            &document.project,
+                            layer,
+                            effect,
+                            mode,
+                            opacity,
+                            above,
+                        ) else {
+                            continue;
+                        };
+                        self.ui.layers.part = crate::masks::LayerPart::MaskEffect(
+                            patine_core::ids::EffectId(document.project.next_id),
+                        );
+                        Box::new(insert)
+                    }
                 };
                 document.execute(command);
                 document.history.seal();
@@ -493,6 +656,7 @@ impl App {
                 .as_ref()
                 .is_some_and(|document| document.history.can_redo()),
             channel_view: view.settings.display == DisplayMode::Channel,
+            mask_view: view.settings.display == DisplayMode::Mask,
             layer_selected: self.ui.layers.selected.is_some() && self.document.is_some(),
             orthographic: view.camera.projection == Projection::Orthographic,
             wireframe: view.settings.wireframe,
@@ -560,6 +724,7 @@ impl App {
         let viewport = Viewport::new(&gpu).context("failed to create the viewport")?;
         let uv_view = UvView::new(&gpu).context("failed to create the 2D view")?;
         let compositor = Compositor::new(&gpu).context("failed to create the compositor")?;
+        let white_mask = white_pixel(&gpu);
         let gpu_mesh = self
             .document
             .as_ref()
@@ -582,6 +747,7 @@ impl App {
             compositor,
             materials: Vec::new(),
             materials_inspect: None,
+            white_mask,
             uv_view,
         })
     }
@@ -938,6 +1104,14 @@ impl App {
                 let settings = &mut self.ui.view.settings;
                 settings.shadows = !settings.shadows;
             }
+            ActionId::ToggleMaskView => {
+                let settings = &mut self.ui.view.settings;
+                settings.display = if settings.display == DisplayMode::Mask {
+                    DisplayMode::Lit
+                } else {
+                    DisplayMode::Mask
+                };
+            }
             ActionId::DeleteLayer | ActionId::GroupLayer => {
                 let (Some(document), Some(selected)) =
                     (&mut self.document, self.ui.layers.selected)
@@ -947,9 +1121,9 @@ impl App {
                 let Some(set) = document.project.texture_set(self.ui.texture_sets.selected) else {
                     return;
                 };
+                let part = self.ui.layers.part;
                 let command: Option<Box<dyn patine_core::command::Command>> = match action {
-                    ActionId::DeleteLayer => crate::layers_panel::delete(set, selected)
-                        .map(|c| Box::new(c) as Box<dyn patine_core::command::Command>),
+                    ActionId::DeleteLayer => crate::masks::delete_selection(set, selected, part),
                     _ => crate::layers_panel::group(&self.i18n, &document.project, set, selected)
                         .map(|c| Box::new(c) as Box<dyn patine_core::command::Command>),
                 };
@@ -958,7 +1132,10 @@ impl App {
                     document.execute(command);
                     document.history.seal();
                     if action == ActionId::DeleteLayer {
-                        self.ui.layers.selected = None;
+                        if part == crate::masks::LayerPart::Content {
+                            self.ui.layers.selected = None;
+                        }
+                        self.ui.layers.part = crate::masks::LayerPart::Content;
                     }
                 }
             }
@@ -1080,15 +1257,14 @@ impl App {
         else {
             return;
         };
-        let channel = match self.ui.view.settings.display {
-            DisplayMode::Channel => self.ui.view.inspect_channel,
-            _ => Channel::BaseColor,
-        };
-        let texture = gfx
-            .gpu_document
-            .texture_set(set.id)
-            .and_then(|gpu| gpu.channel(channel))
-            .map(|texture| (&texture.view, InspectKind::of(channel)));
+        // The lit and checker modes show the base color.
+        let inspect = inspect_of(
+            self.ui.view.settings.display,
+            self.ui.view.inspect_channel,
+            self.ui.layers.selected,
+        )
+        .unwrap_or(Inspect::Channel(Channel::BaseColor));
+        let texture = inspected(inspect, set, &gfx.gpu_document, &gfx.white_mask);
         let scene = UvScene {
             mesh,
             material: set.material_index,
@@ -1175,8 +1351,11 @@ impl App {
             }
         }
         // The document's channel textures, and the materials binding them.
-        let inspect =
-            (view.settings.display == DisplayMode::Channel).then_some(view.inspect_channel);
+        let inspect = inspect_of(
+            view.settings.display,
+            view.inspect_channel,
+            self.ui.layers.selected,
+        );
         match &self.document {
             Some(document) => {
                 let project = &document.project;
@@ -1193,6 +1372,7 @@ impl App {
                         &gfx.gpu_document,
                         project,
                         inspect,
+                        &gfx.white_mask,
                     );
                     gfx.materials_inspect = inspect;
                 }
@@ -1306,7 +1486,10 @@ impl App {
                     applied: document.history.applied(),
                     truncated: document.history.truncated(),
                 }),
-            gpu_memory: self.document.as_ref().map(|_| gfx.gpu_document.memory()),
+            gpu_memory: self
+                .document
+                .as_ref()
+                .map(|_| gfx.gpu_document.memory() + gfx.gpu_document.mask_memory()),
             file_status: if self.file_jobs.saving() {
                 Some("file-busy-saving")
             } else if self.file_jobs.opening() {

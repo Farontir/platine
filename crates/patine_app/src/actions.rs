@@ -44,6 +44,8 @@ pub enum ActionId {
     ToggleChannelView,
     /// Show the next channel of the current texture set.
     NextChannel,
+    /// Switch between the lit material and the mask of the selected layer.
+    ToggleMaskView,
     /// Delete the selected layer.
     DeleteLayer,
     /// Put the selected layer into a new folder.
@@ -73,6 +75,8 @@ pub struct ActionContext {
     pub can_redo: bool,
     /// Whether the viewport shows an isolated channel.
     pub channel_view: bool,
+    /// Whether the viewport shows the mask of the selected layer.
+    pub mask_view: bool,
     /// Whether a layer is selected in the Layers panel.
     pub layer_selected: bool,
 }
@@ -262,6 +266,15 @@ impl Default for ActionRegistry {
                     yields_to_text: false,
                 },
                 Action {
+                    id: ActionId::ToggleMaskView,
+                    name: "view.toggle_mask",
+                    label_key: "action-view-toggle-mask",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::M)),
+                    enabled: |ctx| ctx.has_project,
+                    checked: Some(|ctx| ctx.mask_view),
+                    yields_to_text: false,
+                },
+                Action {
                     id: ActionId::DeleteLayer,
                     name: "layer.delete",
                     label_key: "action-layer-delete",
@@ -396,6 +409,7 @@ mod tests {
             ActionId::Redo,
             ActionId::ToggleChannelView,
             ActionId::NextChannel,
+            ActionId::ToggleMaskView,
             ActionId::DeleteLayer,
             ActionId::GroupLayer,
         ] {
