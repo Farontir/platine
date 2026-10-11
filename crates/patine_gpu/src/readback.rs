@@ -115,3 +115,21 @@ pub fn read_rgba16f_level(
         })
         .collect())
 }
+
+/// Reads mip `mip` of layer `layer` of an `R16Float` texture as `f32`.
+pub fn read_r16f_level(
+    ctx: &GpuContext,
+    texture: &wgpu::Texture,
+    mip: u32,
+    layer: u32,
+) -> Result<Vec<f32>, GpuError> {
+    if texture.format() != wgpu::TextureFormat::R16Float {
+        return Err(GpuError::UnsupportedReadbackFormat(texture.format()));
+    }
+    let bytes = read_texture_level(ctx, texture, mip, layer)?;
+    let (texels, _) = bytes.as_chunks::<2>();
+    Ok(texels
+        .iter()
+        .map(|texel| half::f16::from_le_bytes(*texel).to_f32())
+        .collect())
+}

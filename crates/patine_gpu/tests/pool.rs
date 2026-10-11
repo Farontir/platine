@@ -88,6 +88,11 @@ gpu_test!(
         // Destruction is processed by the device at the next maintenance.
         let _ = ctx.device.poll(wgpu::PollType::wait_indefinitely());
         let after = allocated_bytes(&ctx).expect("reported before");
-        assert_eq!(after, before, "allocated before {before}, after {after}");
+        // wgpu's own transient allocations move the total by a few hundred bytes; one
+        // leaked 1024² texture would be 8 MB.
+        assert!(
+            after.abs_diff(before) < 64 * 1024,
+            "allocated before {before}, after {after}"
+        );
     }
 );

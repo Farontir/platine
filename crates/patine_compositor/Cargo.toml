@@ -11,5 +11,8 @@ publish.workspace = true
 patine_core.workspace = true
 patine_gpu.workspace = true
 
+[dev-dependencies]
+patine_gpu = { workspace = true, features = ["testing"] }
+
 [lints]
 workspace = true
