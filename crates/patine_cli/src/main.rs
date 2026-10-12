@@ -6,6 +6,9 @@
 //! - `patine_cli bench viewport [--triangles N] [--frames N] [--size WxH] [--no-shadows]
 //!   [--textures N]`: frames per second of the viewport on the hardware adapter, with
 //!   the six lit channels at N² (4096 by default, 0 for the constant material).
+//! - `patine_cli bench procedural [--layers N] [--resolution N] [--edits N] [--material ID]
+//!   [--triplanar]`: time to see a parameter of a procedural material at the bottom of a
+//!   stack (M7 criterion 3).
 //! - `patine_cli bench compositor [--layers N] [--resolution N] [--edits N] [--masks]`:
 //!   time to evaluate a stack again after editing its bottom fill (30 fills, 4K by
 //!   default), or its mask.
@@ -30,6 +33,8 @@ const USAGE: &str = "usage: patine_cli inspect <mesh> [--allow-missing-uvs]
        patine_cli bench viewport [--triangles N] [--frames N] [--size WxH] [--no-shadows] [--textures N]
        patine_cli bench project <mesh> [--out file.patine]
        patine_cli bench compositor [--layers N] [--resolution N] [--edits N] [--masks]
+       patine_cli bench procedural [--layers N] [--resolution N] [--edits N]
+                                   [--material ID] [--triplanar]
        patine_cli --version";
 
 fn ms(duration: Duration) -> String {
@@ -177,6 +182,9 @@ fn main() -> anyhow::Result<()> {
         }
         Some("bench") if args.get(1).map(String::as_str) == Some("viewport") => {
             bench::ViewportBench::parse(&args[2..])?.run()
+        }
+        Some("bench") if args.get(1).map(String::as_str) == Some("procedural") => {
+            bench::ProceduralBench::parse(&args[2..])?.run()
         }
         Some("bench") if args.get(1).map(String::as_str) == Some("compositor") => {
             bench::CompositorBench::parse(&args[2..])?.run()

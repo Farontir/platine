@@ -366,3 +366,149 @@ impl CompositorBench {
         Ok(())
     }
 }
+
+/// Options of the procedural benchmark (M7 criterion 3: a modified parameter shows in
+/// less than 100 ms).
+pub struct ProceduralBench {
+    /// Fill layers above the procedural one.
+    pub layers: usize,
+    /// Texture set resolution.
+    pub resolution: Resolution,
+    /// Measured edits.
+    pub edits: u32,
+    /// Material at the bottom of the stack.
+    pub material: String,
+    /// Triplanar projection instead of UV.
+    pub triplanar: bool,
+}
+
+impl ProceduralBench {
+    /// Parses `--layers N --resolution N --edits N --material ID --triplanar`.
+    pub fn parse(args: &[String]) -> anyhow::Result<Self> {
+        let mut bench = Self {
+            layers: 29,
+            resolution: Resolution::new(4096).context("supported")?,
+            edits: 20,
+            material: "material.concrete".into(),
+            triplanar: false,
+        };
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let mut value = || args.next().context("missing value");
+            match arg.as_str() {
+                "--layers" => bench.layers = value()?.parse()?,
+                "--resolution" => {
+                    let pixels = value()?.parse()?;
+                    bench.resolution = Resolution::new(pixels).context("resolution 512 to 8192")?;
+                }
+                "--edits" => bench.edits = value()?.parse()?,
+                "--material" => bench.material = value()?.clone(),
+                "--triplanar" => bench.triplanar = true,
+                other => bail!("unknown option {other}"),
+            }
+        }
+        Ok(bench)
+    }
+
+    /// Runs the benchmark and prints the results.
+    pub fn run(&self) -> anyhow::Result<()> {
+        use patine_core::command::Command;
+        use patine_core::commands::SetFillSource;
+        use patine_core::ids::IdSequence;
+        use patine_core::layer::{
+            BlendMode, FillSource, Layer, LayerKind, Projection, ProjectionKind,
+        };
+        use patine_core::mask::ParamValue;
+        use patine_procedural::library::{self, MATERIAL_CHANNELS};
+
+        let def = library::find(&self.material).context("unknown material")?;
+        let ctx = GpuContext::new_headless(AdapterChoice::Hardware)?;
+        let info = ctx.adapter_info();
+        println!("adapter    {} ({:?})", info.name, info.backend);
+        let mut project = Project::new(
+            primitives::uv_sphere(64, 32),
+            "bench".into(),
+            ProjectSettings {
+                resolution: self.resolution,
+                ..ProjectSettings::default()
+            },
+        );
+        let mut ids = IdSequence::starting_at(project.next_id);
+        let set = &mut project.texture_sets[0];
+        let channels: Vec<Channel> = MATERIAL_CHANNELS
+            .into_iter()
+            .filter(|channel| set.channels.iter().any(|d| d.channel == *channel))
+            .collect();
+        let bottom = ids.layer();
+        let mut procedural =
+            Layer::fill_procedural(bottom, "procedural", def.instance(), &channels);
+        if self.triplanar
+            && let LayerKind::Fill { projection, .. } = &mut procedural.kind
+        {
+            *projection = Projection {
+                kind: ProjectionKind::Triplanar { blend: 0.5 },
+                ..Projection::default()
+            };
+        }
+        let defs = set.channels.clone();
+        let mut layers = vec![procedural];
+        layers.extend((0..self.layers).map(|i| {
+            let mut layer = Layer::fill_for(ids.layer(), format!("fill {i}"), &defs);
+            for (channel, blend) in &mut layer.channels {
+                if *channel != Channel::Normal {
+                    blend.mode =
+                        [BlendMode::Normal, BlendMode::Multiply, BlendMode::Overlay][i % 3];
+                }
+                blend.opacity = 0.5;
+            }
+            layer
+        }));
+        set.stack.layers = layers;
+        project.next_id = ids.next_raw();
+
+        let compositor = Compositor::new(&ctx)?;
+        let mut pool = TexturePool::new(u64::MAX);
+        let mut document = GpuDocument::new();
+        let start = Instant::now();
+        document.sync(&ctx, &mut pool, &compositor, &project);
+        ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+        println!(
+            "stack      {} ({}) under {} fills, {} channels of {}², first evaluation {:.0} ms \
+             (surface map and pipelines included)",
+            def.id,
+            if self.triplanar { "triplanar" } else { "UV" },
+            self.layers,
+            defs.len(),
+            self.resolution.pixels(),
+            start.elapsed().as_secs_f64() * 1e3
+        );
+        println!(
+            "memory     {:.0} MB in the pool, of which {:.0} MB of contents and surface map",
+            pool.memory() as f64 / 1e6,
+            document.content_memory() as f64 / 1e6
+        );
+        let mut times = Vec::new();
+        for step in 0..self.edits {
+            let mut instance = def.instance();
+            instance.params.insert(
+                "roughness".into(),
+                ParamValue::Float(0.2 + 0.03 * step as f32),
+            );
+            SetFillSource::new(bottom, FillSource::Procedural(instance), "")
+                .apply(&mut project)
+                .expect("the bottom layer is a fill");
+            let start = Instant::now();
+            document.sync(&ctx, &mut pool, &compositor, &project);
+            ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+            times.push(start.elapsed().as_secs_f64() * 1e3);
+        }
+        let average = times.iter().sum::<f64>() / times.len() as f64;
+        let max = times.iter().copied().fold(0.0, f64::max);
+        println!(
+            "parameter  roughness of the material: average {average:.1} ms, max {max:.1} ms over {} edits",
+            times.len()
+        );
+        println!("budget     < 100 ms (M7 criterion 3)");
+        Ok(())
+    }
+}
