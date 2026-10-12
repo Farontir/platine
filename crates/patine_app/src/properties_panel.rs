@@ -9,7 +9,7 @@ use egui::{RichText, Ui};
 use fluent_bundle::FluentArgs;
 use patine_core::channel::{Channel, ChannelDef};
 use patine_core::command::{Command, CommandGroup, Label};
-use patine_core::commands::{SetChannelBlend, SetFillValue};
+use patine_core::commands::{SetChannelBlend, SetFillSource, SetFillValue, SetProjection};
 use patine_core::ids::LayerId;
 use patine_core::layer::{ChannelBlend, FillSource, Layer, LayerKind};
 use patine_core::project::{Project, TextureSetId};
@@ -19,6 +19,7 @@ use crate::document::channel_name;
 use crate::i18n::I18n;
 use crate::layers_panel::{LayersOutput, blend_editor};
 use crate::masks::{self, LayerPart};
+use crate::procedural_ui::{params_editor, projection_editor};
 
 /// Editor of a fill value: a color, a slider, or the tilt of a normal.
 fn value_editor(ui: &mut Ui, channel: Channel, value: [f32; 4]) -> (Option<[f32; 4]>, bool) {
@@ -88,6 +89,43 @@ fn activate(layer: &Layer, def: &ChannelDef, has_value: bool) -> Box<dyn Command
     ))
 }
 
+/// Parameters and projection of a procedural fill.
+fn procedural_section(
+    ui: &mut Ui,
+    i18n: &I18n,
+    layer: &Layer,
+    procedural: &patine_core::layer::ProceduralRef,
+    projection: &patine_core::layer::Projection,
+    output: &mut LayersOutput,
+) {
+    let Some(def) = patine_procedural::library::find(&procedural.id) else {
+        ui.label(RichText::new(i18n.tr("procedural-unknown")).weak());
+        return;
+    };
+    ui.label(RichText::new(i18n.tr(&def.name_key)).strong());
+    let edited = params_editor(ui, i18n, def, procedural);
+    output.seal |= edited.ended;
+    if let Some(value) = edited.value {
+        output.commands.push(Box::new(SetFillSource::new(
+            layer.id,
+            FillSource::Procedural(value),
+            layer.name.clone(),
+        )));
+    }
+    ui.separator();
+    ui.label(RichText::new(i18n.tr("properties-projection")).strong());
+    let edited = projection_editor(ui, i18n, projection);
+    output.seal |= edited.ended;
+    if let Some(value) = edited.value {
+        output.commands.push(Box::new(SetProjection::new(
+            layer.id,
+            value,
+            layer.name.clone(),
+        )));
+    }
+    ui.separator();
+}
+
 /// Draws the panel for the layer `selected` of texture set `set`.
 pub fn show(
     ui: &mut Ui,
@@ -123,6 +161,13 @@ pub fn show(
         LayerPart::Content => {}
     }
     ui.heading(&layer.name);
+    if let LayerKind::Fill {
+        source: FillSource::Procedural(procedural),
+        projection,
+    } = &layer.kind
+    {
+        procedural_section(ui, i18n, layer, procedural, projection, &mut output);
+    }
     let values = match &layer.kind {
         LayerKind::Fill {
             source: FillSource::Uniform(values),

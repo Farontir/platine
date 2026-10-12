@@ -20,6 +20,7 @@ use crate::document::EnvironmentChange;
 use crate::history_panel::{self, HistoryView};
 use crate::i18n::I18n;
 use crate::layers_panel::{self, LayersState};
+use crate::library_panel::{self, LibraryState};
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, DialogOutcome, NewProjectDialog};
 use crate::properties_panel;
@@ -132,6 +133,8 @@ pub struct UiState {
     pub view_2d: View2dState,
     /// Layers panel: selection, renaming, current channel, closed folders.
     pub layers: LayersState,
+    /// Library panel: thumbnails.
+    pub library: LibraryState,
     /// Name of the document whose unsaved changes the user must decide about.
     pub unsaved_prompt: Option<String>,
     /// Error shown in a dialog until dismissed.
@@ -162,6 +165,7 @@ impl Default for UiState {
             texture_sets: TextureSetsState::default(),
             view_2d: View2dState::default(),
             layers: LayersState::default(),
+            library: LibraryState::default(),
             unsaved_prompt: None,
             error_message: None,
             recovery_prompt: None,
@@ -288,6 +292,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> UiOutput 
             texture_sets: &mut state.texture_sets,
             view_2d: &mut state.view_2d,
             layers: &mut state.layers,
+            library: &mut state.library,
             output: &mut output,
         };
         DockArea::new(&mut state.dock)
@@ -476,6 +481,7 @@ struct PanelViewer<'a, 'b> {
     texture_sets: &'a mut TextureSetsState,
     view_2d: &'a mut View2dState,
     layers: &'a mut LayersState,
+    library: &'a mut LibraryState,
     output: &'a mut UiOutput,
 }
 
@@ -564,6 +570,18 @@ impl TabViewer for PanelViewer<'_, '_> {
                 self.output.commands.extend(panel.commands);
                 self.output.seal |= panel.seal;
             }
+            Panel::Library => {
+                let panel = library_panel::show(
+                    ui,
+                    self.info.i18n,
+                    self.info.project,
+                    self.texture_sets.selected,
+                    self.layers,
+                    self.library,
+                );
+                self.output.commands.extend(panel.commands);
+                self.output.seal |= panel.seal;
+            }
             Panel::View2D => {
                 view_2d::show(
                     ui,
@@ -588,11 +606,6 @@ impl TabViewer for PanelViewer<'_, '_> {
                     self.output.picked_hdri = display.picked;
                 }
                 self.output.seal |= display.seal;
-            }
-            _ => {
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new(self.info.i18n.tr("panel-empty")).weak());
-                });
             }
         }
     }

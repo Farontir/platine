@@ -184,6 +184,79 @@ fn build_materials(
         .collect()
 }
 
+/// The command setting parameter `name` of the selected procedural to `value` (parsed
+/// after the parameter's type): the selected mask effect's, or the selected layer's.
+fn startup_param(
+    project: &Project,
+    layers: &crate::layers_panel::LayersState,
+    name: &str,
+    value: &str,
+) -> Option<Box<dyn patine_core::command::Command>> {
+    use patine_core::layer::{FillSource, LayerKind};
+    use patine_core::mask::{MaskEffect, ParamValue};
+    use patine_procedural::def::ParamKind;
+
+    let layer = layers.selected.and_then(|id| {
+        project
+            .texture_sets
+            .iter()
+            .find_map(|set| set.stack.find(id))
+    })?;
+    let parse = |instance: &patine_core::layer::ProceduralRef| {
+        let def = patine_procedural::library::find(&instance.id)?;
+        let parsed = match &def.param(name)?.kind {
+            ParamKind::Float { .. } => ParamValue::Float(value.parse().ok()?),
+            ParamKind::Int { .. } | ParamKind::Seed => ParamValue::Int(value.parse().ok()?),
+            ParamKind::Bool { .. } => ParamValue::Bool(value.parse().ok()?),
+            ParamKind::Color { .. } => {
+                let c: Vec<f32> = value
+                    .split(',')
+                    .map(|v| v.parse().ok())
+                    .collect::<Option<_>>()?;
+                let [r, g, b] = c.as_slice() else {
+                    return None;
+                };
+                ParamValue::Color([*r, *g, *b, 1.0])
+            }
+            ParamKind::Enum { .. } => ParamValue::Enum(value.to_owned()),
+            _ => return None,
+        };
+        let mut changed = instance.clone();
+        changed.params.insert(name.to_owned(), parsed);
+        Some(changed)
+    };
+    if let crate::masks::LayerPart::MaskEffect(effect) = layers.part {
+        let mask = layer.mask.as_ref()?;
+        let mut entry = mask.effects[mask.index_of(effect)?].clone();
+        let MaskEffect::Fill {
+            source: FillSource::Procedural(instance),
+        } = &entry.effect
+        else {
+            return None;
+        };
+        entry.effect = MaskEffect::Fill {
+            source: FillSource::Procedural(parse(instance)?),
+        };
+        return Some(Box::new(patine_core::commands::SetMaskEffect::new(
+            layer.id,
+            entry,
+            layer.name.clone(),
+        )));
+    }
+    let LayerKind::Fill {
+        source: FillSource::Procedural(instance),
+        ..
+    } = &layer.kind
+    else {
+        return None;
+    };
+    Some(Box::new(patine_core::commands::SetFillSource::new(
+        layer.id,
+        FillSource::Procedural(parse(instance)?),
+        layer.name.clone(),
+    )))
+}
+
 /// What to do once the user has decided about unsaved changes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum PendingAction {
@@ -498,6 +571,76 @@ impl App {
                             Some(group) => Box::new(group),
                             None => continue,
                         }
+                    }
+                    StartupEdit::Material(id) => {
+                        let Some(def) = patine_procedural::library::find(id) else {
+                            anyhow::bail!("unknown material {id}");
+                        };
+                        let Some(insert) = crate::library_panel::new_material_layer(
+                            &self.i18n,
+                            &document.project,
+                            self.ui.texture_sets.selected,
+                            self.ui.layers.selected,
+                            def,
+                        ) else {
+                            continue;
+                        };
+                        self.ui.layers.selected =
+                            Some(patine_core::ids::LayerId(document.project.next_id));
+                        self.ui.layers.part = crate::masks::LayerPart::Content;
+                        Box::new(insert)
+                    }
+                    StartupEdit::MaskProcedural(id) => {
+                        let Some(def) = patine_procedural::library::find(id) else {
+                            anyhow::bail!("unknown procedural {id}");
+                        };
+                        let Some(insert) = crate::library_panel::new_mask_procedural(
+                            &document.project,
+                            &self.ui.layers,
+                            def,
+                        ) else {
+                            continue;
+                        };
+                        self.ui.layers.part = crate::masks::LayerPart::MaskEffect(
+                            patine_core::ids::EffectId(document.project.next_id),
+                        );
+                        Box::new(insert)
+                    }
+                    StartupEdit::Param(name, value) => {
+                        match startup_param(&document.project, &self.ui.layers, name, value) {
+                            Some(command) => command,
+                            None => anyhow::bail!("cannot set parameter {name} to {value}"),
+                        }
+                    }
+                    StartupEdit::Projection(kind, scale) => {
+                        let Some(layer) = self.ui.layers.selected.and_then(|id| {
+                            document
+                                .project
+                                .texture_sets
+                                .iter()
+                                .find_map(|set| set.stack.find(id))
+                        }) else {
+                            continue;
+                        };
+                        let kind = match kind.as_str() {
+                            "uv" => patine_core::layer::ProjectionKind::Uv,
+                            "triplanar" => {
+                                patine_core::layer::ProjectionKind::Triplanar { blend: 0.5 }
+                            }
+                            "planar" => patine_core::layer::ProjectionKind::Planar,
+                            "spherical" => patine_core::layer::ProjectionKind::Spherical,
+                            "cylindrical" => patine_core::layer::ProjectionKind::Cylindrical,
+                            other => anyhow::bail!("unknown projection {other}"),
+                        };
+                        Box::new(patine_core::commands::SetProjection::new(
+                            layer.id,
+                            patine_core::layer::Projection {
+                                kind,
+                                scale: [*scale; 2],
+                                ..patine_core::layer::Projection::default()
+                            },
+                            layer.name.clone(),
+                        ))
                     }
                     StartupEdit::Mask(white) => {
                         let Some(layer) = self.ui.layers.selected.and_then(|id| {
@@ -1235,6 +1378,89 @@ impl App {
 
     /// Renders the 2D view of the current texture set when its panel is shown, and keeps
     /// its egui texture registered.
+    /// Renders one missing thumbnail of the Library panel per frame, while the panel is
+    /// visible: materials lit by their normal, noises and patterns in gray.
+    fn render_thumbnails(&mut self) {
+        use crate::library_panel::{THUMBNAIL_SIZE, thumbnail_pixels};
+        use patine_procedural::def::Category;
+        use patine_procedural::evaluate::{EvaluationUniforms, SurfaceInput};
+
+        let visible = std::mem::take(&mut self.ui.library.visible);
+        let Some(gfx) = self.graphics.as_ref() else {
+            return;
+        };
+        let thumbnails = &mut self.ui.library.thumbnails;
+        let Some(def) = patine_procedural::library::all()
+            .iter()
+            .find(|def| !thumbnails.contains_key(&def.id))
+        else {
+            return;
+        };
+        if !visible {
+            return;
+        }
+        let size = THUMBNAIL_SIZE;
+        let render = |output: u32| -> Option<Vec<[f32; 4]>> {
+            let format = wgpu::TextureFormat::Rgba16Float;
+            let texture = gfx.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("thumbnail"),
+                size: wgpu::Extent3d {
+                    width: size,
+                    height: size,
+                    depth_or_array_layers: 1,
+                },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                view_formats: &[],
+            });
+            let uniforms = EvaluationUniforms::new(
+                &patine_core::layer::Projection::default(),
+                size,
+                [0.0; 3],
+                1.0,
+                true,
+                output,
+            );
+            let mut encoder = gfx.gpu.device.create_command_encoder(&Default::default());
+            let result = gfx.compositor.procedurals().evaluate(
+                &gfx.gpu,
+                &mut encoder,
+                def,
+                &def.defaults(),
+                &uniforms,
+                SurfaceInput::Flat,
+                &texture.create_view(&Default::default()),
+                format,
+            );
+            if let Err(error) = result {
+                tracing::error!(id = %def.id, %error, "thumbnail failed");
+                return None;
+            }
+            gfx.gpu.queue.submit([encoder.finish()]);
+            patine_gpu::readback::read_rgba16f(&gfx.gpu, &texture).ok()
+        };
+        let pixels = if def.category == Category::Material {
+            render(0)
+                .zip(render(3))
+                .map(|(base, normal)| thumbnail_pixels(&base, Some(&normal)))
+        } else {
+            render(0).map(|value| thumbnail_pixels(&value, None))
+        };
+        // A failed thumbnail stays gray instead of being rendered again every frame.
+        let pixels = pixels.unwrap_or_else(|| vec![64; (size * size * 4) as usize]);
+        let image = egui::ColorImage::from_rgba_unmultiplied([size as usize; 2], &pixels);
+        let handle = self.egui_ctx.load_texture(
+            format!("thumbnail {}", def.id),
+            image,
+            egui::TextureOptions::LINEAR,
+        );
+        thumbnails.insert(def.id.clone(), handle);
+        self.egui_ctx.request_repaint();
+    }
+
     fn render_view_2d(&mut self) {
         let state = &mut self.ui.view_2d;
         let visible = std::mem::take(&mut state.visible);
@@ -1538,6 +1764,7 @@ impl App {
         // The 3D image of this frame, with the camera moved by this frame's input.
         self.render_viewport();
         self.render_view_2d();
+        self.render_thumbnails();
         let Some(gfx) = self.graphics.as_mut() else {
             return;
         };

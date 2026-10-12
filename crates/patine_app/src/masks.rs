@@ -10,7 +10,7 @@ use patine_core::commands::{
     InsertMaskEffect, MoveMaskEffect, RemoveLayer, RemoveMaskEffect, SetMask, SetMaskEffect,
 };
 use patine_core::ids::{EffectId, IdSequence, LayerId};
-use patine_core::layer::{BlendMode, Layer};
+use patine_core::layer::{BlendMode, FillSource, Layer};
 use patine_core::mask::{
     FilterKind, LevelsParams, MaskEffect, MaskEffectEntry, MaskInitial, MaskStack,
 };
@@ -19,6 +19,9 @@ use patine_core::project::{Project, TextureSet};
 use crate::display_panel::gesture_ended;
 use crate::i18n::I18n;
 use crate::layers_panel::{LayersOutput, LayersState, mode_key, scalar_modes};
+use crate::procedural_ui::params_editor;
+use patine_procedural::def::{Category, ProceduralDef};
+use patine_procedural::library;
 
 /// Which part of the selected layer is selected.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -71,9 +74,28 @@ impl NewEffect {
     }
 }
 
-/// Icon and translation key of a mask effect.
-pub fn effect_label(effect: &MaskEffect) -> (&'static str, &'static str) {
+/// A mask fill of the noise or pattern `def`, with its default parameters.
+pub fn procedural_fill(def: &ProceduralDef) -> MaskEffect {
+    MaskEffect::Fill {
+        source: FillSource::Procedural(def.instance()),
+    }
+}
+
+/// Icon and translation key of a mask effect (a procedural fill is named by its
+/// procedural).
+pub fn effect_label(effect: &MaskEffect) -> (&'static str, String) {
+    let (icon, key) = effect_label_key(effect);
+    (icon, key.to_owned())
+}
+
+fn effect_label_key(effect: &MaskEffect) -> (&'static str, &str) {
     match effect {
+        MaskEffect::Fill {
+            source: FillSource::Procedural(procedural),
+        } => (
+            icons::CLOUD,
+            library::find(&procedural.id).map_or("mask-effect-fill", |def| def.name_key.as_str()),
+        ),
         MaskEffect::Fill { .. } => (icons::PAINT_BUCKET, "mask-effect-fill"),
         MaskEffect::Levels(_) => (icons::SLIDERS_HORIZONTAL, "mask-effect-levels"),
         MaskEffect::Filter {
@@ -228,6 +250,25 @@ fn mask_menu(
             ui.close();
         }
     }
+    ui.menu_button(i18n.tr("mask-add-procedural"), |ui| {
+        for def in library::all()
+            .iter()
+            .filter(|def| matches!(def.category, Category::Noise | Category::Pattern))
+        {
+            if ui.button(i18n.tr(&def.name_key)).clicked() {
+                let fill = procedural_fill(def);
+                if let Some(command) =
+                    insert_effect(project, layer, fill, BlendMode::Normal, 1.0, effect)
+                {
+                    output.commands.push(Box::new(command));
+                    state.selected = Some(layer.id);
+                    state.part = LayerPart::MaskEffect(EffectId(project.next_id));
+                }
+                output.seal = true;
+                ui.close();
+            }
+        }
+    });
     ui.separator();
     let (key, part) = match effect {
         Some(effect) => ("mask-remove-effect", LayerPart::MaskEffect(effect)),
@@ -310,7 +351,7 @@ pub fn mask_rows(
                     output.seal = true;
                 }
                 let (icon, key) = effect_label(&entry.effect);
-                let mut text = format!("{icon} {}", i18n.tr(key));
+                let mut text = format!("{icon} {}", i18n.tr(&key));
                 if let Some(value) = entry.effect.fill_value() {
                     text.push_str(&format!(" {:.0} %", value * 100.0));
                 }
@@ -460,7 +501,7 @@ pub fn effect_properties(
     };
     let mut changed = entry.clone();
     let (icon, key) = effect_label(&entry.effect);
-    ui.heading(format!("{icon} {}", i18n.tr(key)));
+    ui.heading(format!("{icon} {}", i18n.tr(&key)));
     if ui
         .checkbox(&mut changed.visible, i18n.tr("mask-visible"))
         .changed()
@@ -486,6 +527,20 @@ pub fn effect_properties(
     });
     ui.separator();
     match &mut changed.effect {
+        MaskEffect::Fill {
+            source: FillSource::Procedural(procedural),
+        } => match library::find(&procedural.id) {
+            Some(def) => {
+                let edited = params_editor(ui, i18n, def, procedural);
+                output.seal |= edited.ended;
+                if let Some(value) = edited.value {
+                    *procedural = value;
+                }
+            }
+            None => {
+                ui.label(RichText::new(i18n.tr("procedural-unknown")).weak());
+            }
+        },
         effect @ MaskEffect::Fill { .. } => {
             let mut value = effect.fill_value().unwrap_or(0.0);
             ui.horizontal(|ui| {
@@ -536,7 +591,9 @@ pub fn effect_properties(
 }
 
 /// Every translation key of the masks, for tests.
-pub const TRANSLATION_KEYS: [&str; 30] = [
+pub const TRANSLATION_KEYS: [&str; 32] = [
+    "mask-add-procedural",
+    "procedural-unknown",
     "display-mask-no-layer",
     "display-mask-of",
     "display-mask-none",

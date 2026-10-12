@@ -45,7 +45,8 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
                                 fill=R,G,B,ROUGHNESS, mode=MODE,OPACITY, group=,
                                 mask=black|white, mask-fill=VALUE,MODE,OPACITY,
                                 mask-levels=IN_LOW,IN_HIGH,GAMMA,OUT_LOW,OUT_HIGH,
-                                mask-invert=
+                                mask-invert=, material=ID, mask-procedural=ID,
+                                param=NAME:VALUE, projection=KIND,SCALE
 
   A project file (.patine) can be given instead of a mesh.";
 
@@ -75,6 +76,15 @@ pub enum StartupEdit {
     MaskLevels([f32; 5]),
     /// Add an inversion to the selected layer's mask.
     MaskInvert,
+    /// Add a fill of the procedural material `id` above the selection and select it.
+    Material(String),
+    /// Add a fill of the noise or pattern `id` to the selected layer's mask.
+    MaskProcedural(String),
+    /// Set a parameter of the selected procedural (layer or mask effect): name and value
+    /// (a number, `true`/`false`, `R,G,B` or an option name).
+    Param(String, String),
+    /// Set the projection of the selected procedural fill: kind and uniform scale.
+    Projection(String, f32),
 }
 
 impl StartupEdit {
@@ -125,6 +135,16 @@ impl StartupEdit {
                 StartupEdit::MaskLevels(numbers.try_into().ok()?)
             }
             "mask-invert" => StartupEdit::MaskInvert,
+            "material" => StartupEdit::Material(value.to_owned()),
+            "mask-procedural" => StartupEdit::MaskProcedural(value.to_owned()),
+            "param" => {
+                let (name, value) = value.split_once(':')?;
+                StartupEdit::Param(name.to_owned(), value.to_owned())
+            }
+            "projection" => {
+                let (kind, scale) = value.split_once(',')?;
+                StartupEdit::Projection(kind.to_owned(), scale.parse().ok()?)
+            }
             _ => return None,
         })
     }
@@ -485,6 +505,27 @@ mod tests {
         );
         assert_eq!(options.display, Some((DisplayMode::Mask, None)));
         assert!(parse(&["--edit", "mask=grey"]).is_err());
+        let options = parse(&[
+            "--edit",
+            "material=material.copper",
+            "--edit",
+            "param=oxidation:0.4",
+            "--edit",
+            "projection=triplanar,2",
+            "--edit",
+            "mask-procedural=noise.perlin",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.edits,
+            [
+                StartupEdit::Material("material.copper".into()),
+                StartupEdit::Param("oxidation".into(), "0.4".into()),
+                StartupEdit::Projection("triplanar".into(), 2.0),
+                StartupEdit::MaskProcedural("noise.perlin".into()),
+            ]
+        );
+        assert!(parse(&["--edit", "param=oxidation"]).is_err());
         assert!(parse(&["--edit", "mask-levels=0,1,2"]).is_err());
         assert!(parse(&["--edit", "mask-fill=0.5,normal"]).is_err());
         let options = parse(&["--display", "channel:roughness", "--texture-set", "2"]).unwrap();

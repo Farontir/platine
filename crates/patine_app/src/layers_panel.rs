@@ -209,7 +209,7 @@ pub fn blend_editor(
 }
 
 /// Where a new layer goes: above the selected layer, or at the top of the stack.
-fn insertion(set: &TextureSet, selected: Option<LayerId>) -> LayerPosition {
+pub fn insertion(set: &TextureSet, selected: Option<LayerId>) -> LayerPosition {
     selected
         .and_then(|id| set.stack.position(id))
         .map(|position| LayerPosition {
@@ -484,8 +484,12 @@ pub fn show(
                             )));
                             output.seal = true;
                         }
-                        let kind = match layer.kind {
+                        let kind = match &layer.kind {
                             LayerKind::Folder { .. } => icons::FOLDER,
+                            LayerKind::Fill {
+                                source: patine_core::layer::FillSource::Procedural(_),
+                                ..
+                            } => icons::CUBE,
                             _ => icons::PAINT_BUCKET,
                         };
                         match &mut state.renaming {
