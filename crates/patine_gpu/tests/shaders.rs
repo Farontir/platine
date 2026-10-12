@@ -23,12 +23,30 @@ const EXTRA_CAPABILITIES: &[(&str, naga::valid::Capabilities)] = &[
     ),
 ];
 
+/// Templates completed by the shaders that import them (they call functions their
+/// importer defines): validated through every importer, not on their own. Each must be
+/// imported by at least one shader, which this test checks.
+const IMPORT_ONLY: &[&str] = &["procedural/material_main"];
+
 #[test]
 fn all_shaders_validate_with_naga() {
     let mut failures = Vec::new();
     let mut count = 0;
     for name in patine_gpu::shaders::names() {
         count += 1;
+        if IMPORT_ONLY.contains(&name) {
+            let imported = patine_gpu::shaders::names().any(|other| {
+                other != name
+                    && patine_gpu::shaders::load_raw(other)
+                        .is_ok_and(|source| source.contains(&format!("// #import {name}")))
+            });
+            if !imported {
+                failures.push(format!(
+                    "{name}: an import-only template that nothing imports"
+                ));
+            }
+            continue;
+        }
         // Imports resolved: this is the source the device compiles.
         let source = match patine_gpu::shaders::load(name) {
             Ok(source) => source,

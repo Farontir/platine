@@ -142,6 +142,22 @@ pub enum Output {
     Gray,
 }
 
+impl Output {
+    /// Index of the output in `evaluation.output` of the material shaders, `None` for
+    /// channels materials do not produce.
+    pub fn index(self) -> Option<u32> {
+        match self {
+            Output::Channel(Channel::BaseColor) => Some(0),
+            Output::Channel(Channel::Metallic) => Some(1),
+            Output::Channel(Channel::Roughness) => Some(2),
+            Output::Channel(Channel::Normal) => Some(3),
+            Output::Channel(Channel::Height) => Some(4),
+            Output::Channel(_) => None,
+            Output::Gray => Some(0),
+        }
+    }
+}
+
 /// A procedural material, noise or pattern.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProceduralDef {

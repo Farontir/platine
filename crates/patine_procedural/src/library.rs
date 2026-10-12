@@ -7,6 +7,8 @@
 
 use std::sync::LazyLock;
 
+use patine_core::channel::Channel;
+
 use crate::def::{Category, Output, ParamDef, ParamKind, ProceduralDef};
 
 fn float(name: &str, min: f32, max: f32, default: f32) -> ParamDef {
@@ -38,6 +40,32 @@ fn choice(name: &str, options: &[&str], default: usize) -> ParamDef {
             default,
         },
     )
+}
+
+fn color(name: &str, default: [f32; 4]) -> ParamDef {
+    ParamDef::new(name, &format!("param-{name}"), ParamKind::Color { default })
+}
+
+/// Channels every material produces.
+pub const MATERIAL_CHANNELS: [Channel; 5] = [
+    Channel::BaseColor,
+    Channel::Metallic,
+    Channel::Roughness,
+    Channel::Normal,
+    Channel::Height,
+];
+
+/// A material whose shader is `shaders/procedural/materials/<name>` (id `material.<name>`).
+fn material(name: &str, params: Vec<ParamDef>) -> ProceduralDef {
+    ProceduralDef {
+        id: format!("material.{name}"),
+        version: 1,
+        name_key: format!("procedural-material-{name}"),
+        category: Category::Material,
+        params,
+        shader: format!("procedural/materials/{name}"),
+        outputs: MATERIAL_CHANNELS.map(Output::Channel).to_vec(),
+    }
 }
 
 fn boolean(name: &str, default: bool) -> ParamDef {
@@ -90,7 +118,67 @@ fn cells(id: &str, count: i32) -> ProceduralDef {
 }
 
 fn build() -> Vec<ProceduralDef> {
+    let roughness = |default| float("roughness", 0.02, 1.0, default);
+    let relief = || float("relief", 0.0, 2.0, 0.5);
     vec![
+        material(
+            "steel_brushed",
+            vec![
+                color("color", [0.56, 0.57, 0.58, 1.0]),
+                roughness(0.35),
+                int("scale", 1, 64, 8),
+                float("brushing", 0.0, 1.0, 0.6),
+                relief(),
+                seed(),
+            ],
+        ),
+        material(
+            "copper",
+            vec![
+                color("color", [0.95, 0.64, 0.54, 1.0]),
+                roughness(0.3),
+                int("scale", 1, 64, 4),
+                float("variation", 0.0, 1.0, 0.4),
+                float("oxidation", 0.0, 1.0, 0.0),
+                relief(),
+                seed(),
+            ],
+        ),
+        material(
+            "plastic_grained",
+            vec![
+                color("color", [0.7, 0.08, 0.06, 1.0]),
+                roughness(0.45),
+                int("scale", 1, 128, 32),
+                float("grain", 0.0, 1.0, 0.6),
+                relief(),
+                seed(),
+            ],
+        ),
+        material(
+            "wood",
+            vec![
+                color("light", [0.62, 0.43, 0.25, 1.0]),
+                color("dark", [0.36, 0.2, 0.1, 1.0]),
+                roughness(0.55),
+                int("rings", 1, 64, 10),
+                float("distortion", 0.0, 2.0, 0.5),
+                relief(),
+                seed(),
+            ],
+        ),
+        material(
+            "concrete",
+            vec![
+                color("color", [0.55, 0.54, 0.52, 1.0]),
+                roughness(0.85),
+                int("scale", 1, 64, 6),
+                float("pores", 0.0, 1.0, 0.5),
+                float("stains", 0.0, 1.0, 0.3),
+                relief(),
+                seed(),
+            ],
+        ),
         gray(
             "noise.value",
             Category::Noise,

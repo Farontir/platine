@@ -82,7 +82,7 @@ fn compose(
 }
 
 /// Returns the source of the file `name`, without resolving imports.
-fn load_raw(name: &str) -> Result<Cow<'static, str>, GpuError> {
+pub fn load_raw(name: &str) -> Result<Cow<'static, str>, GpuError> {
     if cfg!(feature = "hot-reload") {
         load_from_disk(name).map(Cow::Owned)
     } else {

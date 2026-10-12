@@ -7,6 +7,7 @@
 
 pub mod gray;
 pub mod hash;
+pub mod material;
 pub mod noise;
 pub mod pattern;
 pub mod projection;
