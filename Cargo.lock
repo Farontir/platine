@@ -2488,6 +2488,8 @@ dependencies = [
 name = "patine_procedural"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "glam",
  "naga",
  "patine_core",
  "patine_gpu",

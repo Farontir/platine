@@ -11,10 +11,13 @@ publish.workspace = true
 patine_core.workspace = true
 patine_gpu.workspace = true
 serde.workspace = true
+glam.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
 naga = { workspace = true, features = ["wgsl-in"] }
+patine_gpu = { workspace = true, features = ["testing"] }
+bytemuck.workspace = true
 
 [lints]
 workspace = true

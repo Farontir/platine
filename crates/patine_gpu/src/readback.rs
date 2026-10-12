@@ -89,6 +89,44 @@ pub fn read_texture_level(
     Ok(texels)
 }
 
+/// Reads the first `size` bytes of `buffer` (which needs `COPY_SRC` usage). Blocks until
+/// the GPU has finished all submitted work.
+pub fn read_buffer(
+    ctx: &GpuContext,
+    buffer: &wgpu::Buffer,
+    size: u64,
+) -> Result<Vec<u8>, GpuError> {
+    let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("readback"),
+        size,
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("readback"),
+        });
+    encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);
+    ctx.queue.submit([encoder.finish()]);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    staging.map_async(wgpu::MapMode::Read, .., move |result| {
+        // The receiver outlives the poll below; a send failure cannot happen.
+        let _ = sender.send(result);
+    });
+    ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+    receiver
+        .recv()
+        .map_err(|error| GpuError::BufferMap(error.to_string()))?
+        .map_err(|error| GpuError::BufferMap(error.to_string()))?;
+    let bytes = staging
+        .get_mapped_range(..)
+        .map_err(|error| GpuError::BufferMap(error.to_string()))?
+        .to_vec();
+    staging.unmap();
+    Ok(bytes)
+}
+
 /// Reads an `Rgba16Float` texture and converts its texels to `f32`.
 pub fn read_rgba16f(ctx: &GpuContext, texture: &wgpu::Texture) -> Result<Vec<[f32; 4]>, GpuError> {
     read_rgba16f_level(ctx, texture, 0, 0)
