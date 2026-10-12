@@ -8,7 +8,7 @@ use super::Applied;
 use crate::channel::Channel;
 use crate::command::{Command, CommandError, Label};
 use crate::ids::{AnchorId, LayerId};
-use crate::layer::{ChannelBlend, FillSource, Layer, LayerKind, LayerPosition};
+use crate::layer::{ChannelBlend, FillSource, Layer, LayerKind, LayerPosition, Projection};
 use crate::mask::MaskEffect;
 use crate::project::{Project, TextureSetId};
 
@@ -595,6 +595,128 @@ impl Command for SetFillValue {
         next.as_any()
             .downcast_ref::<SetFillValue>()
             .is_some_and(|next| next.id == self.id && next.channel == self.channel)
+    }
+
+    fn heap_size(&self) -> usize {
+        self.name.len()
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Replaces the content of a fill layer (uniform values, image or procedural with its
+/// parameters). Continuous changes of the same layer merge.
+#[derive(Debug)]
+pub struct SetFillSource {
+    id: LayerId,
+    /// New source before `apply`, old one after.
+    source: FillSource,
+    name: String,
+    applied: Applied,
+}
+
+impl SetFillSource {
+    /// Sets the content of the fill layer `id`. `name` is shown in the history.
+    pub fn new(id: LayerId, source: FillSource, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            source,
+            name: name.into(),
+            applied: Applied::default(),
+        }
+    }
+
+    fn swap(&mut self, project: &mut Project, applied: bool) -> Result<(), CommandError> {
+        let layer = find_mut(project, self.id)?;
+        let LayerKind::Fill { source, .. } = &mut layer.kind else {
+            return Err(CommandError::NotAFill(self.id));
+        };
+        self.applied.set(applied)?;
+        std::mem::swap(source, &mut self.source);
+        Ok(())
+    }
+}
+
+impl Command for SetFillSource {
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        self.swap(project, true)
+    }
+
+    fn revert(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        self.swap(project, false)
+    }
+
+    fn label(&self) -> Label {
+        Label::new("command-fill-source").arg("name", &self.name)
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        next.as_any()
+            .downcast_ref::<SetFillSource>()
+            .is_some_and(|next| next.id == self.id)
+    }
+
+    fn heap_size(&self) -> usize {
+        self.name.len() + 256
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Sets how a fill layer is mapped onto the mesh. Continuous changes of the same layer
+/// merge.
+#[derive(Debug)]
+pub struct SetProjection {
+    id: LayerId,
+    /// New projection before `apply`, old one after.
+    projection: Projection,
+    name: String,
+    applied: Applied,
+}
+
+impl SetProjection {
+    /// Sets the projection of the fill layer `id`. `name` is shown in the history.
+    pub fn new(id: LayerId, projection: Projection, name: impl Into<String>) -> Self {
+        Self {
+            id,
+            projection,
+            name: name.into(),
+            applied: Applied::default(),
+        }
+    }
+
+    fn swap(&mut self, project: &mut Project, applied: bool) -> Result<(), CommandError> {
+        let layer = find_mut(project, self.id)?;
+        let LayerKind::Fill { projection, .. } = &mut layer.kind else {
+            return Err(CommandError::NotAFill(self.id));
+        };
+        self.applied.set(applied)?;
+        std::mem::swap(projection, &mut self.projection);
+        Ok(())
+    }
+}
+
+impl Command for SetProjection {
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        self.swap(project, true)
+    }
+
+    fn revert(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        self.swap(project, false)
+    }
+
+    fn label(&self) -> Label {
+        Label::new("command-projection").arg("name", &self.name)
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        next.as_any()
+            .downcast_ref::<SetProjection>()
+            .is_some_and(|next| next.id == self.id)
     }
 
     fn heap_size(&self) -> usize {

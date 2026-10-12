@@ -240,6 +240,25 @@ impl Layer {
         )
     }
 
+    /// A fill of the procedural `procedural` affecting `channels` (those the procedural
+    /// produces and the texture set has), mapped by the mesh UVs.
+    pub fn fill_procedural(
+        id: LayerId,
+        name: impl Into<String>,
+        procedural: ProceduralRef,
+        channels: &[Channel],
+    ) -> Self {
+        Self::new(
+            id,
+            name,
+            LayerKind::Fill {
+                source: FillSource::Procedural(procedural),
+                projection: Projection::default(),
+            },
+            channels,
+        )
+    }
+
     /// An empty folder affecting `channels` (normals blend as Normal in a folder).
     pub fn folder(id: LayerId, name: impl Into<String>, channels: &[Channel]) -> Self {
         let mut folder = Self::new(

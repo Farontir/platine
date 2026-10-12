@@ -10,8 +10,8 @@ use patine_core::channel::ChannelDef;
 use patine_core::command::{Command, CommandError};
 use patine_core::commands::{
     InsertLayer, InsertMaskEffect, MoveLayer, MoveMaskEffect, RemoveLayer, RemoveMaskEffect,
-    RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef, SetEnvironment, SetFillValue,
-    SetLayerVisible, SetMask, SetMaskEffect, SetTextureSetResolution,
+    RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef, SetEnvironment, SetFillSource,
+    SetFillValue, SetLayerVisible, SetMask, SetMaskEffect, SetProjection, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::history::History;
@@ -796,4 +796,71 @@ fn mask_fill_values_read_any_key() {
     assert_eq!(fixture.fill_value(), Some(0.5));
     assert_eq!(MaskEffect::invert().fill_value(), None);
     assert_eq!(MaskEffect::invert().kind_id(), "invert");
+}
+
+#[test]
+fn fill_sources_and_projections_are_set_and_merged() {
+    use patine_core::layer::{FillSource, ProceduralRef, Projection, ProjectionKind};
+    use patine_core::mask::ParamValue;
+    let project = layered();
+    let procedural = ProceduralRef {
+        id: "material.copper".into(),
+        version: 1,
+        params: [("scale".to_owned(), ParamValue::Float(4.0))].into(),
+    };
+    let source = FillSource::Procedural(procedural.clone());
+    let after = round_trip(
+        &project,
+        Box::new(SetFillSource::new(LayerId(3), source.clone(), "outer")),
+    );
+    let LayerKind::Fill { source: found, .. } =
+        &after.texture_sets[0].stack.find(LayerId(3)).unwrap().kind
+    else {
+        panic!("a fill");
+    };
+    assert_eq!(found, &source);
+    let triplanar = Projection {
+        kind: ProjectionKind::Triplanar { blend: 0.4 },
+        scale: [3.0, 3.0],
+        ..Projection::default()
+    };
+    let after = round_trip(
+        &project,
+        Box::new(SetProjection::new(LayerId(3), triplanar, "outer")),
+    );
+    let LayerKind::Fill { projection, .. } =
+        &after.texture_sets[0].stack.find(LayerId(3)).unwrap().kind
+    else {
+        panic!("a fill");
+    };
+    assert_eq!(*projection, triplanar);
+    // Folders have no content.
+    assert_eq!(
+        SetProjection::new(LayerId(1), triplanar, "group").apply(&mut project.clone()),
+        Err(CommandError::NotAFill(LayerId(1)))
+    );
+    assert_eq!(
+        SetFillSource::new(LayerId(1), source, "group").apply(&mut project.clone()),
+        Err(CommandError::NotAFill(LayerId(1)))
+    );
+
+    // Dragging a parameter is one history entry.
+    let mut project = project;
+    let mut history = History::default();
+    for step in 0..5 {
+        let mut instance = procedural.clone();
+        instance
+            .params
+            .insert("scale".into(), ParamValue::Float(step as f32));
+        let command = SetFillSource::new(LayerId(3), FillSource::Procedural(instance), "outer");
+        history.push(&mut project, Box::new(command)).unwrap();
+    }
+    assert_eq!(history.applied(), 1);
+    let layer = patine_core::layer::Layer::fill_procedural(
+        LayerId(9),
+        "copper",
+        procedural,
+        &[Channel::BaseColor, Channel::Roughness],
+    );
+    assert_eq!(layer.channels.len(), 2);
 }

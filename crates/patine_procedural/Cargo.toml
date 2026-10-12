@@ -10,6 +10,11 @@ publish.workspace = true
 [dependencies]
 patine_core.workspace = true
 patine_gpu.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+naga = { workspace = true, features = ["wgsl-in"] }
 
 [lints]
 workspace = true

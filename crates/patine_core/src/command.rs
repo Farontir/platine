@@ -66,6 +66,9 @@ pub enum CommandError {
     /// The layer is not a uniform fill.
     #[error("layer {0} is not a uniform fill")]
     NotAUniformFill(LayerId),
+    /// The layer is not a fill.
+    #[error("layer {0} is not a fill")]
+    NotAFill(LayerId),
     /// The layer has no mask.
     #[error("layer {0} has no mask")]
     NoMask(LayerId),

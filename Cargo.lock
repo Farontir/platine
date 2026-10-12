@@ -2488,8 +2488,11 @@ dependencies = [
 name = "patine_procedural"
 version = "0.1.0"
 dependencies = [
+ "naga",
  "patine_core",
  "patine_gpu",
+ "serde",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

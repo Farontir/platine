@@ -286,3 +286,7 @@ mask-levels-gamma = Gamma
 mask-levels-out-low = Noir de sortie
 mask-levels-out-high = Blanc de sortie
 mask-no-parameter = Pas de paramètre.
+
+## Procedurals
+command-fill-source = Contenu de « { $name } »
+command-projection = Projection de « { $name } »

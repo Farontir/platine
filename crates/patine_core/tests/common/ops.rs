@@ -5,12 +5,16 @@ use patine_core::channel::ChannelDef;
 use patine_core::command::Command;
 use patine_core::commands::{
     InsertLayer, InsertMaskEffect, MoveLayer, MoveMaskEffect, RemoveLayer, RemoveMaskEffect,
-    RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef, SetEnvironment, SetFillValue,
-    SetLayerVisible, SetMask, SetMaskEffect, SetTextureSetResolution,
+    RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef, SetEnvironment, SetFillSource,
+    SetFillValue, SetLayerVisible, SetMask, SetMaskEffect, SetProjection, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::ids::LayerId;
-use patine_core::layer::{BlendMode, ChannelBlend, LayerKind, LayerPosition};
+use patine_core::layer::{
+    BlendMode, ChannelBlend, FillSource, LayerKind, LayerPosition, ProceduralRef, Projection,
+    ProjectionKind,
+};
+use patine_core::mask::ParamValue;
 use patine_core::mask::{LevelsParams, MaskEffect, MaskEffectEntry, MaskInitial, MaskStack};
 use patine_core::project::{Project, Resolution, TextureSetId};
 use proptest::prelude::*;
@@ -94,6 +98,16 @@ pub enum Op {
         visible: bool,
         value: f32,
     },
+    /// Makes a fill procedural (with a scale parameter), or uniform again.
+    Procedural {
+        layer: u8,
+        scale: Option<f32>,
+    },
+    Projection {
+        layer: u8,
+        triplanar: bool,
+        scale: f32,
+    },
     Rotation(f32),
     Exposure(f32),
     Source(u8),
@@ -131,6 +145,10 @@ pub fn op() -> impl Strategy<Value = Op> {
             .prop_map(|(layer, effect, mode, opacity, visible, value)| Op::MaskSet {
                 layer, effect, mode, opacity, visible, value,
             }),
+        2 => (any::<u8>(), proptest::option::of(1.0f32..16.0))
+            .prop_map(|(layer, scale)| Op::Procedural { layer, scale }),
+        1 => (any::<u8>(), any::<bool>(), 0.5f32..8.0)
+            .prop_map(|(layer, triplanar, scale)| Op::Projection { layer, triplanar, scale }),
         2 => (-10.0f32..10.0).prop_map(Op::Rotation),
         2 => (-6.0f32..6.0).prop_map(Op::Exposure),
         1 => any::<u8>().prop_map(Op::Source),
@@ -372,6 +390,35 @@ pub fn command(project: &Project, op: &Op) -> Option<Box<dyn Command>> {
                 entry.effect = MaskEffect::uniform(*value);
             }
             Box::new(SetMaskEffect::new(id, entry, name))
+        }
+        Op::Procedural { layer, scale } => {
+            let (_, id, _, name) = pick(&all, *layer)?;
+            let source = match scale {
+                Some(scale) => FillSource::Procedural(ProceduralRef {
+                    id: "noise.perlin".into(),
+                    version: 1,
+                    params: [("scale".to_owned(), ParamValue::Float(*scale))].into(),
+                }),
+                None => FillSource::Uniform([(Channel::BaseColor, [0.5; 4])].into()),
+            };
+            Box::new(SetFillSource::new(id, source, name))
+        }
+        Op::Projection {
+            layer,
+            triplanar,
+            scale,
+        } => {
+            let (_, id, _, name) = pick(&all, *layer)?;
+            let projection = Projection {
+                kind: if *triplanar {
+                    ProjectionKind::Triplanar { blend: 0.5 }
+                } else {
+                    ProjectionKind::Uv
+                },
+                scale: [*scale; 2],
+                ..Projection::default()
+            };
+            Box::new(SetProjection::new(id, projection, name))
         }
         Op::Rotation(radians) => Box::new(SetEnvironment::rotation(env, *radians)),
         Op::Exposure(ev) => Box::new(SetEnvironment::exposure(env, *ev)),
