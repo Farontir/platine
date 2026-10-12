@@ -11,7 +11,7 @@ use patine_core::mask::Params;
 use patine_gpu::{GpuContext, GpuError, wgpu};
 use wgpu::util::DeviceExt as _;
 
-use crate::def::{DefError, ProceduralDef};
+use crate::def::{DefError, Output, ProceduralDef};
 use crate::surface::{MeshBuffers, surface_descriptor};
 
 /// Uniforms shared by every procedural pass. Must match `Evaluation` in
@@ -83,6 +83,28 @@ impl EvaluationUniforms {
             padding: [0.0; 3],
         }
     }
+}
+
+/// Format of the texture of `output`: `Rgba16Float` for colors and normals,
+/// `R16Float` for scalars and gray values (the formats of the channel textures). With
+/// these, the five outputs of a material take 22 bytes per texel, within the 32 bytes a
+/// render pass may write.
+pub fn output_format(output: Output) -> wgpu::TextureFormat {
+    use patine_core::channel::Channel;
+    match output {
+        Output::Channel(Channel::BaseColor | Channel::Emissive | Channel::Normal) => {
+            wgpu::TextureFormat::Rgba16Float
+        }
+        _ => wgpu::TextureFormat::R16Float,
+    }
+}
+
+/// The formats of every output of `def`, in order.
+pub fn output_formats(def: &ProceduralDef) -> Vec<wgpu::TextureFormat> {
+    def.outputs
+        .iter()
+        .map(|output| output_format(*output))
+        .collect()
 }
 
 /// What the surface of a pass is.
@@ -366,5 +388,22 @@ impl Procedurals {
         pass.set_bind_group(1, &surface_group, &[]);
         pass.draw(0..3, 0..1);
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn every_procedural_fits_in_one_pass() {
+        for def in crate::library::all() {
+            let bytes: u32 = output_formats(def)
+                .iter()
+                .map(|format| format.target_pixel_byte_cost().expect("color formats"))
+                .sum();
+            // The default limit of wgpu (max_color_attachment_bytes_per_sample).
+            assert!(bytes <= 32, "{}: {bytes} bytes per texel", def.id);
+        }
     }
 }

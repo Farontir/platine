@@ -68,6 +68,11 @@ M6_PANELS = ["--tab", "layers", "--tab", "properties"]
 M6_FILL = ["--edit", "mask=black", "--edit", "mask-fill=0.6,normal,1"]
 M6_LEVELS = M6_FILL + ["--edit", "mask-levels=0,1,2.5,0,1"]
 
+# M7: procedural materials on the leather of the helmet; thumbnails need a few frames.
+M7_BASE = [HELMET, "--orbit", "30,10", "--texture-set", "1", "--capture-frames", "60"]
+M7_PANELS = ["--tab", "library", "--tab", "properties"]
+SUITCASE_VIEW = ["--orbit", "30,20", "--zoom", "0.8"]
+
 # name -> arguments (mesh first, if any)
 CAPTURES = {
     "interface_fr": [],
@@ -142,6 +147,18 @@ CAPTURES = {
     "m6_invert_mask": M6_BASE + M6_PANELS + M6_LEVELS + ["--edit", "mask-invert=", "--display", "mask"],
     "m6_view_2d": [HELMET, "--tab", "view-2d", "--texture-set", "1", "--edit", "fill=0.8,0.12,0.08,0.45"] + M6_LEVELS + ["--display", "mask"],
     "m6_history": M6_BASE + ["--tab", "layers", "--tab", "history"] + M6_LEVELS + ["--edit", "mask-invert="],
+    "m7_library": M7_BASE + M7_PANELS + ["--edit", "material=material.copper", "--edit", "param=oxidation:0.5", "--edit", "projection=triplanar,2"],
+    "m7_steel": M7_BASE + ["--edit", "material=material.steel_brushed"],
+    "m7_copper": M7_BASE + ["--edit", "material=material.copper", "--edit", "param=oxidation:0.5", "--edit", "projection=triplanar,2"],
+    "m7_plastic": M7_BASE + ["--edit", "material=material.plastic_grained"],
+    "m7_wood": M7_BASE + ["--edit", "material=material.wood", "--edit", "projection=triplanar,2"],
+    "m7_concrete": M7_BASE + ["--edit", "material=material.concrete"],
+    "m7_suitcase_uv": [SUITCASE, "--capture-frames", "60", "--edit", "material=material.wood", "--edit", "param=rings:24"] + SUITCASE_VIEW,
+    "m7_suitcase_triplanar": [SUITCASE, "--capture-frames", "60", "--edit", "material=material.wood", "--edit", "param=rings:24", "--edit", "projection=triplanar,2"] + SUITCASE_VIEW,
+    "m7_seed": M7_BASE + M7_PANELS + ["--edit", "material=material.concrete", "--edit", "param=seed:4242", "--edit", "param=stains:0.9"],
+    "m7_mask": M7_BASE + ["--tab", "layers", "--tab", "properties", "--edit", "fill=0.8,0.1,0.08,0.4", "--edit", "mask=black", "--edit", "mask-procedural=noise.perlin", "--edit", "param=scale:6"],
+    "m7_mask_view": M7_BASE + ["--tab", "layers", "--tab", "properties", "--edit", "fill=0.8,0.1,0.08,0.4", "--edit", "mask=black", "--edit", "mask-procedural=noise.perlin", "--edit", "param=scale:6", "--display", "mask"],
+    "m7_history": M7_BASE + ["--tab", "layers", "--tab", "history", "--edit", "material=material.copper", "--edit", "param=oxidation:0.5", "--edit", "projection=triplanar,2"],
 }
 
 # Captures run with extra environment variables.

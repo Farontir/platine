@@ -19,12 +19,11 @@ use patine_core::project::{TextureSet, TextureSetId};
 use patine_gpu::pool::{Residency, TextureId, TexturePool, texture_bytes};
 use patine_gpu::{GpuContext, wgpu};
 use patine_procedural::def::{Output, ProceduralDef};
-use patine_procedural::evaluate::{EvaluationUniforms, SurfaceInput};
+use patine_procedural::evaluate::{EvaluationUniforms, SurfaceInput, output_formats};
 use patine_procedural::library;
 use patine_procedural::surface::{MeshBuffers, surface_descriptor};
 
-use crate::compositor::{Compositor, format_of};
-use crate::reference::ChannelKind;
+use crate::compositor::Compositor;
 
 /// What a content texture holds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -178,10 +177,7 @@ impl Contents {
                             .iter()
                             .map(|channel| ContentId::Layer(layer.id, *channel))
                             .collect(),
-                        formats: channels
-                            .iter()
-                            .map(|channel| format_of(ChannelKind::of(*channel)))
-                            .collect(),
+                        formats: output_formats(def),
                         def,
                         key: Key {
                             procedural: procedural.clone(),

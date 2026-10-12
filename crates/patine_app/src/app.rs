@@ -1402,11 +1402,10 @@ impl App {
         let size = THUMBNAIL_SIZE;
         // Every output of the procedural, in one pass, read back.
         let render = || -> Option<Vec<Vec<[f32; 4]>>> {
-            let format = wgpu::TextureFormat::Rgba16Float;
-            let textures: Vec<wgpu::Texture> = def
-                .outputs
+            let formats = patine_procedural::evaluate::output_formats(def);
+            let textures: Vec<wgpu::Texture> = formats
                 .iter()
-                .map(|_| {
+                .map(|format| {
                     gfx.gpu.device.create_texture(&wgpu::TextureDescriptor {
                         label: Some("thumbnail"),
                         size: wgpu::Extent3d {
@@ -1417,7 +1416,7 @@ impl App {
                         mip_level_count: 1,
                         sample_count: 1,
                         dimension: wgpu::TextureDimension::D2,
-                        format,
+                        format: *format,
                         usage: wgpu::TextureUsages::RENDER_ATTACHMENT
                             | wgpu::TextureUsages::COPY_SRC,
                         view_formats: &[],
@@ -1428,7 +1427,7 @@ impl App {
                 .iter()
                 .map(|texture| texture.create_view(&Default::default()))
                 .collect();
-            let targets: Vec<_> = views.iter().map(|view| (view, format)).collect();
+            let targets: Vec<_> = views.iter().zip(formats).collect();
             let uniforms = EvaluationUniforms::new(
                 &patine_core::layer::Projection::default(),
                 size,
@@ -1453,7 +1452,14 @@ impl App {
             gfx.gpu.queue.submit([encoder.finish()]);
             textures
                 .iter()
-                .map(|texture| patine_gpu::readback::read_rgba16f(&gfx.gpu, texture).ok())
+                .map(|texture| match texture.format() {
+                    wgpu::TextureFormat::Rgba16Float => {
+                        patine_gpu::readback::read_rgba16f(&gfx.gpu, texture).ok()
+                    }
+                    _ => patine_gpu::readback::read_r16f_level(&gfx.gpu, texture, 0, 0)
+                        .ok()
+                        .map(|values| values.into_iter().map(|v| [v, 0.0, 0.0, 0.0]).collect()),
+                })
                 .collect()
         };
         let pixels = render().and_then(|outputs| {
