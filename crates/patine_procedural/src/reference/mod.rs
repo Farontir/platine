@@ -5,9 +5,12 @@
 //! Rust's `f32::fract`, which truncates), `mix(a, b, t) = a·(1 − t) + b·t`, and integer `%`
 //! truncates like Rust's.
 
+pub mod gray;
 pub mod hash;
 pub mod noise;
 pub mod pattern;
+pub mod projection;
+pub mod surface;
 
 pub use glam::{IVec2, Vec2};
 

@@ -47,8 +47,8 @@ fn check(def: &ProceduralDef) -> Result<(), String> {
             return Err(format!("shader {found:?}, definition {expected:?}"));
         }
     }
-    // The shader may round its size up further; it must hold the packed bytes.
-    if span < layout.size.min(span.next_multiple_of(16)) {
+    // The packed buffer is the structure rounded up to 16 bytes, as uniform buffers need.
+    if layout.size != span.next_multiple_of(16) {
         return Err(format!("shader size {span}, definition {}", layout.size));
     }
     Ok(())
@@ -103,4 +103,13 @@ fn the_probe_shader_matches_its_definition() {
     let mut missing = probe();
     missing.params.pop();
     assert!(check(&missing).is_err());
+}
+
+#[test]
+fn every_shipped_shader_matches_its_definition() {
+    let failures: Vec<String> = patine_procedural::library::all()
+        .iter()
+        .filter_map(|def| check(def).err().map(|error| format!("{}: {error}", def.id)))
+        .collect();
+    assert!(failures.is_empty(), "{failures:#?}");
 }

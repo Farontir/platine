@@ -2493,6 +2493,7 @@ dependencies = [
  "naga",
  "patine_core",
  "patine_gpu",
+ "patine_mesh",
  "serde",
  "thiserror 2.0.21",
 ]
