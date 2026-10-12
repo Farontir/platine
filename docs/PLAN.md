@@ -586,9 +586,9 @@ Critères d'acceptation : les masques composés correspondent à la référence 
 
 Objectif : des fills procéduraux paramétrables, avec une interface générée.
 
-- [ ] `ProceduralDef`, `ParamDef`, génération automatique du panneau Propriétés
-- [ ] Bruits, motifs et projections en WGSL, tileables et pilotés par graine
-- [ ] Fills avec matériau procédural, avec les 5 premiers matériaux
+- [x] `ProceduralDef`, `ParamDef`, génération automatique du panneau Propriétés
+- [x] Bruits, motifs et projections en WGSL, tileables et pilotés par graine
+- [x] Fills avec matériau procédural, avec les 5 premiers matériaux
 
 Critères d'acceptation : chaque bruit est tileable (bords identiques à 1e-3 près) ; la projection triplanaire ne montre pas de couture sur la sphère de test ; un paramètre modifié se voit en moins de 100 ms.
 

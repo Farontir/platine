@@ -115,3 +115,50 @@ Le modèle de document a déjà ce qu'il faut depuis le M3 :
 - [ ] Clic droit sur un masque › Ajouter un fill procédural › un bruit : le calque se découvre par taches ; touche M pour voir le masque.
 - [ ] Ctrl+Z et Ctrl+Y sur chaque opération ; enregistrer, rouvrir : identique.
 - [ ] `cargo run --release -p patine_cli -- bench procedural` sur la RTX A2000.
+
+## Mesures (13/10/2026, RTX 3080 Ti, build release)
+
+`cargo run --release -p patine_cli -- bench procedural [--material ID] [--triplanar] [--resolution N]` place un matériau procédural sous 29 fills, sur une sphère, avec 5 canaux. Chaque mesure modifie 20 fois un paramètre du matériau (sa roughness), attente GPU comprise. Le temps couvre l'évaluation du matériau et les mélanges des 30 calques sur les 5 canaux.
+
+| Matériau | Projection | Résolution | Avant optimisation | Après |
+| --- | --- | --- | --- | --- |
+| Béton | UV | 4096² | 78 ms | 52 ms |
+| Cuivre | triplanaire | 4096² | 128 ms | 73 ms |
+| Bois | UV | 4096² | — | 45 ms |
+| Cuivre | triplanaire | 2048² | — | 23 ms |
+
+**Critère 3 tenu** : 73 ms dans le pire cas mesuré, pour un budget de 100 ms. Les mélanges en représentent environ 33 ms (comme au M5).
+
+La première mesure dépassait le budget en triplanaire. Chacun des 5 canaux refaisait tout le matériau dans sa propre passe, et la normale coûtait 4 évaluations de hauteur de plus. L'optimisation, faite après mesure comme prévu, a deux volets :
+- **une seule passe** écrit les 5 sorties sur 5 cibles (MRT) ;
+- **la normale par différences avant**, à partir de la hauteur déjà calculée au centre : 2 évaluations au lieu de 4.
+
+En mémoire, un matériau en 4K occupe 372 Mo pour ses 5 contenus, plus 64 Mo pour la carte de surface. Ces textures sont jetables.
+
+## Écarts constatés pendant l'implémentation
+
+- **Une passe pour toutes les sorties** (voir les mesures) : le plan prévoyait une passe par canal, avec un regroupement en MRT seulement si la mesure l'exigeait, ce qui a été le cas.
+  - Le contenu d'un fill procédural comprend toujours ses 5 sorties, même quand le calque ou le texture set n'en utilise qu'une partie.
+  - Les cibles doivent tenir dans 32 octets par texel (limite par défaut) : 2 `Rgba16Float` et 3 `R16Float` font 22 octets.
+- **Normale par différences avant** au lieu de différences centrées : le décalage d'un quart de texel est invisible, et le coût est divisé par deux.
+- **Gabarit `procedural/material_main`** :
+  - c'est le point d'entrée commun des matériaux (mélange des plans, normale, sorties) ;
+  - il appelle des fonctions que chaque matériau définit, et WGSL n'a ni généricité ni pointeurs de fonction ;
+  - le test naga le valide à travers chaque matériau, et vérifie qu'il est importé.
+- **Bruits et motifs** : ils sont livrés comme procéduraux gris pour les masques. Un calque fill n'accepte que des matériaux. Les sources image restent pour l'import d'images (M16).
+- **Simplex périodique** : le domaine est doublé pour que la période en y soit toujours paire (condition du réseau incliné). Ses cellules sont donc deux fois plus fines que celles des autres bruits à échelle égale.
+- **Projection planaire** : elle se fait sur le plan face à +Z, faute d'axe dans le format.
+- **Pas de test de piles aléatoires procédurales** : la pile de référence (matériaux en UV et en triplanaire, dossier, masques procéduraux), comparée texel par texel sur 500 texels, couvre la composition. Les piles aléatoires du M6 restent en valeurs uniformes.
+- **Coût des tests sur WARP** : WARP compile lentement les shaders de matériaux (environ 12 s chacun). Les tests de matériaux et de compositeur procédural prennent chacun environ une minute sur WARP, contre quelques secondes sur la RTX.
+- **Carte de surface** : elle est libérée quand le texture set n'a plus de contenu procédural.
+
+## État à la clôture (13/10/2026)
+
+- **Critère 1** : les 8 bruits, et aussi les 8 motifs, prennent les mêmes valeurs sur les bords opposés de leur période, à 1e-3 près. C'est vérifié pour 4 périodes et 2 graines, sur le GPU et sur le CPU (WARP et RTX 3080 Ti). Chaque fonction de la bibliothèque correspond à sa référence à 1e-4 près.
+- **Critère 2** : du bruit de Perlin en triplanaire sur la sphère de test (512²) diffère de 0,006 au plus de part et d'autre des coutures UV, pour un écart de 0,013 entre texels voisins. Le témoin en UV, avec une échelle non entière, saute de 0,30.
+- **Critère 3** : 73 ms au pire sur la RTX 3080 Ti.
+- La carte de surface couvre et étend correctement les îlots. Les 5 projections et les 5 matériaux (5 sorties, UV, triplanaire, surface plane) correspondent à leur référence.
+- La pile procédurale correspond à la référence texel par texel. Le cache de contenu ne réévalue que ce qui change (1 passe par matériau modifié), et l'undo restaure l'état.
+- Commandes `SetFillSource` et `SetProjection` ; proptests d'undo étendus. Le format ne change pas.
+- 244 tests passent sur WARP.
+- **À vérifier à la main** : la checklist ci-dessus, et le bench sur la RTX A2000.
