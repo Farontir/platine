@@ -1,6 +1,7 @@
-//! Content cache of the procedural layers and mask effects: one texture per (layer,
-//! channel) of a procedural fill and per procedural mask fill, evaluated again only when
-//! its procedural, its parameters, its projection or the resolution change.
+//! Content cache of the procedural layers and mask effects: one texture per output of a
+//! procedural fill (all its channels, written by one pass) and per procedural mask fill,
+//! evaluated again only when its procedural, its parameters, its projection or the
+//! resolution change.
 //!
 //! The procedural passes read each texture set's *surface map* (see
 //! [`patine_procedural::surface`]), built once per resolution, and the mesh in storage
@@ -39,7 +40,6 @@ pub enum ContentId {
 struct Key {
     procedural: ProceduralRef,
     projection: Projection,
-    output: u32,
     size: u32,
     /// Generation of the surface map it was evaluated on.
     map: u64,
@@ -62,12 +62,14 @@ struct SurfaceMap {
     generation: u64,
 }
 
-/// One content to evaluate.
-struct Wanted {
-    id: ContentId,
+/// One evaluation: every output of a procedural, one content each.
+struct Job {
+    /// Content of each output, in the order of `def.outputs`.
+    ids: Vec<ContentId>,
+    /// Format of each output.
+    formats: Vec<wgpu::TextureFormat>,
     def: &'static ProceduralDef,
     key: Key,
-    format: wgpu::TextureFormat,
 }
 
 /// The procedural contents of a project's layers and masks.
@@ -145,15 +147,16 @@ impl Contents {
         def
     }
 
-    /// The contents `set` needs: each channel of its procedural fills (that the
-    /// procedural produces), each procedural fill of its masks.
-    fn wanted(&mut self, set: &TextureSet) -> Vec<Wanted> {
+    /// The evaluations `set` needs: every procedural fill (all the channels its material
+    /// produces, whether the layer uses them or not: one pass writes them all) and every
+    /// procedural fill of its masks.
+    fn jobs(&mut self, set: &TextureSet) -> Vec<Job> {
         let size = set.resolution.pixels();
         let mut layers = Vec::new();
         for layer in &set.stack.layers {
             layer.visit(&mut |layer: &Layer| layers.push(layer.clone()));
         }
-        let mut wanted = Vec::new();
+        let mut jobs = Vec::new();
         for layer in &layers {
             if let LayerKind::Fill {
                 source: FillSource::Procedural(procedural),
@@ -161,25 +164,31 @@ impl Contents {
             } = &layer.kind
                 && let Some(def) = self.find(procedural)
             {
-                for channel in layer.channels.keys() {
-                    let output = Output::Channel(*channel);
-                    if !def.outputs.contains(&output) {
-                        continue;
-                    }
-                    let Some(index) = output.index() else {
-                        continue;
-                    };
-                    wanted.push(Wanted {
-                        id: ContentId::Layer(layer.id, *channel),
+                let channels: Option<Vec<Channel>> = def
+                    .outputs
+                    .iter()
+                    .map(|output| match output {
+                        Output::Channel(channel) => Some(*channel),
+                        Output::Gray => None,
+                    })
+                    .collect();
+                if let Some(channels) = channels {
+                    jobs.push(Job {
+                        ids: channels
+                            .iter()
+                            .map(|channel| ContentId::Layer(layer.id, *channel))
+                            .collect(),
+                        formats: channels
+                            .iter()
+                            .map(|channel| format_of(ChannelKind::of(*channel)))
+                            .collect(),
                         def,
                         key: Key {
                             procedural: procedural.clone(),
                             projection: *projection,
-                            output: index,
                             size,
                             map: 0,
                         },
-                        format: format_of(ChannelKind::of(*channel)),
                     });
                 }
             }
@@ -188,24 +197,23 @@ impl Contents {
                     source: FillSource::Procedural(procedural),
                 } = &entry.effect
                     && let Some(def) = self.find(procedural)
-                    && def.outputs.contains(&Output::Gray)
+                    && def.outputs == [Output::Gray]
                 {
-                    wanted.push(Wanted {
-                        id: ContentId::Mask(layer.id, entry.id),
+                    jobs.push(Job {
+                        ids: vec![ContentId::Mask(layer.id, entry.id)],
+                        formats: vec![wgpu::TextureFormat::R16Float],
                         def,
                         key: Key {
                             procedural: procedural.clone(),
                             projection: Projection::default(),
-                            output: 0,
                             size,
                             map: 0,
                         },
-                        format: wgpu::TextureFormat::R16Float,
                     });
                 }
             }
         }
-        wanted
+        jobs
     }
 
     /// Brings the contents of `set` in line with it, evaluating what changed. Adds the
@@ -221,8 +229,8 @@ impl Contents {
         set: &TextureSet,
         used: &mut HashSet<ContentId>,
     ) {
-        let mut wanted = self.wanted(set);
-        if wanted.is_empty() {
+        let mut jobs = self.jobs(set);
+        if jobs.is_empty() {
             // No procedural content: the surface map is not needed any more.
             if let Some(map) = self.surfaces.remove(&set.id) {
                 pool.release(map.texture);
@@ -268,78 +276,89 @@ impl Contents {
             );
         }
         let generation = self.surfaces[&set.id].generation;
-        for item in &mut wanted {
-            item.key.map = generation;
+        for job in &mut jobs {
+            job.key.map = generation;
         }
-        for item in wanted {
-            used.insert(item.id);
-            let current = self.textures.remove(&item.id);
-            let mut content = match current {
-                Some(content)
-                    if content.format == item.format
-                        && content.key.size == item.key.size
-                        && pool.get(content.texture).is_some() =>
-                {
-                    if content.key == item.key {
-                        self.textures.insert(item.id, content);
-                        continue;
+        for job in jobs {
+            used.extend(job.ids.iter().copied());
+            let current = job.ids.iter().zip(&job.formats).all(|(id, format)| {
+                self.textures.get(id).is_some_and(|content| {
+                    content.key == job.key
+                        && content.format == *format
+                        && pool.get(content.texture).is_some()
+                })
+            });
+            if current {
+                continue;
+            }
+            // Reuse the textures of the right size and format, allocate the others.
+            let mut contents = Vec::with_capacity(job.ids.len());
+            for (id, format) in job.ids.iter().zip(&job.formats) {
+                let content = match self.textures.remove(id) {
+                    Some(content)
+                        if content.format == *format
+                            && content.key.size == job.key.size
+                            && pool.get(content.texture).is_some() =>
+                    {
+                        content
                     }
-                    content
-                }
-                other => {
-                    if let Some(old) = other {
-                        pool.release(old.texture);
+                    other => {
+                        if let Some(old) = other {
+                            pool.release(old.texture);
+                        }
+                        let texture = pool.allocate(
+                            ctx,
+                            &descriptor(*format, job.key.size),
+                            Residency::Discardable,
+                        );
+                        let view = pool
+                            .peek(texture)
+                            .expect("a texture that was just allocated")
+                            .create_view(&Default::default());
+                        Content {
+                            key: job.key.clone(),
+                            texture,
+                            view,
+                            format: *format,
+                        }
                     }
-                    let texture = pool.allocate(
-                        ctx,
-                        &descriptor(item.format, item.key.size),
-                        Residency::Discardable,
-                    );
-                    let view = pool
-                        .peek(texture)
-                        .expect("a texture that was just allocated")
-                        .create_view(&Default::default());
-                    Content {
-                        key: item.key.clone(),
-                        texture,
-                        view,
-                        format: item.format,
-                    }
-                }
-            };
-            content.key = item.key.clone();
+                };
+                contents.push(content);
+            }
             let (mesh, map) = (
                 &self.mesh.as_ref().expect("uploaded above").1,
                 &self.surfaces[&set.id],
             );
-            let uniforms = EvaluationUniforms::new(
-                &item.key.projection,
-                size,
-                mesh.center,
-                mesh.extent,
-                false,
-                item.key.output,
-            );
+            let uniforms =
+                EvaluationUniforms::new(&job.key.projection, size, mesh.center, mesh.extent, false);
+            let targets: Vec<(&wgpu::TextureView, wgpu::TextureFormat)> = contents
+                .iter()
+                .map(|content| (&content.view, content.format))
+                .collect();
             let result = compositor.procedurals().evaluate(
                 ctx,
                 encoder,
-                item.def,
-                &item.def.resolve(&item.key.procedural),
+                job.def,
+                &job.def.resolve(&job.key.procedural),
                 &uniforms,
                 SurfaceInput::Mesh {
                     mesh,
                     material: set.material_index,
                     map: &map.view,
                 },
-                &content.view,
-                item.format,
+                &targets,
             );
             if let Err(error) = result {
-                tracing::error!(id = %item.def.id, %error, "procedural evaluation failed");
-                pool.release(content.texture);
+                tracing::error!(id = %job.def.id, %error, "procedural evaluation failed");
+                for content in contents {
+                    pool.release(content.texture);
+                }
                 continue;
             }
-            self.textures.insert(item.id, content);
+            for (id, mut content) in job.ids.into_iter().zip(contents) {
+                content.key = job.key.clone();
+                self.textures.insert(id, content);
+            }
         }
     }
 

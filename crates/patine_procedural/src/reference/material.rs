@@ -273,15 +273,13 @@ impl Material<'_> {
         self.blended_height(&project(self.e, &moved))
     }
 
-    fn normal(&self, s: &Surface) -> Vec3 {
+    fn normal(&self, s: &Surface, h0: f32) -> Vec3 {
         let e = 0.5 / self.e.size;
         let g = if self.e.kind == 0 || self.e.flat == 1 {
-            let dx = Vec2::new(e, 0.0);
-            let dy = Vec2::new(0.0, e);
             Vec2::new(
-                self.height_near(s, dx, Vec3::ZERO) - self.height_near(s, -dx, Vec3::ZERO),
-                self.height_near(s, dy, Vec3::ZERO) - self.height_near(s, -dy, Vec3::ZERO),
-            ) / (2.0 * e)
+                self.height_near(s, Vec2::new(e, 0.0), Vec3::ZERO) - h0,
+                self.height_near(s, Vec2::new(0.0, e), Vec3::ZERO) - h0,
+            ) / e
         } else {
             let n = s.normal;
             let tangent = s.tangent.xyz();
@@ -289,34 +287,31 @@ impl Material<'_> {
             let b = n.cross(t) * s.tangent.w;
             let step = e * self.e.center[3];
             Vec2::new(
-                self.height_near(s, Vec2::ZERO, t * step)
-                    - self.height_near(s, Vec2::ZERO, -t * step),
-                self.height_near(s, Vec2::ZERO, b * step)
-                    - self.height_near(s, Vec2::ZERO, -b * step),
-            ) / (2.0 * e)
+                self.height_near(s, Vec2::ZERO, t * step) - h0,
+                self.height_near(s, Vec2::ZERO, b * step) - h0,
+            ) / e
         };
         (-g * RELIEF).extend(1.0).normalize()
     }
 }
 
-/// The value the material `id` with resolved `params` gives to output `output` (see
-/// [`crate::def::Output::index`]) on surface `s`: RGBA as the pass writes it.
+/// The outputs of the material `id` with resolved `params` on surface `s`, as the pass
+/// writes them (RGBA), in the order of [`crate::def::Output::index`]: base color,
+/// metallic, roughness, normal, height.
 pub fn evaluate_material(
     id: &str,
     params: &Params,
     e: &EvaluationUniforms,
     s: &Surface,
-) -> [f32; 4] {
+) -> [[f32; 4]; 5] {
     let material = Material { id, params, e };
-    if e.output == 3 {
-        let n = material.normal(s);
-        return [n.x, n.y, n.z, 0.0];
-    }
     let m = material.blended(&project(e, s));
-    match e.output {
-        0 => [m.base_color.x, m.base_color.y, m.base_color.z, 1.0],
-        1 => [m.metallic, 0.0, 0.0, 0.0],
-        2 => [m.roughness, 0.0, 0.0, 0.0],
-        _ => [m.height, 0.0, 0.0, 0.0],
-    }
+    let n = material.normal(s, m.height);
+    [
+        [m.base_color.x, m.base_color.y, m.base_color.z, 1.0],
+        [m.metallic, 0.0, 0.0, 0.0],
+        [m.roughness, 0.0, 0.0, 0.0],
+        [n.x, n.y, n.z, 0.0],
+        [m.height, 0.0, 0.0, 0.0],
+    ]
 }

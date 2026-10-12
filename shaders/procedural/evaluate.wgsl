@@ -15,8 +15,7 @@ struct Evaluation {
     blend: f32,
     // 1: the surface is the unit square (thumbnails), not the mesh.
     flat: u32,
-    // Output: channel index for materials (see `Output`), unused for gray procedurals.
-    output: u32,
+    padding3: u32,
     scale: vec2<f32>,
     offset: vec2<f32>,
     // cos and sin of the rotation.

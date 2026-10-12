@@ -1400,29 +1400,41 @@ impl App {
             return;
         }
         let size = THUMBNAIL_SIZE;
-        let render = |output: u32| -> Option<Vec<[f32; 4]>> {
+        // Every output of the procedural, in one pass, read back.
+        let render = || -> Option<Vec<Vec<[f32; 4]>>> {
             let format = wgpu::TextureFormat::Rgba16Float;
-            let texture = gfx.gpu.device.create_texture(&wgpu::TextureDescriptor {
-                label: Some("thumbnail"),
-                size: wgpu::Extent3d {
-                    width: size,
-                    height: size,
-                    depth_or_array_layers: 1,
-                },
-                mip_level_count: 1,
-                sample_count: 1,
-                dimension: wgpu::TextureDimension::D2,
-                format,
-                usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
-                view_formats: &[],
-            });
+            let textures: Vec<wgpu::Texture> = def
+                .outputs
+                .iter()
+                .map(|_| {
+                    gfx.gpu.device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("thumbnail"),
+                        size: wgpu::Extent3d {
+                            width: size,
+                            height: size,
+                            depth_or_array_layers: 1,
+                        },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format,
+                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
+                            | wgpu::TextureUsages::COPY_SRC,
+                        view_formats: &[],
+                    })
+                })
+                .collect();
+            let views: Vec<wgpu::TextureView> = textures
+                .iter()
+                .map(|texture| texture.create_view(&Default::default()))
+                .collect();
+            let targets: Vec<_> = views.iter().map(|view| (view, format)).collect();
             let uniforms = EvaluationUniforms::new(
                 &patine_core::layer::Projection::default(),
                 size,
                 [0.0; 3],
                 1.0,
                 true,
-                output,
             );
             let mut encoder = gfx.gpu.device.create_command_encoder(&Default::default());
             let result = gfx.compositor.procedurals().evaluate(
@@ -1432,23 +1444,26 @@ impl App {
                 &def.defaults(),
                 &uniforms,
                 SurfaceInput::Flat,
-                &texture.create_view(&Default::default()),
-                format,
+                &targets,
             );
             if let Err(error) = result {
                 tracing::error!(id = %def.id, %error, "thumbnail failed");
                 return None;
             }
             gfx.gpu.queue.submit([encoder.finish()]);
-            patine_gpu::readback::read_rgba16f(&gfx.gpu, &texture).ok()
+            textures
+                .iter()
+                .map(|texture| patine_gpu::readback::read_rgba16f(&gfx.gpu, texture).ok())
+                .collect()
         };
-        let pixels = if def.category == Category::Material {
-            render(0)
-                .zip(render(3))
-                .map(|(base, normal)| thumbnail_pixels(&base, Some(&normal)))
-        } else {
-            render(0).map(|value| thumbnail_pixels(&value, None))
-        };
+        let pixels = render().and_then(|outputs| {
+            if def.category == Category::Material {
+                // Outputs in the order of their index: base color 0, normal 3.
+                Some(thumbnail_pixels(outputs.first()?, Some(outputs.get(3)?)))
+            } else {
+                Some(thumbnail_pixels(outputs.first()?, None))
+            }
+        });
         // A failed thumbnail stays gray instead of being rendered again every frame.
         let pixels = pixels.unwrap_or_else(|| vec![64; (size * size * 4) as usize]);
         let image = egui::ColorImage::from_rgba_unmultiplied([size as usize; 2], &pixels);

@@ -5,7 +5,7 @@
 // This file is therefore not valid on its own; the shader test validates it through
 // every importer. Must match `patine_procedural::reference::material`.
 //
-// The pass renders one channel, chosen by `evaluation.output`: 0 base color, 1 metallic,
+// The pass renders every output at once, to five targets: 0 base color, 1 metallic,
 // 2 roughness, 3 normal (tangent space), 4 height.
 
 // #import procedural/evaluate
@@ -70,43 +70,47 @@ fn height_near(s: Surface, du: vec2<f32>, dp: vec3<f32>) -> f32 {
     return blended_height(project(moved));
 }
 
-// Tangent-space normal from the height gradient, by central differences over half a
-// texel: along U and V for the UV projection, along the tangent and bitangent (scaled to
-// UV-like units by the mesh extent) for the others.
-fn material_normal(s: Surface) -> vec3<f32> {
+// Tangent-space normal from the height gradient, by forward differences over half a texel
+// from the height `h0` at `s`: along U and V for the UV projection, along the tangent and
+// bitangent (scaled to UV-like units by the mesh extent) for the others.
+fn material_normal(s: Surface, h0: f32) -> vec3<f32> {
     let e = 0.5 / evaluation.size;
     var g: vec2<f32>;
     if evaluation.kind == 0u || evaluation.flat == 1u {
-        let dx = vec2<f32>(e, 0.0);
-        let dy = vec2<f32>(0.0, e);
         g = vec2<f32>(
-            height_near(s, dx, vec3<f32>(0.0)) - height_near(s, -dx, vec3<f32>(0.0)),
-            height_near(s, dy, vec3<f32>(0.0)) - height_near(s, -dy, vec3<f32>(0.0)),
-        ) / (2.0 * e);
+            height_near(s, vec2<f32>(e, 0.0), vec3<f32>(0.0)) - h0,
+            height_near(s, vec2<f32>(0.0, e), vec3<f32>(0.0)) - h0,
+        ) / e;
     } else {
         let n = s.normal;
         let t = normalize_or(s.tangent.xyz - n * dot(n, s.tangent.xyz), vec3<f32>(1.0, 0.0, 0.0));
         let b = cross(n, t) * s.tangent.w;
         let step = e * evaluation.center.w;
         g = vec2<f32>(
-            height_near(s, vec2<f32>(0.0), t * step) - height_near(s, vec2<f32>(0.0), -t * step),
-            height_near(s, vec2<f32>(0.0), b * step) - height_near(s, vec2<f32>(0.0), -b * step),
-        ) / (2.0 * e);
+            height_near(s, vec2<f32>(0.0), t * step) - h0,
+            height_near(s, vec2<f32>(0.0), b * step) - h0,
+        ) / e;
     }
     return normalize(vec3<f32>(-g * RELIEF, 1.0));
 }
 
+struct MaterialOutput {
+    @location(0) base_color: vec4<f32>,
+    @location(1) metallic: vec4<f32>,
+    @location(2) roughness: vec4<f32>,
+    @location(3) normal: vec4<f32>,
+    @location(4) height: vec4<f32>,
+}
+
 @fragment
-fn fs_main(in: FullscreenOutput) -> @location(0) vec4<f32> {
+fn fs_main(in: FullscreenOutput) -> MaterialOutput {
     let s = current_surface(in.clip);
-    if evaluation.output == 3u {
-        return vec4<f32>(material_normal(s), 0.0);
-    }
     let m = blended_material(project(s));
-    switch evaluation.output {
-        case 0u: { return vec4<f32>(m.base_color, 1.0); }
-        case 1u: { return vec4<f32>(m.metallic, 0.0, 0.0, 0.0); }
-        case 2u: { return vec4<f32>(m.roughness, 0.0, 0.0, 0.0); }
-        default: { return vec4<f32>(m.height, 0.0, 0.0, 0.0); }
-    }
+    var out: MaterialOutput;
+    out.base_color = vec4<f32>(m.base_color, 1.0);
+    out.metallic = vec4<f32>(m.metallic, 0.0, 0.0, 0.0);
+    out.roughness = vec4<f32>(m.roughness, 0.0, 0.0, 0.0);
+    out.normal = vec4<f32>(material_normal(s, m.height), 0.0);
+    out.height = vec4<f32>(m.height, 0.0, 0.0, 0.0);
+    return out;
 }

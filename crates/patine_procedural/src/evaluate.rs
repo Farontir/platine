@@ -25,8 +25,8 @@ pub struct EvaluationUniforms {
     pub blend: f32,
     /// 1: the surface is the unit square.
     pub flat: u32,
-    /// Output index (materials).
-    pub output: u32,
+    /// Padding.
+    pub padding3: u32,
     /// Projection scale.
     pub scale: [f32; 2],
     /// Projection offset.
@@ -52,7 +52,6 @@ impl EvaluationUniforms {
         center: [f32; 3],
         extent: f32,
         flat: bool,
-        output: u32,
     ) -> Self {
         let (kind, blend) = match projection.kind {
             ProjectionKind::Uv => (0, 0.0),
@@ -70,7 +69,7 @@ impl EvaluationUniforms {
             kind,
             blend,
             flat: u32::from(flat),
-            output,
+            padding3: 0,
             scale: projection.scale,
             offset: projection.offset,
             rotation: [projection.rotation.cos(), projection.rotation.sin()],
@@ -111,6 +110,14 @@ pub enum EvaluateError {
     /// The shader does not compile.
     #[error(transparent)]
     Gpu(#[from] GpuError),
+    /// The pass needs one target per output of the procedural.
+    #[error("{expected} targets needed, {given} given")]
+    Targets {
+        /// Outputs of the procedural.
+        expected: usize,
+        /// Targets given.
+        given: usize,
+    },
 }
 
 /// Pipelines of the procedurals, created on first use for each shader and target format.
@@ -119,7 +126,7 @@ pub struct Procedurals {
     uniforms_layout: wgpu::BindGroupLayout,
     surface_layout: wgpu::BindGroupLayout,
     layout: wgpu::PipelineLayout,
-    pipelines: RefCell<HashMap<(String, wgpu::TextureFormat), wgpu::RenderPipeline>>,
+    pipelines: RefCell<HashMap<(String, Vec<wgpu::TextureFormat>), wgpu::RenderPipeline>>,
     /// Bound as the surface of flat passes.
     empty_buffer: wgpu::Buffer,
     empty_map: wgpu::TextureView,
@@ -211,13 +218,23 @@ impl Procedurals {
         &self,
         ctx: &GpuContext,
         shader: &str,
-        format: wgpu::TextureFormat,
+        formats: &[wgpu::TextureFormat],
     ) -> Result<wgpu::RenderPipeline, GpuError> {
-        let key = (shader.to_owned(), format);
+        let key = (shader.to_owned(), formats.to_vec());
         if let Some(pipeline) = self.pipelines.borrow().get(&key) {
             return Ok(pipeline.clone());
         }
         let module = ctx.create_shader_module(shader)?;
+        let targets: Vec<Option<wgpu::ColorTargetState>> = formats
+            .iter()
+            .map(|format| {
+                Some(wgpu::ColorTargetState {
+                    format: *format,
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })
+            })
+            .collect();
         let pipeline = ctx
             .device
             .create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -236,11 +253,7 @@ impl Procedurals {
                     module: &module,
                     entry_point: Some("fs_main"),
                     compilation_options: Default::default(),
-                    targets: &[Some(wgpu::ColorTargetState {
-                        format,
-                        blend: None,
-                        write_mask: wgpu::ColorWrites::ALL,
-                    })],
+                    targets: &targets,
                 }),
                 multiview_mask: None,
                 cache: None,
@@ -249,8 +262,9 @@ impl Procedurals {
         Ok(pipeline)
     }
 
-    /// Encodes `def` with `params` (resolved values) into `target` (mip 0 of a square
-    /// texture of `format`), for `uniforms` on `surface`.
+    /// Encodes `def` with `params` (resolved values) for `uniforms` on `surface`, in one
+    /// pass writing every output of the procedural: `targets` holds, in the order of
+    /// `def.outputs`, mip 0 of square textures of the same size with their format.
     #[allow(clippy::too_many_arguments)]
     pub fn evaluate(
         &self,
@@ -260,10 +274,16 @@ impl Procedurals {
         params: &Params,
         uniforms: &EvaluationUniforms,
         surface: SurfaceInput<'_>,
-        target: &wgpu::TextureView,
-        format: wgpu::TextureFormat,
+        targets: &[(&wgpu::TextureView, wgpu::TextureFormat)],
     ) -> Result<(), EvaluateError> {
-        let pipeline = self.pipeline(ctx, &def.shader, format)?;
+        if targets.len() != def.outputs.len() {
+            return Err(EvaluateError::Targets {
+                expected: def.outputs.len(),
+                given: targets.len(),
+            });
+        }
+        let formats: Vec<wgpu::TextureFormat> = targets.iter().map(|(_, f)| *f).collect();
+        let pipeline = self.pipeline(ctx, &def.shader, &formats)?;
         let device = &ctx.device;
         let evaluation = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("procedural evaluation"),
@@ -319,17 +339,23 @@ impl Procedurals {
             ],
         });
         self.passes.set(self.passes.get() + 1);
+        let attachments: Vec<Option<wgpu::RenderPassColorAttachment>> = targets
+            .iter()
+            .map(|(view, _)| {
+                Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                        store: wgpu::StoreOp::Store,
+                    },
+                })
+            })
+            .collect();
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("procedural"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view: target,
-                depth_slice: None,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
-                    store: wgpu::StoreOp::Store,
-                },
-            })],
+            color_attachments: &attachments,
             depth_stencil_attachment: None,
             timestamp_writes: None,
             occlusion_query_set: None,

@@ -1,6 +1,10 @@
 //! The procedural materials on the GPU against their CPU reference, texel by texel, for
 //! every output channel, in UV and triplanar projection on a cube and on the flat
 //! surface of the thumbnails.
+//!
+//! The pass writes the five outputs at once, which bounds the bytes per texel of its
+//! targets (32 by default): colors and normals go to `Rgba16Float` as in the compositor,
+//! scalars to `R32Float`; the reference is rounded to f16 where the target is.
 
 use patine_core::layer::{Projection, ProjectionKind};
 use patine_core::mask::ParamValue;
@@ -17,7 +21,15 @@ use patine_procedural::surface::{
 
 const SIZE: u32 = 48;
 
-fn target(ctx: &GpuContext) -> wgpu::Texture {
+/// Format of output `index`: `Rgba16Float` for colors and normals, `R32Float` otherwise.
+fn format(index: usize) -> wgpu::TextureFormat {
+    match index {
+        0 | 3 => wgpu::TextureFormat::Rgba16Float,
+        _ => wgpu::TextureFormat::R32Float,
+    }
+}
+
+fn target(ctx: &GpuContext, format: wgpu::TextureFormat) -> wgpu::Texture {
     ctx.device.create_texture(&wgpu::TextureDescriptor {
         label: Some("material"),
         size: wgpu::Extent3d {
@@ -28,7 +40,7 @@ fn target(ctx: &GpuContext) -> wgpu::Texture {
         mip_level_count: 1,
         sample_count: 1,
         dimension: wgpu::TextureDimension::D2,
-        format: wgpu::TextureFormat::Rgba32Float,
+        format,
         usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
         view_formats: &[],
     })
@@ -65,37 +77,55 @@ gpu_test!(
                 ("triplanar", triplanar, false),
                 ("flat", Projection::default(), true),
             ] {
-                for output in &def.outputs {
-                    let index = output.index().expect("materials produce standard channels");
-                    let uniforms = EvaluationUniforms::new(&projection, SIZE, buffers.center, buffers.extent, flat, index);
-                    let surface = if flat {
-                        SurfaceInput::Flat
-                    } else {
-                        SurfaceInput::Mesh { mesh: &buffers, material: 0, map: &map_view }
-                    };
-                    let texture = target(&ctx);
-                    let mut encoder = ctx.device.create_command_encoder(&Default::default());
-                    procedurals
-                        .evaluate(&ctx, &mut encoder, def, &params, &uniforms, surface, &texture.create_view(&Default::default()), wgpu::TextureFormat::Rgba32Float)
-                        .expect("evaluates");
-                    ctx.queue.submit([encoder.finish()]);
-                    let bytes = readback::read_texture(&ctx, &texture).expect("readback");
-                    let gpu: &[[f32; 4]] = bytemuck::cast_slice(&bytes);
-                    let mut worst = 0.0f32;
-                    for y in 0..SIZE {
-                        for x in 0..SIZE {
-                            let i = (y * SIZE + x) as usize;
-                            let s = if flat {
-                                flat_surface([x, y], SIZE as f32)
-                            } else {
-                                surface_at(&vertices, &indices, entries[i], [x, y], SIZE as f32)
-                            };
-                            let cpu = evaluate_material(&def.id, &params, &uniforms, &s);
+                let uniforms = EvaluationUniforms::new(&projection, SIZE, buffers.center, buffers.extent, flat);
+                let surface = if flat {
+                    SurfaceInput::Flat
+                } else {
+                    SurfaceInput::Mesh { mesh: &buffers, material: 0, map: &map_view }
+                };
+                let textures: Vec<wgpu::Texture> = (0..def.outputs.len()).map(|i| target(&ctx, format(i))).collect();
+                let views: Vec<wgpu::TextureView> = textures.iter().map(|t| t.create_view(&Default::default())).collect();
+                let targets: Vec<_> = views.iter().enumerate().map(|(i, v)| (v, format(i))).collect();
+                let mut encoder = ctx.device.create_command_encoder(&Default::default());
+                procedurals
+                    .evaluate(&ctx, &mut encoder, def, &params, &uniforms, surface, &targets)
+                    .expect("evaluates");
+                ctx.queue.submit([encoder.finish()]);
+                let gpu: Vec<Vec<[f32; 4]>> = textures
+                    .iter()
+                    .map(|t| match t.format() {
+                        wgpu::TextureFormat::Rgba16Float => readback::read_rgba16f(&ctx, t).expect("readback"),
+                        _ => bytemuck::cast_slice::<u8, f32>(&readback::read_texture(&ctx, t).expect("readback"))
+                            .iter()
+                            .map(|v| [*v, 0.0, 0.0, 0.0])
+                            .collect(),
+                    })
+                    .collect();
+                let mut worst = [0.0f32; 5];
+                for y in 0..SIZE {
+                    for x in 0..SIZE {
+                        let i = (y * SIZE + x) as usize;
+                        let s = if flat {
+                            flat_surface([x, y], SIZE as f32)
+                        } else {
+                            surface_at(&vertices, &indices, entries[i], [x, y], SIZE as f32)
+                        };
+                        let cpu = evaluate_material(&def.id, &params, &uniforms, &s);
+                        for (output, values) in gpu.iter().enumerate() {
+                            let half = format(output) == wgpu::TextureFormat::Rgba16Float;
                             for c in 0..4 {
-                                worst = worst.max((gpu[i][c] - cpu[c]).abs());
+                                let expected = if half {
+                                    half::f16::from_f32(cpu[output][c]).to_f32()
+                                } else {
+                                    cpu[output][c]
+                                };
+                                worst[output] = worst[output].max((values[i][c] - expected).abs());
                             }
                         }
                     }
+                }
+                for (output, worst) in def.outputs.iter().zip(worst) {
+                    assert_eq!(output.index().map(|i| i as usize), def.outputs.iter().position(|o| o == output));
                     if worst > 1e-3 {
                         failures.push(format!("{} {name} {output:?}: {worst}", def.id));
                     }

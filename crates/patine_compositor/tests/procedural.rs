@@ -167,8 +167,9 @@ fn cpu(project: &Project, channel: Channel, surface: &Surface, size: u32) -> [f3
         };
         let def = library::find(&instance.id)?;
         let index = Output::Channel(channel).index()?;
-        let uniforms = EvaluationUniforms::new(projection, size, center, extent, false, index);
-        let value = evaluate_material(&def.id, &def.resolve(instance), &uniforms, surface);
+        let uniforms = EvaluationUniforms::new(projection, size, center, extent, false);
+        let value =
+            evaluate_material(&def.id, &def.resolve(instance), &uniforms, surface)[index as usize];
         Some(match ChannelKind::of(channel) {
             ChannelKind::Scalar => [round_f16(value[0]), 0.0, 0.0, 0.0],
             _ => value.map(round_f16),
@@ -184,8 +185,7 @@ fn cpu(project: &Project, channel: Channel, surface: &Surface, size: u32) -> [f3
             return None;
         };
         let def = library::find(&instance.id)?;
-        let uniforms =
-            EvaluationUniforms::new(&Projection::default(), size, center, extent, false, 0);
+        let uniforms = EvaluationUniforms::new(&Projection::default(), size, center, extent, false);
         Some(round_f16(evaluate_gray(
             def,
             &def.resolve(instance),
@@ -270,8 +270,9 @@ gpu_test!(
 );
 
 gpu_test!(
-    /// Editing a material's parameter evaluates only its contents (one pass per channel)
-    /// and blends from its layer; editing nothing evaluates nothing; undo restores.
+    /// Editing a material's parameter evaluates only its contents (one pass writes all
+    /// its outputs) and blends from its layer; editing nothing evaluates nothing; undo
+    /// restores.
     fn contents_are_cached(ctx) {
         let compositor = Compositor::new(&ctx).expect("shaders compile");
         let mut pool = TexturePool::new(u64::MAX);
@@ -282,8 +283,8 @@ gpu_test!(
             document.sync(&ctx, pool, &compositor, project);
             compositor.procedurals().passes() - before
         };
-        // 3 channels of each material, 2 procedural mask fills.
-        assert_eq!(passes(&mut document, &mut pool, &project), 8);
+        // One pass per material, one per procedural mask fill.
+        assert_eq!(passes(&mut document, &mut pool, &project), 4);
         assert_eq!(passes(&mut document, &mut pool, &project), 0);
         let original = gpu(&ctx, &pool, &document, Channel::BaseColor);
 
@@ -296,10 +297,10 @@ gpu_test!(
         history
             .push(&mut project, Box::new(SetFillSource::new(copper, FillSource::Procedural(instance), "copper")))
             .unwrap();
-        assert_eq!(passes(&mut document, &mut pool, &project), 3);
+        assert_eq!(passes(&mut document, &mut pool, &project), 1);
         assert_ne!(gpu(&ctx, &pool, &document, Channel::BaseColor), original);
         history.undo(&mut project).unwrap();
-        assert_eq!(passes(&mut document, &mut pool, &project), 3);
+        assert_eq!(passes(&mut document, &mut pool, &project), 1);
         assert_eq!(gpu(&ctx, &pool, &document, Channel::BaseColor), original);
         // Unused contents are released with the layers.
         let memory = document.content_memory();

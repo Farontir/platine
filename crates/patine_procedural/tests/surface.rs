@@ -74,8 +74,10 @@ fn evaluate_with(
             params,
             uniforms,
             surface,
-            &target.create_view(&Default::default()),
-            wgpu::TextureFormat::R32Float,
+            &[(
+                &target.create_view(&Default::default()),
+                wgpu::TextureFormat::R32Float,
+            )],
         )
         .expect("evaluates");
     ctx.queue.submit([encoder.finish()]);
@@ -214,7 +216,7 @@ gpu_test!(
             for (projection_name, projection) in projections() {
                 for id in ["noise.perlin", "noise.fbm"] {
                     let def = library::find(id).expect("shipped");
-                    let uniforms = EvaluationUniforms::new(&projection, size, buffers.center, buffers.extent, false, 0);
+                    let uniforms = EvaluationUniforms::new(&projection, size, buffers.center, buffers.extent, false);
                     let surface = SurfaceInput::Mesh { mesh: &buffers, material: 0, map: &map_view };
                     let gpu = evaluate(&ctx, &procedurals, id, &uniforms, surface);
                     let mut worst = 0.0f32;
@@ -234,7 +236,7 @@ gpu_test!(
         }
         // The flat surface of the thumbnails.
         let def = library::find("pattern.bricks").expect("shipped");
-        let uniforms = EvaluationUniforms::new(&Projection::default(), size, [0.0; 3], 1.0, true, 0);
+        let uniforms = EvaluationUniforms::new(&Projection::default(), size, [0.0; 3], 1.0, true);
         let gpu = evaluate(&ctx, &procedurals, "pattern.bricks", &uniforms, SurfaceInput::Flat);
         for y in 0..size {
             for x in 0..size {
@@ -357,7 +359,7 @@ gpu_test!(
         let mut params = library::find("noise.perlin").expect("shipped").defaults();
         params.insert("scale".into(), patine_core::mask::ParamValue::Int(2));
         let run = |projection: Projection| {
-            let uniforms = EvaluationUniforms::new(&projection, size, buffers.center, buffers.extent, false, 0);
+            let uniforms = EvaluationUniforms::new(&projection, size, buffers.center, buffers.extent, false);
             let texels = evaluate_with(&ctx, &procedurals, "noise.perlin", &params, &uniforms, surface);
             seam_and_step(&texels, &map_texels, size, &seams)
         };
