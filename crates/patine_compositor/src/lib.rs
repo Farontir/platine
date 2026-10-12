@@ -5,5 +5,6 @@
 //! the document.
 
 pub mod compositor;
+pub mod content;
 pub mod gpu_document;
 pub mod reference;

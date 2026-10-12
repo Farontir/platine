@@ -4,6 +4,8 @@
 //! The GPU is only a cache: everything here is derived from the project. `sync` compares
 //! the project with what was last evaluated:
 //! - allocation: textures follow the resolution and the channels of each texture set;
+//! - contents: each procedural fill has a texture per channel (see [`crate::content`]),
+//!   evaluated again only when its procedural, parameters or projection change;
 //! - masks: each masked layer has an `R16Float` texture, evaluated again only when its
 //!   mask stack changes;
 //! - evaluation: for each channel, the first top-level layer whose contribution to that
@@ -25,6 +27,7 @@ use patine_gpu::pool::{Residency, TextureId, TexturePool, full_mip_count, textur
 use patine_gpu::{GpuContext, wgpu};
 
 use crate::compositor::{BlendStep, Compositor, Ping, Region, Source};
+use crate::content::{ContentId, Contents};
 use crate::reference::ChannelKind;
 
 /// GPU format of a channel format.
@@ -189,6 +192,8 @@ pub struct GpuDocument {
     sets: Vec<GpuTextureSet>,
     /// Masks of the masked layers of every texture set (identifiers are project-wide).
     masks: HashMap<LayerId, MaskTexture>,
+    /// Contents of the procedural fills and mask fills.
+    contents: Contents,
     scratch: Scratch,
 }
 
@@ -283,6 +288,7 @@ struct Evaluation<'a> {
     ctx: &'a GpuContext,
     compositor: &'a Compositor,
     masks: &'a HashMap<LayerId, MaskTexture>,
+    contents: &'a Contents,
     channel: Channel,
     kind: ChannelKind,
     size: u32,
@@ -325,6 +331,24 @@ impl Evaluation<'_> {
                     };
                     self.blend(encoder, pool, pair, &step);
                 }
+                LayerKind::Fill {
+                    source: FillSource::Procedural(_),
+                    ..
+                } => {
+                    // Absent for channels the procedural does not produce.
+                    let Some(content) =
+                        self.contents.view(ContentId::Layer(layer.id, self.channel))
+                    else {
+                        continue;
+                    };
+                    let step = BlendStep {
+                        mode: blend.mode,
+                        opacity: blend.opacity,
+                        source: Source::Texture(content),
+                        mask,
+                    };
+                    self.blend(encoder, pool, pair, &step);
+                }
                 LayerKind::Folder { children } if blend.mode != BlendMode::Disable => {
                     // The children compose onto a copy of the composition below.
                     let slot = 2 * (depth + 1);
@@ -345,7 +369,7 @@ impl Evaluation<'_> {
                     };
                     self.blend(encoder, pool, pair, &step);
                 }
-                // Paint, procedural and image content, instances: later milestones.
+                // Paint and image content, instances: later milestones.
                 _ => {}
             }
         }
@@ -395,6 +419,17 @@ impl GpuDocument {
         self.masks.get(&id).map(|mask| &mask.view)
     }
 
+    /// Surface map of texture set `set` (an `R32Uint` texture in the pool), built when
+    /// the set has procedural content.
+    pub fn surface_map(&self, set: TextureSetId) -> Option<TextureId> {
+        self.contents.surface_map(set)
+    }
+
+    /// Memory of the procedural contents and surface maps, in bytes.
+    pub fn content_memory(&self) -> u64 {
+        self.contents.memory()
+    }
+
     /// Memory of the mask textures, in bytes.
     pub fn mask_memory(&self) -> u64 {
         self.masks
@@ -413,6 +448,7 @@ impl GpuDocument {
         for (_, mask) in self.masks.drain() {
             pool.release(mask.texture);
         }
+        self.contents.clear(pool);
         self.scratch.release(pool);
     }
 
@@ -436,8 +472,18 @@ impl GpuDocument {
         // Texture sets of the project, in its order; the others are released.
         let mut previous = std::mem::take(&mut self.sets);
         let mut masked = HashSet::new();
+        let mut used = HashSet::new();
         for set in &project.texture_sets {
             let size = set.resolution.pixels();
+            self.contents.sync_set(
+                ctx,
+                pool,
+                compositor,
+                &mut encoder,
+                &project.mesh,
+                set,
+                &mut used,
+            );
             if self.sync_masks(ctx, pool, compositor, &mut encoder, set, &mut masked) {
                 changed.push(set.id);
             }
@@ -528,6 +574,8 @@ impl GpuDocument {
             }
             keep
         });
+        let sets: Vec<TextureSetId> = project.texture_sets.iter().map(|set| set.id).collect();
+        self.contents.release_unused(pool, &used, &sets);
         ctx.queue.submit([encoder.finish()]);
         changed
     }
@@ -592,19 +640,21 @@ impl GpuDocument {
                 }
             };
             mask.stack = stack.clone();
-            self.evaluate_mask(ctx, pool, compositor, encoder, &mask);
+            self.evaluate_mask(ctx, pool, compositor, encoder, id, &mask);
             self.masks.insert(id, mask);
         }
         allocated
     }
 
-    /// Evaluates `mask.stack` into `mask.texture`, mips included.
+    /// Evaluates `mask.stack`, the mask of layer `layer`, into `mask.texture`, mips
+    /// included.
     fn evaluate_mask(
         &mut self,
         ctx: &GpuContext,
         pool: &mut TexturePool,
         compositor: &Compositor,
         encoder: &mut wgpu::CommandEncoder,
+        layer: LayerId,
         mask: &MaskTexture,
     ) {
         let target = pool
@@ -633,7 +683,8 @@ impl GpuDocument {
                 read: &read,
                 write: &write,
             };
-            if compositor.mask_effect(ctx, encoder, ping, entry, &region) {
+            let source = self.contents.view(ContentId::Mask(layer, entry.id));
+            if compositor.mask_effect(ctx, encoder, ping, entry, source, &region) {
                 pair = (pair.1, pair.0);
             }
         }
@@ -681,6 +732,7 @@ impl GpuDocument {
             ctx,
             compositor,
             masks: &self.masks,
+            contents: &self.contents,
             channel,
             kind,
             size: texture.size,

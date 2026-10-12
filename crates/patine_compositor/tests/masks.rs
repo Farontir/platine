@@ -88,6 +88,7 @@ fn run(
             write: &target.create_view(&Default::default()),
         },
         entry,
+        None,
         &Region::full(SIZE),
     );
     ctx.queue.submit([encoder.finish()]);

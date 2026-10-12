@@ -4,9 +4,11 @@
 //! so a pass restricted to some tiles (scissor rectangles) only needs those tiles of A.
 
 use bytemuck::{Pod, Zeroable};
-use patine_core::layer::BlendMode;
+use patine_core::layer::{BlendMode, FillSource};
 use patine_core::mask::{FilterKind, MaskEffect, MaskEffectEntry};
 use patine_gpu::{GpuContext, GpuError, wgpu};
+use patine_procedural::evaluate::Procedurals;
+use patine_procedural::surface::SurfaceBuilder;
 use wgpu::util::DeviceExt as _;
 
 use crate::reference::{ChannelKind, mode_index};
@@ -161,6 +163,9 @@ struct Pipelines {
 pub struct Compositor {
     blend_layout: wgpu::BindGroupLayout,
     downsample_layout: wgpu::BindGroupLayout,
+    mask_layout: wgpu::BindGroupLayout,
+    procedurals: Procedurals,
+    surfaces: SurfaceBuilder,
     rgba: Pipelines,
     scalar: Pipelines,
     /// Mask effect pass (`R16Float`).
@@ -248,6 +253,10 @@ impl Compositor {
             label: Some("compositor downsample"),
             entries: &[uniform_entry(), texture_entry(1)],
         });
+        let mask_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compositor mask"),
+            entries: &[uniform_entry(), texture_entry(1), texture_entry(2)],
+        });
         let blend_module = ctx.create_shader_module("compositor/blend")?;
         let downsample_module = ctx.create_shader_module("compositor/downsample")?;
         let mask_module = ctx.create_shader_module("compositor/mask_effect")?;
@@ -290,19 +299,27 @@ impl Compositor {
         Ok(Self {
             rgba: pipelines(wgpu::TextureFormat::Rgba16Float),
             scalar: pipelines(wgpu::TextureFormat::R16Float),
-            // The mask pass has the layout of the downsample pass: uniforms and one texture.
-            mask: pipeline(
-                &mask_module,
-                &downsample_layout,
-                wgpu::TextureFormat::R16Float,
-            ),
+            mask: pipeline(&mask_module, &mask_layout, wgpu::TextureFormat::R16Float),
             white: pixel(ctx, wgpu::TextureFormat::R16Float, 1.0),
             unused: pixel(ctx, wgpu::TextureFormat::R16Float, 0.0),
             blend_layout,
             downsample_layout,
+            mask_layout,
+            procedurals: Procedurals::new(ctx),
+            surfaces: SurfaceBuilder::new(ctx)?,
             passes: std::cell::Cell::new(0),
             mask_passes: std::cell::Cell::new(0),
         })
+    }
+
+    /// The pipelines of the procedurals.
+    pub fn procedurals(&self) -> &Procedurals {
+        &self.procedurals
+    }
+
+    /// The pipelines building surface maps.
+    pub fn surfaces(&self) -> &SurfaceBuilder {
+        &self.surfaces
     }
 
     /// Number of mask effect passes encoded since creation (tests of the mask cache).
@@ -403,15 +420,19 @@ impl Compositor {
     }
 
     /// Encodes `ping.write = entry(ping.read)` on the tiles of `region`, for a mask
-    /// (`R16Float` textures). Returns `false` without encoding anything when the effect
-    /// leaves the mask unchanged: hidden, disabled, or evaluated in a later milestone
-    /// (see [`crate::reference::mask_source`]); the composition then stays in `ping.read`.
+    /// (`R16Float` textures). A procedural fill reads `source` (its evaluated content, at
+    /// the mask's size). Returns `false` without encoding anything when the effect leaves
+    /// the mask unchanged: hidden, disabled, a procedural fill without content, or an
+    /// effect of a later milestone (see [`crate::reference::mask_source`]); the
+    /// composition then stays in `ping.read`.
+    #[allow(clippy::too_many_arguments)]
     pub fn mask_effect(
         &self,
         ctx: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         ping: Ping<'_>,
         entry: &MaskEffectEntry,
+        source: Option<&wgpu::TextureView>,
         region: &Region,
     ) -> bool {
         if !entry.visible || entry.blend == BlendMode::Disable || region.is_empty() {
@@ -423,6 +444,14 @@ impl Compositor {
             levels_out: [0.0; 4],
         };
         match &entry.effect {
+            MaskEffect::Fill {
+                source: FillSource::Procedural(_),
+            } => {
+                if source.is_none() {
+                    return false;
+                }
+                uniforms.params[2] = 3.0;
+            }
             MaskEffect::Fill { .. } => match entry.effect.fill_value() {
                 Some(value) => uniforms.params[3] = value,
                 None => return false,
@@ -448,7 +477,7 @@ impl Compositor {
             });
         let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("compositor mask"),
-            layout: &self.downsample_layout,
+            layout: &self.mask_layout,
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
@@ -457,6 +486,10 @@ impl Compositor {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(ping.read),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(source.unwrap_or(&self.unused)),
                 },
             ],
         });

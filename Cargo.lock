@@ -2419,7 +2419,10 @@ dependencies = [
  "half",
  "patine_core",
  "patine_gpu",
+ "patine_mesh",
+ "patine_procedural",
  "proptest",
+ "tracing",
 ]
 
 [[package]]

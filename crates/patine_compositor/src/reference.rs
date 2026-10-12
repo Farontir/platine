@@ -6,6 +6,7 @@
 //! where a mode's formula clamps. Normals are tangent-space unit vectors, not encoded.
 
 use patine_core::channel::Channel;
+use patine_core::ids::{EffectId, LayerId};
 use patine_core::layer::{BlendMode, FillSource, Layer, LayerKind};
 use patine_core::mask::{FilterKind, LevelsParams, MaskEffect, MaskEffectEntry, MaskStack};
 
@@ -330,10 +331,22 @@ pub fn mask_source(effect: &MaskEffect, m: f32) -> Option<f32> {
 /// The mask value after `entry` over the mask below `m`:
 /// `clamp(mix(m, blend(m, e), opacity), 0, 1)` with the scalar blend modes.
 pub fn mask_effect(entry: &MaskEffectEntry, m: f32) -> f32 {
+    mask_effect_from(entry, m, None)
+}
+
+/// [`mask_effect`] where a procedural fill has the value `procedural` at this texel
+/// (`None`: no content, the effect is skipped).
+pub fn mask_effect_from(entry: &MaskEffectEntry, m: f32, procedural: Option<f32>) -> f32 {
     if !entry.visible {
         return m;
     }
-    let Some(e) = mask_source(&entry.effect, m) else {
+    let e = match &entry.effect {
+        MaskEffect::Fill {
+            source: FillSource::Procedural(_),
+        } => procedural,
+        effect => mask_source(effect, m),
+    };
+    let Some(e) = e else {
         return m;
     };
     let blended = apply(
@@ -348,21 +361,25 @@ pub fn mask_effect(entry: &MaskEffectEntry, m: f32) -> f32 {
 
 /// Value of a mask: its initial value, then each effect from the bottom.
 pub fn mask(stack: &MaskStack) -> f32 {
-    mask_with(stack, &|v| v)
+    mask_with(stack, &|v| v, &|_| None)
 }
 
 /// [`mask`] with every intermediate value rounded to f16, as the GPU stores the mask in
 /// an `R16Float` texture.
 pub fn mask_stored(stack: &MaskStack) -> f32 {
-    mask_with(stack, &round_f16)
+    mask_with(stack, &round_f16, &|_| None)
 }
 
-fn mask_with(stack: &MaskStack, store: &dyn Fn(f32) -> f32) -> f32 {
+fn mask_with(
+    stack: &MaskStack,
+    store: &dyn Fn(f32) -> f32,
+    procedural: &dyn Fn(EffectId) -> Option<f32>,
+) -> f32 {
     stack
         .effects
         .iter()
         .fold(store(stack.initial_value()), |m, entry| {
-            store(mask_effect(entry, m))
+            store(mask_effect_from(entry, m, procedural(entry.id)))
         })
 }
 
@@ -373,7 +390,14 @@ fn mask_with(stack: &MaskStack, store: &dyn Fn(f32) -> f32) -> f32 {
 /// A layer's mask M scales its opacity: `weight = M × opacity`.
 /// Layers that do not affect `channel`, hidden layers and non-uniform content are skipped.
 pub fn composite(layers: &[Layer], channel: Channel, start: [f32; 4]) -> [f32; 4] {
-    composite_with(layers, channel, start, &|v| v, &mask)
+    composite_with(
+        layers,
+        channel,
+        start,
+        &|v| v,
+        &|layer| layer.mask.as_ref().map_or(1.0, mask),
+        &|_, _| None,
+    )
 }
 
 /// [`composite`] with every intermediate value rounded to f16, as the GPU stores each
@@ -384,7 +408,39 @@ pub fn composite_stored(layers: &[Layer], channel: Channel, start: [f32; 4]) -> 
         channel,
         start.map(round_f16),
         &|v| v.map(round_f16),
-        &mask_stored,
+        &|layer| layer.mask.as_ref().map_or(1.0, mask_stored),
+        &|_, _| None,
+    )
+}
+
+/// The procedural contents at one texel, as stored by the GPU (rounded to f16).
+pub struct Texel<'a> {
+    /// Value of channel `channel` of the procedural fill layer `layer`, if it has one.
+    pub content: &'a dyn Fn(LayerId, Channel) -> Option<[f32; 4]>,
+    /// Value of the procedural fill `effect` of the mask of layer `layer`.
+    pub mask_fill: &'a dyn Fn(LayerId, EffectId) -> Option<f32>,
+}
+
+/// [`composite_stored`] at one texel, with its procedural fills and procedural mask fills.
+pub fn composite_texel(
+    layers: &[Layer],
+    channel: Channel,
+    start: [f32; 4],
+    texel: &Texel<'_>,
+) -> [f32; 4] {
+    composite_with(
+        layers,
+        channel,
+        start.map(round_f16),
+        &|v| v.map(round_f16),
+        &|layer| {
+            layer.mask.as_ref().map_or(1.0, |stack| {
+                mask_with(stack, &round_f16, &|effect| {
+                    (texel.mask_fill)(layer.id, effect)
+                })
+            })
+        },
+        &|layer, channel| (texel.content)(layer.id, channel),
     )
 }
 
@@ -393,7 +449,8 @@ fn composite_with(
     channel: Channel,
     start: [f32; 4],
     store: &dyn Fn([f32; 4]) -> [f32; 4],
-    mask_of: &dyn Fn(&MaskStack) -> f32,
+    mask_of: &dyn Fn(&Layer) -> f32,
+    content: &dyn Fn(&Layer, Channel) -> Option<[f32; 4]>,
 ) -> [f32; 4] {
     let kind = ChannelKind::of(channel);
     let mut dst = start;
@@ -401,7 +458,7 @@ fn composite_with(
         let Some(blend) = layer.channels.get(&channel) else {
             continue;
         };
-        let weight = layer.mask.as_ref().map_or(1.0, mask_of) * blend.opacity;
+        let weight = mask_of(layer) * blend.opacity;
         match &layer.kind {
             LayerKind::Fill {
                 source: FillSource::Uniform(values),
@@ -411,11 +468,19 @@ fn composite_with(
                     dst = store(apply(blend.mode, kind, dst, *src, weight));
                 }
             }
+            LayerKind::Fill {
+                source: FillSource::Procedural(_),
+                ..
+            } => {
+                if let Some(src) = content(layer, channel) {
+                    dst = store(apply(blend.mode, kind, dst, src, weight));
+                }
+            }
             LayerKind::Folder { children } if blend.mode != BlendMode::Disable => {
-                let inner = composite_with(children, channel, dst, store, mask_of);
+                let inner = composite_with(children, channel, dst, store, mask_of, content);
                 dst = store(apply(BlendMode::Normal, kind, dst, inner, weight));
             }
-            // Paint, procedural and image content, instances: later milestones.
+            // Paint and image content, instances: later milestones.
             _ => {}
         }
     }
