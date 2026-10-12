@@ -4,7 +4,7 @@ Run from the repository root after capture_tutorial.py:
     python scripts/manual_tests/build_tutorial.py
 
 Writes manual_tests/tutorial/ (HTML and cropped images) and
-manual_tests/Patine-tutoriel-M0-M6.pdf, printed by Microsoft Edge (or Chrome) headless.
+manual_tests/Patine-tutoriel-M0-M7.pdf, printed by Microsoft Edge (or Chrome) headless.
 """
 
 import html
@@ -19,7 +19,7 @@ from PIL import Image
 CAPTURES = os.path.join("manual_tests", "captures")
 OUT = os.path.join("manual_tests", "tutorial")
 IMAGES = os.path.join(OUT, "img")
-PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M6.pdf")
+PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M7.pdf")
 
 # Regions of the 1600 x 900 captures.
 FULL = None
@@ -34,6 +34,7 @@ HISTORY = (1178, 405, 1600, 575)
 RECOVERY = (520, 380, 1080, 540)
 LAYERS = (1178, 30, 1600, 215)
 PROPERTIES = (1178, 405, 1600, 862)
+LIBRARY = (10, 640, 1180, 868)
 
 BROWSERS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -147,7 +148,7 @@ OPTIONS = [
     ["<code>[mesh]</code>", "ouvre ce mesh comme projet"],
     ["<code>--language fr|en</code>", "langue de l'interface"],
     ["<code>--window LxH</code>", "taille de la fenêtre"],
-    ["<code>--tab PANNEAU</code>", "met un panneau au premier plan (texture-sets, display, console, layers, properties, history…)"],
+    ["<code>--tab PANNEAU</code>", "met un panneau au premier plan (texture-sets, display, console, layers, properties, history, library…)"],
     ["<code>--hdri CHEMIN|studio</code>", "environnement"],
     ["<code>--rotation DEG</code>, <code>--exposure EV</code>", "rotation de l'environnement, exposition"],
     ["<code>--tonemap agx|aces|neutral|linear</code>", "opérateur de tone mapping"],
@@ -162,6 +163,7 @@ OPTIONS = [
     ["<code>--capture PNG</code>, <code>--capture-frames N</code>", "enregistre la fenêtre en PNG puis quitte"],
     ["<code>projet.patine</code>", "ouvre un projet au lieu d'importer un mesh"],
     ["<code>--edit rotation=DEG|exposure=EV|rename=SET:NOM|undo=N</code>", "applique des commandes au projet ouvert (une entrée d'historique chacune)"],
+    ["<code>--edit material=ID|mask-procedural=ID|param=NOM:VALEUR|projection=TYPE,ÉCHELLE</code>", "ajoute un matériau procédural au-dessus de la sélection, ou un bruit ou motif au masque sélectionné ; règle un paramètre ou la projection de la sélection (M7)"],
     ["<code>--edit mask=black|white|mask-fill=V,MODE,OPACITÉ|mask-levels=A,B,G,C,D|mask-invert=</code>", "donne un masque au calque sélectionné, puis lui ajoute un fill, un levels ou une inversion au-dessus de l'effet sélectionné (M6)"],
     ["<code>--edit fill=R,V,B,ROUGHNESS|mode=MODE,OPACITÉ|group=</code>", "ajoute un fill au-dessus de la sélection et le sélectionne ; règle le mélange de la couleur de base du calque sélectionné ; le groupe dans un dossier (M5)"],
     ["<code>--autosave-interval SECS</code>", "délai entre deux autosaves (300 par défaut)"],
@@ -178,7 +180,7 @@ def body():
         '<div class="kicker">Tutoriel et cahier de tests manuels</div>'
         "<h1>Patine</h1>"
         '<p class="subtitle">Texturing PBR par calques sur mesh 3D<br>'
-        "Fonctionnalités des jalons M0 à M6</p>"
+        "Fonctionnalités des jalons M0 à M7</p>"
         + figure("helmet_texture_sets", FULL, "full", "Le casque d'aviateur importé, panneau Texture sets au premier plan.", "92%")
         + '<p class="meta">Version 0.1.0 — 11 octobre 2026 — captures réalisées sur RTX 3080 Ti (Vulkan), '
         "interface en français, fenêtre 1600 × 900.</p></section>")
@@ -193,6 +195,7 @@ def body():
         "<li>M4 — Texture sets et canaux : valeurs par défaut, modes d'affichage, vue 2D</li>"
         "<li>M5 — Calques : fills, dossiers, blend modes et opacité par canal</li>"
         "<li>M6 — Masques : masque noir ou blanc, fill, levels, inversion, affichage du masque</li>"
+        "<li>M7 — Bibliothèque procédurale : matériaux, bruits et motifs, projections</li>"
         "<li>Checklist complète des tests manuels</li>"
         "<li>Annexe : options de lancement et régénération de ce document</li>"
         "</ol>"
@@ -783,8 +786,96 @@ def body():
         + "<p>Budget : moins de 100 ms (RTX 3080 Ti) et moins de 250 ms (RTX A2000, <b>à mesurer</b>).</p>"
         + "</section>")
 
-    # 9. Checklist.
-    add("<section><h2>9. Checklist complète des tests manuels</h2>"
+    # 9. M7.
+    add("<section><h2>9. M7 — Bibliothèque procédurale</h2>"
+        "<p>Les <b>procéduraux</b> sont calculés par la carte graphique au lieu d'être peints. Ce sont des "
+        "matériaux complets (couleur, metallic, roughness, normale, hauteur) ou des bruits et motifs en niveaux "
+        "de gris pour les masques. Ils sont paramétrables et pilotés par une <b>graine</b>, et ils se répètent "
+        "sans raccord visible. Leur contenu n'est recalculé que quand un paramètre, la projection ou la "
+        "résolution change.</p>"
+        "<h3>9.1 Panneau Bibliothèque</h3>"
+        "<p>Le panneau <b>Bibliothèque</b>, en bas, présente les 5 matériaux, puis les 8 bruits et les 8 motifs, "
+        "chacun avec une vignette calculée par son propre shader. Un double-clic sur un matériau l'ajoute en "
+        "calque au-dessus de la sélection, sur tous les canaux qu'il produit. Un double-clic sur un bruit ou un "
+        "motif l'ajoute au masque du calque sélectionné.</p>"
+        + figure("m7_library", LIBRARY, "library", "La bibliothèque : matériaux, puis bruits et motifs pour les masques.")
+        + test(["Ouvrir le casque, choisir LeatherPartsMat, onglet Bibliothèque.",
+                "Double-cliquer sur chaque matériau, puis Ctrl+Z."],
+               "Chaque vignette correspond à son nom ; le calque apparaît avec l'icône de cube et le cuir prend "
+               "l'aspect du matériau ; Ctrl+Z le retire.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>9.2 Les cinq matériaux</h3>"
+        "<p>Acier brossé, cuivre (avec oxydation), plastique grainé, bois et béton. Chaque matériau calcule ses "
+        "canaux en une seule passe. La normale vient du relief de sa hauteur.</p>"
+        + '<div class="grid c2">'
+        + figure("m7_steel", (330, 61, 860, 628), "view", "Acier brossé.")
+        + figure("m7_copper", (330, 61, 860, 628), "view", "Cuivre, oxydation 0,5, triplanaire.")
+        + figure("m7_plastic", (330, 61, 860, 628), "view", "Plastique grainé.")
+        + figure("m7_wood", (330, 61, 860, 628), "view", "Bois, triplanaire.")
+        + "</div>"
+        + "</section>")
+
+    add("<section>"
+        "<h3>9.3 Paramètres générés</h3>"
+        "<p>Le panneau Propriétés se construit à partir de la description du procédural. Les curseurs servent "
+        "aux nombres, la case aux interrupteurs, et la liste aux options. La couleur ouvre un sélecteur ; la "
+        "graine a un bouton dé qui en tire une nouvelle. Un geste sur un curseur donne une seule entrée "
+        "d'historique.</p>"
+        + '<div class="grid c2a">'
+        + figure("m7_seed", (330, 61, 860, 628), "view", "Béton, graine 4242, taches 0,9.")
+        + figure("m7_library", PROPERTIES, "props", "Propriétés du cuivre : paramètres puis projection.")
+        + "</div>"
+        + test(["Sur un calque de béton, faire glisser Pores puis Taches ; cliquer le dé de la graine.",
+                "Regarder l'Historique, puis Ctrl+Z."],
+               "Le rendu suit en direct, sans saccade ; la graine change la répartition des taches sans changer "
+               "l'aspect général ; un geste donne une entrée « Contenu de … ».")
+        + "</section>")
+
+    add("<section>"
+        "<h3>9.4 Projections</h3>"
+        "<p>La section <b>Projection</b> a cinq types :</p>"
+        "<ul><li><b>UV</b> : par défaut, suit le dépliage ;</li>"
+        "<li><b>triplanaire</b> : trois projections planes fondues selon l'orientation de la surface, sans "
+        "couture ni étirement, le fondu réglant la largeur des transitions ;</li>"
+        "<li><b>planaire</b> (face à +Z), <b>sphérique</b> et <b>cylindrique</b>.</li></ul>"
+        "<p>L'échelle, la rotation et le décalage s'appliquent à toutes. En UV, une échelle entière garde les "
+        "procéduraux tileables.</p>"
+        + '<div class="grid c2">'
+        + figure("m7_suitcase_uv", (14, 61, 1174, 628), "view", "Bois en UV : les cernes suivent chaque îlot.")
+        + figure("m7_suitcase_triplanar", (14, 61, 1174, 628), "view", "Bois en triplanaire : continu d'une face à l'autre.")
+        + "</div>"
+        + test(["Sur la valise, ajouter Bois ; passer la projection de UV à Triplanaire, puis régler le fondu.",
+                "Essayer Sphérique et Cylindrique, l'échelle, la rotation et le décalage."],
+               "En triplanaire, aucune couture ni étirement ; le fondu adoucit les transitions entre faces.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>9.5 Bruits et motifs dans les masques</h3>"
+        "<p><b>Clic droit sur un masque</b> › « Ajouter un fill procédural » › un bruit ou un motif, ou double-clic "
+        "dans la bibliothèque. Le masque cesse alors d'être uniforme, et la touche M le montre.</p>"
+        + '<div class="grid c2a">'
+        + figure("m7_mask", (330, 61, 860, 628), "view", "Fill rouge masqué par un bruit de Perlin (échelle 6).")
+        + figure("m7_mask_view", (330, 61, 860, 628), "view", "Le masque (touche M).")
+        + "</div>"
+        + test(["Fill rouge, masque noir, puis Ajouter un fill procédural › Bruit de Perlin.",
+                "Régler son échelle ; ajouter un levels au-dessus pour durcir les taches ; touche M."],
+               "Le rouge apparaît par taches qui suivent le bruit ; le levels les contraste ; le mode masque montre "
+               "le même motif en gris.")
+        + "<h3>9.6 Mesure</h3>"
+        + code("cargo run --release -p patine_cli -- bench procedural [--material ID] [--triplanar]")
+        + "<p>Un matériau sous 29 fills, sur une sphère en 4096², avec 5 canaux. Chaque mesure modifie un "
+        "paramètre, attente GPU comprise. Mesures sur la RTX 3080 Ti :</p>"
+        + table(["Matériau", "Projection", "Paramètre modifié"],
+                [["Béton", "UV", "52 ms"],
+                 ["Bois", "UV", "45 ms"],
+                 ["Cuivre", "triplanaire", "73 ms"]])
+        + "<p>Budget : un paramètre modifié se voit en moins de 100 ms (RTX A2000 <b>à mesurer</b>).</p>"
+        + "</section>")
+
+    # 10. Checklist.
+    add("<section><h2>10. Checklist complète des tests manuels</h2>"
         "<h3>M0 — Fondations</h3>"
         + checklist(["<code>cargo run -p patine_app</code> ouvre une fenêtre sans erreur dans le terminal.",
                      "Les 9 panneaux sont présents ; on peut les détacher, les déplacer et les réancrer.",
@@ -858,10 +949,21 @@ def body():
                      "Suppr sur un effet, puis sur le masque ; Ctrl+Z et Ctrl+Y sur chaque opération.",
                      "Enregistrer, rouvrir : masques identiques.",
                      "<code>patine_cli bench compositor --masks</code> sur la RTX A2000 : moins de 250 ms."])
+        + "<h3>M7 — Bibliothèque procédurale</h3>"
+        + checklist(["Bibliothèque : chaque vignette correspond à son nom ; un double-clic ajoute le matériau en "
+                     "calque sur le casque et sur la valise.",
+                     "Régler les paramètres d'un matériau : le rendu suit en direct, une entrée d'historique par geste.",
+                     "Bouton dé de la graine : le motif change, l'aspect général reste.",
+                     "Projection triplanaire contre UV sur la valise : pas de couture ni d'étirement en triplanaire.",
+                     "Clic droit sur un masque › Ajouter un fill procédural › un bruit : le calque apparaît par "
+                     "taches ; touche M pour voir le masque.",
+                     "Ctrl+Z et Ctrl+Y sur chaque opération ; enregistrer, rouvrir : identique.",
+                     "<code>patine_cli bench procedural --triplanar --material material.copper</code> sur la RTX "
+                     "A2000 : moins de 100 ms."])
         + "</section>")
 
     # Appendix.
-    add("<section><h2>10. Annexe</h2>"
+    add("<section><h2>11. Annexe</h2>"
         "<h3>Options de lancement de patine_app</h3>"
         "<p>Ces options servent aux captures et aux tests ; <code>patine_app --help</code> les liste.</p>"
         + table(["Option", "Effet"], OPTIONS)
@@ -872,7 +974,7 @@ def body():
         + code("cargo build --release -p patine_app -p patine_cli\n"
                "python scripts/manual_tests/capture_tutorial.py\n"
                "python scripts/manual_tests/build_tutorial.py")
-        + "<p>Le premier script produit les 66 captures dans <code>manual_tests/captures/</code> (et le projet "
+        + "<p>Le premier script produit les 78 captures dans <code>manual_tests/captures/</code> (et le projet "
         "<code>manual_tests/casque.patine</code>) ; le second les "
         "recadre et imprime ce PDF avec Microsoft Edge (ou Chrome) sans interface.</p>"
         "<h3>Crédits</h3>"
@@ -957,7 +1059,7 @@ def main():
     os.makedirs(IMAGES)
     document = (
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
-        f"<title>Patine — tutoriel M0 à M6</title><style>{STYLE}</style></head>"
+        f"<title>Patine — tutoriel M0 à M7</title><style>{STYLE}</style></head>"
         f"<body>{body()}</body></html>"
     )
     page = os.path.join(OUT, "index.html")

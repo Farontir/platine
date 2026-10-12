@@ -151,6 +151,7 @@ En mémoire, un matériau en 4K occupe 372 Mo pour ses 5 contenus, plus 64 Mo po
 - **Pas de test de piles aléatoires procédurales** : la pile de référence (matériaux en UV et en triplanaire, dossier, masques procéduraux), comparée texel par texel sur 500 texels, couvre la composition. Les piles aléatoires du M6 restent en valeurs uniformes.
 - **Coût des tests sur WARP** : WARP compile lentement les shaders de matériaux (environ 12 s chacun). Les tests de matériaux et de compositeur procédural prennent chacun environ une minute sur WARP, contre quelques secondes sur la RTX.
 - **Carte de surface** : elle est libérée quand le texture set n'a plus de contenu procédural.
+- **Vignettes** : avec la passe unique, elles utilisaient 5 cibles `Rgba16Float` (40 octets par texel), au-delà de la limite de 32. L'application s'arrêtait dès que le panneau Bibliothèque s'affichait. Le problème a été trouvé en faisant les captures du tutoriel, puis corrigé : `output_format` donne le format de chaque sortie au cache comme aux vignettes, et un test vérifie que chaque procédural tient dans la limite.
 
 ## État à la clôture (13/10/2026)
 
