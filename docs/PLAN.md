@@ -596,10 +596,10 @@ Critères d'acceptation : chaque bruit est tileable (bords identiques à 1e-3 pr
 
 Objectif : peindre un matériau directement sur le mesh.
 
-- [ ] Échantillonneur de stroke (espacement, lissage) et `StrokeLog`
-- [ ] `rasterize_dabs` : projection écran vers UV, occlusion, atténuation selon l'angle, buffer de stroke
+- [x] Échantillonneur de stroke (espacement, lissage) et `StrokeLog`
+- [x] `rasterize_dabs` : projection écran vers UV, occlusion, atténuation selon l'angle, buffer de stroke
 - [ ] Brosse et gomme, peinture multi-canaux, alphas
-- [ ] Undo par tuiles, dilatation à la composition
+- [x] Undo par tuiles, dilatation à la composition
 - [ ] Curseur de brosse dans le viewport
 
 Critères d'acceptation : un trait qui traverse une couture UV ne laisse aucun trou sur le cube de test ; rejouer le `StrokeLog` reproduit l'état peint en direct à la tolérance près ; le budget de latence est tenu.

@@ -2,9 +2,10 @@
 //! mode (M5).
 //!
 //! [`gpu_document::GpuDocument`] keeps the final texture of every channel in step with
-//! the document.
+//! the document; [`content`] and [`paint`] hold the procedural and painted contents.
 
 pub mod compositor;
 pub mod content;
 pub mod gpu_document;
+pub mod paint;
 pub mod reference;

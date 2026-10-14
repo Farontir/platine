@@ -2416,6 +2416,7 @@ name = "patine_compositor"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
+ "glam",
  "half",
  "patine_core",
  "patine_gpu",
@@ -2423,6 +2424,7 @@ dependencies = [
  "patine_paint",
  "patine_procedural",
  "proptest",
+ "thiserror 2.0.21",
  "tracing",
 ]
 

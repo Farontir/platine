@@ -1093,6 +1093,15 @@ impl LiveStroke {
         tiles
     }
 
+    /// Drops the stroke without restoring anything: its buffer and saved tiles are
+    /// released (the contents are being released too).
+    pub fn abandon(self, pool: &mut TexturePool) {
+        pool.release(self.target.buffer);
+        for before in self.before {
+            before.release(pool);
+        }
+    }
+
     /// Ends the stroke: its buffer is released, and the tiles from before it become
     /// discardable caches for undo.
     pub fn finish(self, painter: &Painter, pool: &mut TexturePool) -> FinishedStroke {

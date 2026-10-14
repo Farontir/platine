@@ -7,6 +7,7 @@ use bytemuck::{Pod, Zeroable};
 use patine_core::layer::{BlendMode, FillSource};
 use patine_core::mask::{FilterKind, MaskEffect, MaskEffectEntry};
 use patine_gpu::{GpuContext, GpuError, wgpu};
+use patine_paint::raster::Painter;
 use patine_procedural::evaluate::Procedurals;
 use patine_procedural::surface::SurfaceBuilder;
 use wgpu::util::DeviceExt as _;
@@ -169,6 +170,7 @@ pub struct Compositor {
     mask_layout: wgpu::BindGroupLayout,
     procedurals: Procedurals,
     surfaces: SurfaceBuilder,
+    painter: Painter,
     rgba: Pipelines,
     scalar: Pipelines,
     /// Mask effect pass (`R16Float`).
@@ -310,6 +312,7 @@ impl Compositor {
             mask_layout,
             procedurals: Procedurals::new(ctx),
             surfaces: SurfaceBuilder::new(ctx)?,
+            painter: Painter::new(ctx)?,
             passes: std::cell::Cell::new(0),
             mask_passes: std::cell::Cell::new(0),
         })
@@ -323,6 +326,11 @@ impl Compositor {
     /// The pipelines building surface maps.
     pub fn surfaces(&self) -> &SurfaceBuilder {
         &self.surfaces
+    }
+
+    /// The pipelines of the paint passes.
+    pub fn painter(&self) -> &Painter {
+        &self.painter
     }
 
     /// Number of mask effect passes encoded since creation (tests of the mask cache).

@@ -111,6 +111,11 @@ impl Contents {
         self.surfaces.get(&set).map(|map| map.texture)
     }
 
+    /// The mesh in storage buffers and the surface map of `set`, if built.
+    pub fn surface(&self, set: TextureSetId) -> Option<(&MeshBuffers, &wgpu::TextureView)> {
+        Some((&self.mesh.as_ref()?.1, &self.surfaces.get(&set)?.view))
+    }
+
     /// Memory of the content textures and surface maps, in bytes.
     pub fn memory(&self) -> u64 {
         let contents: u64 = self
@@ -213,7 +218,8 @@ impl Contents {
     }
 
     /// Brings the contents of `set` in line with it, evaluating what changed. Adds the
-    /// contents in use to `used`.
+    /// contents in use to `used`. The surface map is kept when the set has procedural
+    /// content or when `needs_surface` (it has paint).
     #[allow(clippy::too_many_arguments)]
     pub fn sync_set(
         &mut self,
@@ -223,11 +229,12 @@ impl Contents {
         encoder: &mut wgpu::CommandEncoder,
         mesh: &Arc<MeshAsset>,
         set: &TextureSet,
+        needs_surface: bool,
         used: &mut HashSet<ContentId>,
     ) {
         let mut jobs = self.jobs(set);
-        if jobs.is_empty() {
-            // No procedural content: the surface map is not needed any more.
+        if jobs.is_empty() && !needs_surface {
+            // No procedural content nor paint: the surface map is not needed any more.
             if let Some(map) = self.surfaces.remove(&set.id) {
                 pool.release(map.texture);
             }

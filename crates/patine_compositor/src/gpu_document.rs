@@ -6,28 +6,42 @@
 //! - allocation: textures follow the resolution and the channels of each texture set;
 //! - contents: each procedural fill has a texture per channel (see [`crate::content`]),
 //!   evaluated again only when its procedural, parameters or projection change;
+//! - paint: each paint layer and paint mask effect has its strokes rasterized (see
+//!   [`crate::paint`]); undo and redo touch only the tiles of their strokes;
 //! - masks: each masked layer has an `R16Float` texture, evaluated again only when its
 //!   mask stack changes;
 //! - evaluation: for each channel, the first top-level layer whose contribution to that
 //!   channel changed gives the starting point. The composition below the layer being
 //!   edited is kept in a *lower cache*, so editing a layer only blends it and the layers
-//!   above it again.
+//!   above it again. When only stroke logs changed, only the tiles their strokes touch
+//!   are blended again.
+//!
+//! A stroke painted live ([`GpuDocument::begin_stroke`], [`GpuDocument::paint`],
+//! [`GpuDocument::end_stroke`]) rasterizes each batch of dabs and recomposes their tiles
+//! at once, without changing the document; the command adding the stroke then finds it
+//! rasterized.
 //!
 //! The ping-pong textures, folder textures, lower caches and masks are discardable in the
 //! pool: if evicted, they are rebuilt.
 
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use patine_core::channel::{Channel, ChannelDef, ChannelFormat};
+use patine_core::commands::PaintTarget;
 use patine_core::ids::LayerId;
 use patine_core::layer::{BlendMode, FillSource, Layer, LayerKind};
-use patine_core::mask::MaskStack;
+use patine_core::mask::{MASK_VALUE_CHANNEL, MaskEffect, MaskStack};
 use patine_core::project::{Project, TextureSetId};
+use patine_core::stroke::{Dab, Stroke};
 use patine_gpu::pool::{Residency, TextureId, TexturePool, full_mip_count, texture_bytes};
 use patine_gpu::{GpuContext, wgpu};
+use patine_paint::raster::{Content, LiveStroke, SetSurface};
+use thiserror::Error;
 
 use crate::compositor::{BlendStep, Compositor, Ping, Region, Source};
 use crate::content::{ContentId, Contents};
+use crate::paint::{PaintRasters, StrokeUndo, layout_of, stroke_value};
 use crate::reference::ChannelKind;
 
 /// GPU format of a channel format.
@@ -194,7 +208,38 @@ pub struct GpuDocument {
     masks: HashMap<LayerId, MaskTexture>,
     /// Contents of the procedural fills and mask fills.
     contents: Contents,
+    /// Contents of the paint layers and paint mask effects.
+    paints: PaintRasters,
+    /// The stroke being painted, if any.
+    live: Option<Live>,
     scratch: Scratch,
+}
+
+/// A stroke being painted live.
+#[derive(Debug)]
+struct Live {
+    target: PaintTarget,
+    set: TextureSetId,
+    /// Channels painted, in the order of the stroke's contents.
+    channels: Vec<Channel>,
+    stroke: LiveStroke,
+}
+
+/// Why a stroke cannot start.
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PaintError {
+    /// The target is not a paint layer or a paint mask effect of the project.
+    #[error("the selection cannot be painted")]
+    NotPaintable,
+    /// The stroke paints no channel of the target.
+    #[error("the brush paints no channel of the selection")]
+    NoChannel,
+    /// The texture set has no surface map yet (the document was not synced).
+    #[error("the texture set is not ready to paint")]
+    NoSurface,
+    /// Another stroke is being painted.
+    #[error("a stroke is already being painted")]
+    AlreadyPainting,
 }
 
 /// Clears mip levels `levels` of `texture` to `value` (scalar formats use the first
@@ -237,14 +282,45 @@ fn affects(layer: &Layer, channel: Channel) -> bool {
     layer.visible && layer.channels.contains_key(&channel)
 }
 
-/// Whether two layers contribute the same way to `channel`.
-fn same_for_channel(a: &Layer, b: &Layer, channel: Channel) -> bool {
+/// Whether two mask stacks are the same; with `ignore_paint`, paint effects compare
+/// without their strokes.
+fn same_mask(a: &Option<MaskStack>, b: &Option<MaskStack>, ignore_paint: bool) -> bool {
+    if !ignore_paint {
+        return a == b;
+    }
+    match (a, b) {
+        (None, None) => true,
+        (Some(a), Some(b)) => {
+            a.initial == b.initial
+                && a.effects.len() == b.effects.len()
+                && a.effects
+                    .iter()
+                    .zip(&b.effects)
+                    .all(|(x, y)| match (&x.effect, &y.effect) {
+                        (MaskEffect::Paint { .. }, MaskEffect::Paint { .. }) => {
+                            x.id == y.id
+                                && x.visible == y.visible
+                                && x.blend == y.blend
+                                && x.opacity == y.opacity
+                        }
+                        _ => x == y,
+                    })
+        }
+        _ => false,
+    }
+}
+
+/// Whether two layers contribute the same way to `channel`; with `ignore_paint`, paint
+/// layers and paint mask effects compare without their strokes.
+fn same_for_channel(a: &Layer, b: &Layer, channel: Channel, ignore_paint: bool) -> bool {
     match (affects(a, channel), affects(b, channel)) {
         (false, false) => return true,
         (true, true) => {}
         _ => return false,
     }
-    if a.channels.get(&channel) != b.channels.get(&channel) || a.mask != b.mask {
+    if a.channels.get(&channel) != b.channels.get(&channel)
+        || !same_mask(&a.mask, &b.mask, ignore_paint)
+    {
         return false;
     }
     match (&a.kind, &b.kind) {
@@ -262,8 +338,9 @@ fn same_for_channel(a: &Layer, b: &Layer, channel: Channel) -> bool {
             x.len() == y.len()
                 && x.iter()
                     .zip(y)
-                    .all(|(p, q)| same_for_channel(p, q, channel))
+                    .all(|(p, q)| same_for_channel(p, q, channel, ignore_paint))
         }
+        (LayerKind::Paint { .. }, LayerKind::Paint { .. }) if ignore_paint => true,
         (x, y) => x == y,
     }
 }
@@ -271,9 +348,19 @@ fn same_for_channel(a: &Layer, b: &Layer, channel: Channel) -> bool {
 /// Index of the first top-level layer whose contribution to `channel` differs between
 /// `old` and `new`; `None` when the channel's composition is unchanged.
 pub fn first_difference(old: &[Layer], new: &[Layer], channel: Channel) -> Option<usize> {
+    first_difference_with(old, new, channel, false)
+}
+
+/// [`first_difference`]; with `ignore_paint`, differences in stroke logs do not count.
+fn first_difference_with(
+    old: &[Layer],
+    new: &[Layer],
+    channel: Channel,
+    ignore_paint: bool,
+) -> Option<usize> {
     let common = old.len().min(new.len());
     (0..common)
-        .find(|&i| !same_for_channel(&old[i], &new[i], channel))
+        .find(|&i| !same_for_channel(&old[i], &new[i], channel, ignore_paint))
         .or((old.len() != new.len()).then_some(common))
 }
 
@@ -289,6 +376,7 @@ struct Evaluation<'a> {
     compositor: &'a Compositor,
     masks: &'a HashMap<LayerId, MaskTexture>,
     contents: &'a Contents,
+    paints: &'a PaintRasters,
     channel: Channel,
     kind: ChannelKind,
     size: u32,
@@ -369,7 +457,22 @@ impl Evaluation<'_> {
                     };
                     self.blend(encoder, pool, pair, &step);
                 }
-                // Paint and image content, instances: later milestones.
+                LayerKind::Paint { .. } => {
+                    // Absent for channels no stroke painted.
+                    let Some(content) =
+                        self.paints.view(PaintTarget::Layer(layer.id), self.channel)
+                    else {
+                        continue;
+                    };
+                    let step = BlendStep {
+                        mode: blend.mode,
+                        opacity: blend.opacity,
+                        source: Source::Paint(content),
+                        mask,
+                    };
+                    self.blend(encoder, pool, pair, &step);
+                }
+                // Image content, instances: later milestones.
                 _ => {}
             }
         }
@@ -430,6 +533,21 @@ impl GpuDocument {
         self.contents.memory()
     }
 
+    /// Memory of the paint contents, in bytes.
+    pub fn paint_memory(&self) -> u64 {
+        self.paints.memory()
+    }
+
+    /// The paint contents (tests and measurements).
+    pub fn paints(&self) -> &PaintRasters {
+        &self.paints
+    }
+
+    /// The target of the stroke being painted, if any.
+    pub fn painting(&self) -> Option<PaintTarget> {
+        self.live.as_ref().map(|live| live.target)
+    }
+
     /// Memory of the mask textures, in bytes.
     pub fn mask_memory(&self) -> u64 {
         self.masks
@@ -449,6 +567,10 @@ impl GpuDocument {
             pool.release(mask.texture);
         }
         self.contents.clear(pool);
+        if let Some(live) = self.live.take() {
+            live.stroke.abandon(pool);
+        }
+        self.paints.clear(pool);
         self.scratch.release(pool);
         pool.flush();
     }
@@ -474,6 +596,7 @@ impl GpuDocument {
         let mut previous = std::mem::take(&mut self.sets);
         let mut masked = HashSet::new();
         let mut used = HashSet::new();
+        let mut painted = HashSet::new();
         for set in &project.texture_sets {
             let size = set.resolution.pixels();
             self.contents.sync_set(
@@ -483,9 +606,28 @@ impl GpuDocument {
                 &mut encoder,
                 &project.mesh,
                 set,
+                PaintRasters::needs_surface(set),
                 &mut used,
             );
-            if self.sync_masks(ctx, pool, compositor, &mut encoder, set, &mut masked) {
+            let dirty = self.paints.sync_set(
+                ctx,
+                pool,
+                compositor.painter(),
+                &mut encoder,
+                project,
+                set,
+                self.contents.surface(set.id),
+                &mut painted,
+            );
+            if self.sync_masks(
+                ctx,
+                pool,
+                compositor,
+                &mut encoder,
+                set,
+                &dirty,
+                &mut masked,
+            ) {
                 changed.push(set.id);
             }
             let mut old = previous
@@ -542,6 +684,7 @@ impl GpuDocument {
                     &mut encoder,
                     &mut texture,
                     &set.stack.layers,
+                    &dirty,
                 );
                 channels.push(texture);
             }
@@ -577,6 +720,7 @@ impl GpuDocument {
         });
         let sets: Vec<TextureSetId> = project.texture_sets.iter().map(|set| set.id).collect();
         self.contents.release_unused(pool, &used, &sets);
+        self.paints.release_unused(pool, &painted);
         ctx.queue.submit([encoder.finish()]);
         // Textures released or evicted while recording may be used by the commands just
         // submitted: only now can they be destroyed.
@@ -585,8 +729,10 @@ impl GpuDocument {
     }
 
     /// Evaluates the masks of the layers of `set` that changed since their last
-    /// evaluation. Adds the masked layers to `masked`. Returns whether a mask texture was
+    /// evaluation: on the tiles of `dirty` when only the strokes of their paint effects
+    /// changed. Adds the masked layers to `masked`. Returns whether a mask texture was
     /// allocated (its view is new).
+    #[allow(clippy::too_many_arguments)]
     fn sync_masks(
         &mut self,
         ctx: &GpuContext,
@@ -594,6 +740,7 @@ impl GpuDocument {
         compositor: &Compositor,
         encoder: &mut wgpu::CommandEncoder,
         set: &patine_core::project::TextureSet,
+        dirty: &Region,
         masked: &mut HashSet<LayerId>,
     ) -> bool {
         let size = set.resolution.pixels();
@@ -612,11 +759,21 @@ impl GpuDocument {
             let alive = |pool: &mut TexturePool, mask: &MaskTexture| {
                 mask.size == size && pool.get(mask.texture).is_some()
             };
+            let mut region = Region::full(size);
             let mut mask = match current {
-                Some(mask) if alive(pool, &mask) => {
+                Some(mut mask) if alive(pool, &mask) => {
                     if mask.stack == *stack {
                         self.masks.insert(id, mask);
                         continue;
+                    }
+                    if same_mask(&Some(mask.stack.clone()), &Some(stack.clone()), true) {
+                        // Only strokes changed: their tiles, already rasterized.
+                        if dirty.is_empty() {
+                            mask.stack = stack.clone();
+                            self.masks.insert(id, mask);
+                            continue;
+                        }
+                        region = dirty.clone();
                     }
                     mask
                 }
@@ -644,14 +801,15 @@ impl GpuDocument {
                 }
             };
             mask.stack = stack.clone();
-            self.evaluate_mask(ctx, pool, compositor, encoder, id, &mask);
+            self.evaluate_mask(ctx, pool, compositor, encoder, id, &mask, &region);
             self.masks.insert(id, mask);
         }
         allocated
     }
 
-    /// Evaluates `mask.stack`, the mask of layer `layer`, into `mask.texture`, mips
-    /// included.
+    /// Evaluates `mask.stack`, the mask of layer `layer`, into `mask.texture` on the tiles
+    /// of `region`, mips included.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate_mask(
         &mut self,
         ctx: &GpuContext,
@@ -660,6 +818,7 @@ impl GpuDocument {
         encoder: &mut wgpu::CommandEncoder,
         layer: LayerId,
         mask: &MaskTexture,
+        region: &Region,
     ) {
         let target = pool
             .peek(mask.texture)
@@ -674,7 +833,6 @@ impl GpuDocument {
             self.scratch.get(ctx, pool, mask.size, format, 0),
             self.scratch.get(ctx, pool, mask.size, format, 1),
         );
-        let region = Region::full(mask.size);
         clear_levels(
             encoder,
             pool.peek(pair.0).expect("allocated above"),
@@ -687,20 +845,27 @@ impl GpuDocument {
                 read: &read,
                 write: &write,
             };
-            let source = self.contents.view(ContentId::Mask(layer, entry.id));
-            if compositor.mask_effect(ctx, encoder, ping, entry, source, &region) {
+            let source = match entry.effect {
+                MaskEffect::Paint { .. } => self
+                    .paints
+                    .view(PaintTarget::Mask(layer, entry.id), MASK_VALUE_CHANNEL),
+                _ => self.contents.view(ContentId::Mask(layer, entry.id)),
+            };
+            if compositor.mask_effect(ctx, encoder, ping, entry, source, region) {
                 pair = (pair.1, pair.0);
             }
         }
         let (Some(result), Some(target)) = (pool.peek(pair.0), pool.peek(mask.texture)) else {
             return;
         };
-        compositor.copy(encoder, result, target, &region);
-        compositor.build_mips(ctx, encoder, ChannelKind::Scalar, target, &region);
+        compositor.copy(encoder, result, target, region);
+        compositor.build_mips(ctx, encoder, ChannelKind::Scalar, target, region);
     }
 
     /// Evaluates the composition of one channel if its layers changed since the last
-    /// evaluation.
+    /// evaluation: on the tiles of `dirty` (the paint that changed) when only stroke logs
+    /// changed, everywhere otherwise.
+    #[allow(clippy::too_many_arguments)]
     fn evaluate(
         &mut self,
         ctx: &GpuContext,
@@ -709,20 +874,54 @@ impl GpuDocument {
         encoder: &mut wgpu::CommandEncoder,
         texture: &mut ChannelTexture,
         layers: &[Layer],
+        dirty: &Region,
     ) {
         let channel = texture.def.channel;
-        let start = match &texture.evaluated {
-            None => 0,
+        let (start, region) = match &texture.evaluated {
+            None => (0, Region::full(texture.size)),
             Some(old) => match first_difference(old, layers, channel) {
                 None => return,
-                Some(index) => index,
+                Some(index) => {
+                    if first_difference_with(old, layers, channel, true).is_none() {
+                        // Only strokes changed: their tiles, already rasterized (or
+                        // nothing, for a stroke composed live).
+                        if dirty.is_empty() {
+                            texture.evaluated = Some(layers.to_vec());
+                            return;
+                        }
+                        (index, dirty.clone())
+                    } else {
+                        (index, Region::full(texture.size))
+                    }
+                }
             },
         };
+        texture.evaluated = Some(layers.to_vec());
+        self.compose(
+            ctx, pool, compositor, encoder, texture, layers, start, region,
+        );
+    }
+
+    /// Composes `layers` into the channel texture `texture` from the top-level layer
+    /// `start`, on the tiles of `region` (everywhere when a part of the stack below
+    /// `start` has to be composed and kept as the lower cache).
+    #[allow(clippy::too_many_arguments)]
+    fn compose(
+        &mut self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        compositor: &Compositor,
+        encoder: &mut wgpu::CommandEncoder,
+        texture: &mut ChannelTexture,
+        layers: &[Layer],
+        start: usize,
+        region: Region,
+    ) {
+        let channel = texture.def.channel;
         let target = pool
             .peek(texture.texture)
             .expect("channel textures are pinned");
         let levels = target.mip_level_count();
-        texture.evaluated = Some(layers.to_vec());
         if !layers.iter().any(|layer| affects(layer, channel)) {
             clear_levels(encoder, target, texture.def.default, 0..levels);
             if let Some(cache) = texture.cache.take() {
@@ -732,28 +931,35 @@ impl GpuDocument {
         }
 
         let kind = ChannelKind::of(channel);
-        let evaluation = Evaluation {
-            ctx,
-            compositor,
-            masks: &self.masks,
-            contents: &self.contents,
-            channel,
-            kind,
-            size: texture.size,
-            format: gpu_format(texture.def.format),
-            region: Region::full(texture.size),
-        };
-        let scratch = &mut self.scratch;
-        let mut pair = (
-            scratch.get(ctx, pool, texture.size, evaluation.format, 0),
-            scratch.get(ctx, pool, texture.size, evaluation.format, 1),
-        );
         // The lower cache serves when it ends at or below the first change.
         let cached = texture
             .cache
             .as_ref()
             .filter(|cache| cache.start <= start && pool.get(cache.texture).is_some())
             .map(|cache| (cache.start, cache.texture));
+        // A new lower cache must hold the whole texture.
+        let region = if cached.is_none() && start > 0 {
+            Region::full(texture.size)
+        } else {
+            region
+        };
+        let evaluation = Evaluation {
+            ctx,
+            compositor,
+            masks: &self.masks,
+            contents: &self.contents,
+            paints: &self.paints,
+            channel,
+            kind,
+            size: texture.size,
+            format: gpu_format(texture.def.format),
+            region,
+        };
+        let scratch = &mut self.scratch;
+        let mut pair = (
+            scratch.get(ctx, pool, texture.size, evaluation.format, 0),
+            scratch.get(ctx, pool, texture.size, evaluation.format, 1),
+        );
         let resume = match cached {
             Some((cache_start, cache)) => {
                 if let (Some(from), Some(to)) = (pool.peek(cache), pool.peek(pair.0)) {
@@ -805,6 +1011,324 @@ impl GpuDocument {
         };
         compositor.copy(encoder, result, target, &evaluation.region);
         compositor.build_mips(ctx, encoder, kind, target, &evaluation.region);
+    }
+
+    /// Makes sure the discardable textures a live stroke uses in texture set `set` are
+    /// alive and marked as used: the surface map, the procedural contents and the masks,
+    /// rebuilt if the pool evicted them since the last sync.
+    fn refresh_set(
+        &mut self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        compositor: &Compositor,
+        encoder: &mut wgpu::CommandEncoder,
+        project: &Project,
+        set: &patine_core::project::TextureSet,
+    ) {
+        let mut used = HashSet::new();
+        self.contents.sync_set(
+            ctx,
+            pool,
+            compositor,
+            encoder,
+            &project.mesh,
+            set,
+            true,
+            &mut used,
+        );
+        let mut masked = HashSet::new();
+        let nothing = Region::empty(set.resolution.pixels());
+        self.sync_masks(ctx, pool, compositor, encoder, set, &nothing, &mut masked);
+    }
+
+    /// Starts painting `stroke` (its dabs are ignored: they come with
+    /// [`GpuDocument::paint`]) into `target`, a paint layer or a paint mask effect of
+    /// `project`, which must have been synced.
+    pub fn begin_stroke(
+        &mut self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        compositor: &Compositor,
+        project: &Project,
+        target: PaintTarget,
+        stroke: Stroke,
+    ) -> Result<(), PaintError> {
+        if self.live.is_some() {
+            return Err(PaintError::AlreadyPainting);
+        }
+        let (set, layer) = project
+            .texture_sets
+            .iter()
+            .find_map(|set| Some((set, set.stack.find(target.layer())?)))
+            .ok_or(PaintError::NotPaintable)?;
+        let paintable = match target {
+            PaintTarget::Layer(_) => matches!(layer.kind, LayerKind::Paint { .. }),
+            PaintTarget::Mask(_, effect) => layer.mask.as_ref().is_some_and(|mask| {
+                mask.effects.iter().any(|entry| {
+                    entry.id == effect && matches!(entry.effect, MaskEffect::Paint { .. })
+                })
+            }),
+        };
+        if !paintable {
+            return Err(PaintError::NotPaintable);
+        }
+        let channels: Vec<Channel> = match target {
+            PaintTarget::Layer(_) => set
+                .channels
+                .iter()
+                .map(|def| def.channel)
+                .filter(|channel| {
+                    layer.channels.contains_key(channel)
+                        && stroke_value(&stroke, target, *channel).is_some()
+                })
+                .collect(),
+            PaintTarget::Mask(..) => stroke_value(&stroke, target, MASK_VALUE_CHANNEL)
+                .map(|_| vec![MASK_VALUE_CHANNEL])
+                .unwrap_or_default(),
+        };
+        if channels.is_empty() {
+            return Err(PaintError::NoChannel);
+        }
+        let size = set.resolution.pixels();
+        let geometry = self.paints.geometry(&project.mesh, set);
+        let alpha = self.paints.alpha(project, &stroke);
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        self.refresh_set(ctx, pool, compositor, &mut encoder, project, set);
+        self.paints
+            .ensure_contents(ctx, pool, &mut encoder, target, set.id, size, &channels);
+        let Some((mesh, map)) = self.contents.surface(set.id) else {
+            return Err(PaintError::NoSurface);
+        };
+        let surface = SetSurface {
+            mesh,
+            material: set.material_index,
+            surface_map: map,
+            geometry: &geometry,
+            size,
+        };
+        let layouts: Vec<_> = channels.iter().map(|channel| layout_of(*channel)).collect();
+        let stroke = LiveStroke::begin(
+            compositor.painter(),
+            ctx,
+            pool,
+            &mut encoder,
+            stroke,
+            &surface,
+            alpha.as_ref(),
+            &layouts,
+        );
+        ctx.queue.submit([encoder.finish()]);
+        pool.flush();
+        self.live = Some(Live {
+            target,
+            set: set.id,
+            channels,
+            stroke,
+        });
+        Ok(())
+    }
+
+    /// Paints `dabs` with the stroke being painted, and recomposes the tiles they touch.
+    /// Returns whether anything changed.
+    pub fn paint(
+        &mut self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        compositor: &Compositor,
+        project: &Project,
+        dabs: &[Dab],
+    ) -> bool {
+        let Some(live) = self.live.as_ref() else {
+            return false;
+        };
+        let (target, set_id) = (live.target, live.set);
+        let Some(set) = project.texture_set(set_id) else {
+            return false;
+        };
+        let size = set.resolution.pixels();
+        let geometry = self.paints.geometry(&project.mesh, set);
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        self.refresh_set(ctx, pool, compositor, &mut encoder, project, set);
+        let Some((mesh, map)) = self.contents.surface(set_id) else {
+            return false;
+        };
+        let surface = SetSurface {
+            mesh,
+            material: set.material_index,
+            surface_map: map,
+            geometry: &geometry,
+            size,
+        };
+        let live = self.live.as_mut().expect("checked above");
+        let textures: Vec<(Channel, wgpu::Texture)> = live
+            .channels
+            .iter()
+            .filter_map(|channel| {
+                let id = self.paints.texture(target, *channel)?;
+                Some((*channel, pool.get(id)?.clone()))
+            })
+            .collect();
+        if textures.len() != live.channels.len() {
+            return false;
+        }
+        let contents: Vec<Content<'_>> = textures
+            .iter()
+            .map(|(channel, texture)| Content {
+                texture,
+                layout: layout_of(*channel),
+                value: stroke_value(live.stroke.stroke(), target, *channel).unwrap_or_default(),
+            })
+            .collect();
+        let tiles = live.stroke.add(
+            compositor.painter(),
+            ctx,
+            pool,
+            &mut encoder,
+            &surface,
+            &contents,
+            dabs,
+        );
+        let changed = !tiles.is_empty();
+        if changed {
+            let mut region = Region::empty(size);
+            for tile in &tiles {
+                region.add_tile(tile[0], tile[1]);
+            }
+            self.recompose(
+                ctx,
+                pool,
+                compositor,
+                &mut encoder,
+                project,
+                target,
+                set_id,
+                &region,
+            );
+        }
+        ctx.queue.submit([encoder.finish()]);
+        pool.flush();
+        changed
+    }
+
+    /// Composes again, on `region`, the mask of the layer painted (for a mask target)
+    /// and the channels of its texture set, from the layer's top-level ancestor.
+    #[allow(clippy::too_many_arguments)]
+    fn recompose(
+        &mut self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        compositor: &Compositor,
+        encoder: &mut wgpu::CommandEncoder,
+        project: &Project,
+        target: PaintTarget,
+        set_id: TextureSetId,
+        region: &Region,
+    ) {
+        let Some(set) = project.texture_set(set_id) else {
+            return;
+        };
+        let layer = target.layer();
+        if let PaintTarget::Mask(..) = target
+            && let Some(mask) = self.masks.remove(&layer)
+        {
+            self.evaluate_mask(ctx, pool, compositor, encoder, layer, &mask, region);
+            self.masks.insert(layer, mask);
+        }
+        let Some(start) = set.stack.layers.iter().position(|top| top.contains(layer)) else {
+            return;
+        };
+        let Some(index) = self.sets.iter().position(|gpu| gpu.id == set_id) else {
+            return;
+        };
+        let mut channels = std::mem::take(&mut self.sets[index].channels);
+        for texture in &mut channels {
+            // Channels evaluated from the current document only: others wait for sync.
+            if texture.evaluated.is_some() && texture.size == region.size() {
+                self.compose(
+                    ctx,
+                    pool,
+                    compositor,
+                    encoder,
+                    texture,
+                    &set.stack.layers,
+                    start,
+                    region.clone(),
+                );
+            }
+        }
+        self.sets[index].channels = channels;
+    }
+
+    /// Ends the stroke being painted. Returns it, to add to the document with a
+    /// `PaintStroke` command (the next sync then finds it rasterized), or `None` when no
+    /// stroke was painted or it had no dab.
+    pub fn end_stroke(
+        &mut self,
+        pool: &mut TexturePool,
+        compositor: &Compositor,
+    ) -> Option<Arc<Stroke>> {
+        let live = self.live.take()?;
+        let finished = live.stroke.finish(compositor.painter(), pool);
+        if finished.stroke.dabs.is_empty() {
+            for snapshot in finished.before {
+                snapshot.release(pool);
+            }
+            return None;
+        }
+        let stroke = Arc::new(finished.stroke);
+        let undo = StrokeUndo {
+            tiles: finished.tiles,
+            before: live.channels.into_iter().zip(finished.before).collect(),
+        };
+        self.paints.adopt(live.target, stroke.clone(), undo);
+        Some(stroke)
+    }
+
+    /// Abandons the stroke being painted: the contents and the composition return to
+    /// what they were before it.
+    pub fn cancel_stroke(
+        &mut self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        compositor: &Compositor,
+        project: &Project,
+    ) {
+        let Some(live) = self.live.take() else {
+            return;
+        };
+        let finished = live.stroke.finish(compositor.painter(), pool);
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        if let Some(set) = project.texture_set(live.set) {
+            self.refresh_set(ctx, pool, compositor, &mut encoder, project, set);
+        }
+        for (channel, snapshot) in live.channels.iter().zip(&finished.before) {
+            if let Some(id) = self.paints.texture(live.target, *channel)
+                && let Some(texture) = pool.get(id).cloned()
+            {
+                snapshot.restore(pool, &mut encoder, &texture, None);
+            }
+        }
+        if let Some(set) = project.texture_set(live.set) {
+            let mut region = Region::empty(set.resolution.pixels());
+            for tile in &finished.tiles {
+                region.add_tile(tile[0], tile[1]);
+            }
+            self.recompose(
+                ctx,
+                pool,
+                compositor,
+                &mut encoder,
+                project,
+                live.target,
+                live.set,
+                &region,
+            );
+        }
+        for snapshot in finished.before {
+            snapshot.release(pool);
+        }
+        ctx.queue.submit([encoder.finish()]);
+        pool.flush();
     }
 
     /// Memory of the final textures, in bytes.
