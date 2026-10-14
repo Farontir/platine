@@ -506,3 +506,151 @@ gpu_test!(
         }
     }
 );
+
+/// Level 0 of the shading normal of the first texture set, if it has one.
+fn shading(ctx: &GpuContext, pool: &TexturePool, document: &GpuDocument) -> Option<Vec<[f32; 4]>> {
+    let shading = document.texture_set(SET)?.shading.as_ref()?;
+    Some(readback::read_rgba16f(ctx, pool.peek(shading.texture)?).expect("readback"))
+}
+
+/// Checks the shading normal of `document` against the reference, from its height and
+/// normal channels.
+fn check_shading(ctx: &GpuContext, pool: &TexturePool, document: &GpuDocument, force: f32) {
+    use patine_compositor::compositor::HEIGHT_SCALE;
+    use patine_compositor::reference::height_normal;
+    let heights: Vec<f32> = channel(ctx, pool, document, Channel::Height)
+        .iter()
+        .map(|t| t[0])
+        .collect();
+    let normals = channel(ctx, pool, document, Channel::Normal);
+    let gpu = shading(ctx, pool, document).expect("a height channel gives a shading normal");
+    let size = (heights.len() as f64).sqrt() as u32;
+    let mut tilted = 0;
+    for y in 0..size {
+        for x in 0..size {
+            let i = (y * size + x) as usize;
+            let base = [normals[i][0], normals[i][1], normals[i][2]];
+            let expected = height_normal(&heights, size, x, y, force * HEIGHT_SCALE, base);
+            for c in 0..3 {
+                assert!(
+                    (gpu[i][c] - expected[c]).abs() <= 2.0 / 512.0,
+                    "texel {x},{y}: {:?} against {expected:?}",
+                    gpu[i]
+                );
+            }
+            tilted += usize::from(expected[2] < 0.99);
+        }
+    }
+    assert!(
+        tilted > 200,
+        "the relief tilts the normal ({tilted} texels)"
+    );
+}
+
+gpu_test!(
+    /// The shading normal combines the normal channel with the relief of the height
+    /// channel, matches the reference, follows a stroke painted live on the height (as
+    /// a new document gives it), and the height force.
+    fn the_shading_normal_follows_the_painted_height(ctx) {
+        use patine_core::commands::{SetChannelDef, SetHeightForce};
+        let compositor = Compositor::new(&ctx).expect("shaders compile");
+        let mut pool = TexturePool::new(u64::MAX);
+        let mut document = GpuDocument::new();
+        let mut scene = scene();
+        let set = &scene.project.texture_sets[0];
+        let all: Vec<Channel> = set.channels.iter().map(|def| def.channel).collect();
+        assert!(all.contains(&Channel::Height) && all.contains(&Channel::Normal));
+        // A tilted normal fill under a paint layer on every channel.
+        let mut ids = IdSequence::starting_at(scene.project.next_id);
+        let tilt = Layer::new(
+            ids.layer(),
+            "tilt",
+            LayerKind::Fill {
+                source: FillSource::Uniform([(Channel::Normal, [0.2, 0.1, 0.9747, 0.0])].into()),
+                projection: Projection::default(),
+            },
+            &[Channel::Normal],
+        );
+        let relief = ids.layer();
+        for (index, layer) in [tilt, Layer::paint(relief, "relief", &all)].into_iter().enumerate() {
+            scene.history.push(&mut scene.project, Box::new(InsertLayer::new(SET, top(index), layer))).expect("insert");
+        }
+        document.sync(&ctx, &mut pool, &compositor, &scene.project);
+        let flat = shading(&ctx, &pool, &document).expect("shading normal");
+        let height = stroke(Tool::Brush, &[(Channel::Height, [0.8; 4])], [40.0, 90.0], [210.0, 140.0]);
+        paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, PaintTarget::Layer(relief), &height, 6, None);
+        assert_ne!(shading(&ctx, &pool, &document).expect("shading normal"), flat, "the stroke shows in the shading");
+        check_shading(&ctx, &pool, &document, 1.0);
+
+        // A new document gives the same shading normal.
+        let mut fresh_pool = TexturePool::new(u64::MAX);
+        let mut fresh = GpuDocument::new();
+        fresh.sync(&ctx, &mut fresh_pool, &compositor, &scene.project);
+        let (live, replayed) = (shading(&ctx, &pool, &document).unwrap(), shading(&ctx, &fresh_pool, &fresh).unwrap());
+        let worst = live.iter().zip(&replayed).flat_map(|(a, b)| (0..3).map(move |c| (a[c] - b[c]).abs())).fold(0.0f32, f32::max);
+        assert!(worst <= 2.0 / 512.0, "live and new document differ by {worst}");
+
+        // The height force.
+        scene.history.push(&mut scene.project, Box::new(SetHeightForce::new(SET, 4.0))).expect("force");
+        document.sync(&ctx, &mut pool, &compositor, &scene.project);
+        check_shading(&ctx, &pool, &document, 4.0);
+
+        // Without a height channel, no shading normal: the viewport shades with the
+        // normal channel.
+        scene.history.push(&mut scene.project, Box::new(SetChannelDef::remove(SET, Channel::Height))).expect("remove");
+        document.sync(&ctx, &mut pool, &compositor, &scene.project);
+        assert!(document.texture_set(SET).expect("synced").shading.is_none());
+        assert!(document.texture_set(SET).expect("synced").shading_normal().is_some());
+    }
+);
+
+gpu_test!(
+    /// A brush painting a procedural material (copper, triplanar) deposits the
+    /// material's texels on every channel it produces; the stroke painted live gives
+    /// the textures a new document gives after saving and loading.
+    fn procedural_materials_are_painted(ctx) {
+        use patine_core::layer::ProceduralRef;
+        let compositor = Compositor::new(&ctx).expect("shaders compile");
+        let mut pool = TexturePool::new(u64::MAX);
+        let mut document = GpuDocument::new();
+        let mut scene = scene();
+        let all: Vec<Channel> = scene.project.texture_sets[0].channels.iter().map(|def| def.channel).collect();
+        let layer = LayerId(scene.project.next_id);
+        scene
+            .history
+            .push(&mut scene.project, Box::new(InsertLayer::new(SET, top(0), Layer::paint(layer, "copper", &all))))
+            .expect("insert");
+        document.sync(&ctx, &mut pool, &compositor, &scene.project);
+        let mut copper = stroke(Tool::Brush, &[], [40.0, 90.0], [210.0, 150.0]);
+        copper.brush.size = 60.0;
+        copper.brush.material = FillSource::Procedural(ProceduralRef {
+            id: "material.copper".into(),
+            version: 1,
+            params: [("oxidation".to_owned(), patine_core::mask::ParamValue::Float(0.6))].into(),
+        });
+        let target = PaintTarget::Layer(layer);
+        paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, target, &copper, 5, None);
+        for channel in [Channel::BaseColor, Channel::Metallic, Channel::Roughness, Channel::Normal, Channel::Height] {
+            assert!(document.paints().texture(target, channel).is_some(), "{channel:?} is painted");
+        }
+        let colors = paint_content(&ctx, &pool, &document, target, Channel::BaseColor).expect("painted");
+        // The stroke opacity is 0.85.
+        let painted: Vec<[f32; 4]> = colors.iter().filter(|t| t[3] > 0.8).copied().collect();
+        assert!(painted.len() > 500, "{} well covered texels", painted.len());
+        let distinct = painted.iter().map(|t| (t[0] * 256.0) as i32).collect::<std::collections::HashSet<_>>();
+        assert!(distinct.len() > 5, "the material varies across the stroke");
+        let live = finals(&ctx, &pool, &document);
+
+        let path = std::env::temp_dir().join(format!("patine-copper-{}.patine", std::process::id()));
+        patine_core::file::save(&scene.project, &path, None).expect("saved");
+        let loaded = patine_core::file::load(&path).expect("loaded");
+        let _ = std::fs::remove_file(&path);
+        let mut fresh_pool = TexturePool::new(u64::MAX);
+        let mut fresh = GpuDocument::new();
+        fresh.sync(&ctx, &mut fresh_pool, &compositor, &loaded);
+        for (c, (a, b)) in live.iter().zip(&finals(&ctx, &fresh_pool, &fresh)).enumerate() {
+            let worst = a.iter().zip(b).flat_map(|(x, y)| (0..4).map(move |i| (x[i] - y[i]).abs())).fold(0.0f32, f32::max);
+            assert!(worst <= 1.0 / 512.0, "{:?}: live and replay differ by {worst}", CHANNELS[c]);
+        }
+    }
+);

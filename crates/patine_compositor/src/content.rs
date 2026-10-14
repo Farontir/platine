@@ -13,7 +13,7 @@ use std::sync::Arc;
 use patine_core::channel::Channel;
 use patine_core::ids::{EffectId, LayerId};
 use patine_core::layer::{FillSource, Layer, LayerKind, ProceduralRef, Projection};
-use patine_core::mask::MaskEffect;
+use patine_core::mask::{MASK_VALUE_CHANNEL, MaskEffect};
 use patine_core::mesh::MeshAsset;
 use patine_core::project::{TextureSet, TextureSetId};
 use patine_gpu::pool::{Residency, TextureId, TexturePool, texture_bytes};
@@ -71,10 +71,29 @@ struct Job {
     key: Key,
 }
 
+/// Brush materials kept evaluated.
+pub const BRUSH_MATERIALS: usize = 4;
+
+/// What a brush material was evaluated for.
+#[derive(Clone, Debug, PartialEq)]
+struct BrushKey {
+    set: TextureSetId,
+    key: Key,
+}
+
+/// A procedural material evaluated for brushes: one texture per output.
+#[derive(Debug)]
+struct BrushMaterial {
+    key: BrushKey,
+    textures: Vec<(Channel, TextureId, wgpu::TextureView)>,
+}
+
 /// The procedural contents of a project's layers and masks.
 #[derive(Debug, Default)]
 pub struct Contents {
-    mesh: Option<(Arc<MeshAsset>, MeshBuffers)>,
+    /// Materials brushes paint with, the most recently used last.
+    brushes: Vec<BrushMaterial>,
+    mesh: Option<(Arc<MeshAsset>, Arc<MeshBuffers>)>,
     surfaces: HashMap<TextureSetId, SurfaceMap>,
     textures: HashMap<ContentId, Content>,
     /// Procedurals already reported as missing from the library.
@@ -112,8 +131,117 @@ impl Contents {
     }
 
     /// The mesh in storage buffers and the surface map of `set`, if built.
-    pub fn surface(&self, set: TextureSetId) -> Option<(&MeshBuffers, &wgpu::TextureView)> {
-        Some((&self.mesh.as_ref()?.1, &self.surfaces.get(&set)?.view))
+    pub fn surface(&self, set: TextureSetId) -> Option<(Arc<MeshBuffers>, wgpu::TextureView)> {
+        Some((
+            self.mesh.as_ref()?.1.clone(),
+            self.surfaces.get(&set)?.view.clone(),
+        ))
+    }
+
+    /// The procedural material `procedural` evaluated on texture set `set` with
+    /// `projection`, for a brush painting it: one texture per output, by channel (a gray
+    /// output for masks under [`MASK_VALUE_CHANNEL`]). Evaluated once, then kept while
+    /// memory allows (the last [`BRUSH_MATERIALS`] used). `None` when the library lacks
+    /// the procedural or the set has no surface map yet.
+    #[allow(clippy::too_many_arguments)]
+    pub fn brush_material(
+        &mut self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        compositor: &Compositor,
+        encoder: &mut wgpu::CommandEncoder,
+        set: &TextureSet,
+        procedural: &ProceduralRef,
+        projection: &Projection,
+    ) -> Option<Vec<(Channel, wgpu::TextureView)>> {
+        let def = self.find(procedural)?;
+        let size = set.resolution.pixels();
+        let map = self.surfaces.get(&set.id)?;
+        let key = BrushKey {
+            set: set.id,
+            key: Key {
+                procedural: procedural.clone(),
+                projection: *projection,
+                size,
+                map: map.generation,
+            },
+        };
+        let channel_of = |output: &Output| match output {
+            Output::Channel(channel) => *channel,
+            Output::Gray => MASK_VALUE_CHANNEL,
+        };
+        if let Some(index) = self.brushes.iter().position(|brush| brush.key == key) {
+            let brush = self.brushes.remove(index);
+            if brush
+                .textures
+                .iter()
+                .all(|(_, id, _)| pool.get(*id).is_some())
+            {
+                let views = brush
+                    .textures
+                    .iter()
+                    .map(|(channel, _, view)| (*channel, view.clone()))
+                    .collect();
+                self.brushes.push(brush);
+                return Some(views);
+            }
+            for (_, id, _) in brush.textures {
+                pool.release(id);
+            }
+        }
+        let mesh = self.mesh.as_ref()?.1.clone();
+        let map_view = map.view.clone();
+        let formats = output_formats(def);
+        let textures: Vec<(Channel, TextureId, wgpu::TextureView)> = def
+            .outputs
+            .iter()
+            .zip(&formats)
+            .map(|(output, format)| {
+                let id = pool.allocate(ctx, &descriptor(*format, size), Residency::Discardable);
+                let view = pool
+                    .peek(id)
+                    .expect("a texture that was just allocated")
+                    .create_view(&Default::default());
+                (channel_of(output), id, view)
+            })
+            .collect();
+        let targets: Vec<(&wgpu::TextureView, wgpu::TextureFormat)> = textures
+            .iter()
+            .zip(&formats)
+            .map(|((_, _, view), format)| (view, *format))
+            .collect();
+        let uniforms = EvaluationUniforms::new(projection, size, mesh.center, mesh.extent, false);
+        let result = compositor.procedurals().evaluate(
+            ctx,
+            encoder,
+            def,
+            &def.resolve(procedural),
+            &uniforms,
+            SurfaceInput::Mesh {
+                mesh: &mesh,
+                material: set.material_index,
+                map: &map_view,
+            },
+            &targets,
+        );
+        if let Err(error) = result {
+            tracing::error!(id = %def.id, %error, "brush material evaluation failed");
+            for (_, id, _) in textures {
+                pool.release(id);
+            }
+            return None;
+        }
+        let views = textures
+            .iter()
+            .map(|(channel, _, view)| (*channel, view.clone()))
+            .collect();
+        self.brushes.push(BrushMaterial { key, textures });
+        if self.brushes.len() > BRUSH_MATERIALS {
+            for (_, id, _) in self.brushes.remove(0).textures {
+                pool.release(id);
+            }
+        }
+        Some(views)
     }
 
     /// Memory of the content textures and surface maps, in bytes.
@@ -138,6 +266,11 @@ impl Contents {
         }
         for (_, map) in self.surfaces.drain() {
             pool.release(map.texture);
+        }
+        for brush in self.brushes.drain(..) {
+            for (_, id, _) in brush.textures {
+                pool.release(id);
+            }
         }
         self.mesh = None;
     }
@@ -247,7 +380,7 @@ impl Contents {
             .is_some_and(|(current, _)| Arc::ptr_eq(current, mesh))
         {
             self.clear(pool);
-            self.mesh = Some((mesh.clone(), MeshBuffers::new(ctx, mesh)));
+            self.mesh = Some((mesh.clone(), Arc::new(MeshBuffers::new(ctx, mesh))));
         }
         let size = set.resolution.pixels();
         let map_alive = self
@@ -384,6 +517,21 @@ impl Contents {
             let keep = sets.contains(id);
             if !keep {
                 pool.release(map.texture);
+            }
+            keep
+        });
+        // Brush materials of a surface map that changed or went away.
+        let generations: Vec<(TextureSetId, u64)> = self
+            .surfaces
+            .iter()
+            .map(|(id, map)| (*id, map.generation))
+            .collect();
+        self.brushes.retain(|brush| {
+            let keep = generations.contains(&(brush.key.set, brush.key.key.map));
+            if !keep {
+                for (_, id, _) in &brush.textures {
+                    pool.release(*id);
+                }
             }
             keep
         });

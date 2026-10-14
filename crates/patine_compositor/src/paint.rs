@@ -30,6 +30,7 @@ use patine_paint::dynamics::gpu_dabs;
 use patine_paint::projection::SetGeometry;
 use patine_paint::raster::{Content, Painter, SetSurface, TileSnapshot, content_descriptor};
 use patine_paint::reference::ContentLayout;
+use patine_procedural::def::Output;
 
 use crate::compositor::Region;
 use crate::reference::ChannelKind;
@@ -42,8 +43,42 @@ pub fn layout_of(channel: Channel) -> ContentLayout {
     }
 }
 
+/// The channels among `candidates` that `stroke` paints into `target`: those of its
+/// uniform values, or the outputs of its procedural material (its gray output for a
+/// mask).
+pub fn painted_channels(
+    stroke: &Stroke,
+    target: PaintTarget,
+    candidates: &[Channel],
+) -> Vec<Channel> {
+    match &stroke.brush.material {
+        FillSource::Procedural(procedural) => {
+            let Some(def) = patine_procedural::library::find(&procedural.id) else {
+                return Vec::new();
+            };
+            candidates
+                .iter()
+                .copied()
+                .filter(|channel| {
+                    def.outputs.iter().any(|output| match (output, target) {
+                        (Output::Channel(c), PaintTarget::Layer(_)) => c == channel,
+                        (Output::Gray, PaintTarget::Mask(..)) => *channel == MASK_VALUE_CHANNEL,
+                        _ => false,
+                    })
+                })
+                .collect()
+        }
+        _ => candidates
+            .iter()
+            .copied()
+            .filter(|channel| stroke_value(stroke, target, *channel).is_some())
+            .collect(),
+    }
+}
+
 /// The value `stroke` deposits on `channel` of `target`: its material's value for a
-/// layer, its first value (gray) for a mask; `None` when it does not paint there.
+/// layer, its first value (gray) for a mask; `None` when it does not paint a constant
+/// there (a procedural material deposits its texels).
 pub fn stroke_value(stroke: &Stroke, target: PaintTarget, channel: Channel) -> Option<[f32; 4]> {
     let FillSource::Uniform(values) = &stroke.brush.material else {
         return None;
@@ -56,6 +91,11 @@ pub fn stroke_value(stroke: &Stroke, target: PaintTarget, channel: Channel) -> O
             .copied(),
     }
 }
+
+/// The procedural material a stroke paints, evaluated on its texture set: one texture
+/// per channel (empty for uniform materials).
+pub(crate) type BrushMaterials<'a> = dyn FnMut(&Stroke, &mut TexturePool, &mut wgpu::CommandEncoder) -> Vec<(Channel, wgpu::TextureView)>
+    + 'a;
 
 /// One paint content texture.
 #[derive(Debug)]
@@ -324,7 +364,11 @@ impl PaintRasters {
         encoder: &mut wgpu::CommandEncoder,
         project: &Project,
         set: &TextureSet,
-        surface: Option<(&patine_procedural::surface::MeshBuffers, &wgpu::TextureView)>,
+        surface: Option<(
+            Arc<patine_procedural::surface::MeshBuffers>,
+            wgpu::TextureView,
+        )>,
+        materials: &mut BrushMaterials<'_>,
         used: &mut HashSet<PaintTarget>,
     ) -> Region {
         let size = set.resolution.pixels();
@@ -337,9 +381,9 @@ impl PaintRasters {
         // Shared, so that rasters can be changed while it is borrowed.
         let geometry = self.geometry(&project.mesh, set);
         let surface = SetSurface {
-            mesh,
+            mesh: &mesh,
             material: set.material_index,
-            surface_map: map,
+            surface_map: &map,
             geometry: &geometry,
             size,
         };
@@ -415,11 +459,11 @@ impl PaintRasters {
             // New or redone strokes.
             let save = log.strokes.len() - start <= SAVED_REPLAYS;
             for stroke in &log.strokes[start..] {
-                let painted: Vec<Channel> = channels
-                    .iter()
-                    .copied()
-                    .filter(|channel| stroke_value(stroke, target, *channel).is_some())
-                    .collect();
+                let painted = painted_channels(stroke, target, &channels);
+                let values = match stroke.brush.material {
+                    FillSource::Procedural(_) => materials(stroke, pool, encoder),
+                    _ => Vec::new(),
+                };
                 self.ensure_contents(ctx, pool, encoder, target, set.id, size, &painted);
                 let alpha = self.alpha(project, stroke);
                 let raster = self.rasters.get_mut(&target).expect("ensured above");
@@ -436,7 +480,10 @@ impl PaintRasters {
                         texture,
                         layout: *layout,
                         value: stroke_value(stroke, target, *channel).unwrap_or_default(),
-                        values: None,
+                        values: values
+                            .iter()
+                            .find(|(c, _)| c == channel)
+                            .map(|(_, view)| view),
                     })
                     .collect();
                 if save {

@@ -177,6 +177,10 @@ fn build_materials(
                         textures = textures.with(slot, &texture.view);
                     }
                 }
+                // Shading uses the normal with the height relief.
+                if let Some(normal) = gpu_set.shading_normal() {
+                    textures = textures.with(Slot::Normal, normal);
+                }
                 textures.inspect =
                     inspect.and_then(|inspect| inspected(inspect, set, document, white_mask));
             }

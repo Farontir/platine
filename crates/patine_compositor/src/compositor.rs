@@ -53,6 +53,42 @@ impl Region {
         }
     }
 
+    /// Marks the tiles of `other` too (a region of the same size).
+    pub fn union(&mut self, other: &Region) {
+        for (mine, theirs) in self.tiles.iter_mut().zip(&other.tiles) {
+            *mine |= *theirs;
+        }
+    }
+
+    /// The region with the tiles around each marked tile marked too: what changes when
+    /// texels read their neighbors.
+    pub fn dilated(&self) -> Region {
+        let mut dilated = self.clone();
+        let n = self.columns as i64;
+        for y in 0..n {
+            for x in 0..n {
+                if self.tiles[(y * n + x) as usize] {
+                    for (dx, dy) in [
+                        (-1, 0),
+                        (1, 0),
+                        (0, -1),
+                        (0, 1),
+                        (-1, -1),
+                        (1, 1),
+                        (-1, 1),
+                        (1, -1),
+                    ] {
+                        let (nx, ny) = (x + dx, y + dy);
+                        if (0..n).contains(&nx) && (0..n).contains(&ny) {
+                            dilated.tiles[(ny * n + nx) as usize] = true;
+                        }
+                    }
+                }
+            }
+        }
+        dilated
+    }
+
     /// Whether no tile is marked.
     pub fn is_empty(&self) -> bool {
         !self.tiles.contains(&true)
@@ -140,6 +176,18 @@ struct BlendUniforms {
     params: [f32; 4],
 }
 
+/// Uniforms of the shading normal pass. Must match `HeightNormal` in
+/// `shaders/compositor/height_normal.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct HeightNormalUniforms {
+    params: [f32; 4],
+}
+
+/// Slope of the relief per unit of height and of height force: a height step of 0.1
+/// over 10 % of the UV square tilts the normal by about 3 degrees at force 1.
+pub const HEIGHT_SCALE: f32 = 0.05;
+
 /// Uniforms of a mask effect pass. Must match `MaskStep` in
 /// `shaders/compositor/mask_effect.wgsl`.
 #[repr(C)]
@@ -175,6 +223,10 @@ pub struct Compositor {
     scalar: Pipelines,
     /// Mask effect pass (`R16Float`).
     mask: wgpu::RenderPipeline,
+    /// Shading normal pass (`Rgba16Float`).
+    height_normal: wgpu::RenderPipeline,
+    /// Bound as the normal channel of a set without one: 1×1.
+    flat_normal: wgpu::TextureView,
     /// Mask of the layers without mask: 1×1 white.
     white: wgpu::TextureView,
     /// Bound as the source texture of passes with a constant source.
@@ -265,6 +317,7 @@ impl Compositor {
         let blend_module = ctx.create_shader_module("compositor/blend")?;
         let downsample_module = ctx.create_shader_module("compositor/downsample")?;
         let mask_module = ctx.create_shader_module("compositor/mask_effect")?;
+        let height_normal_module = ctx.create_shader_module("compositor/height_normal")?;
         let pipeline = |module: &wgpu::ShaderModule, layout: &wgpu::BindGroupLayout, format| {
             let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("compositor"),
@@ -305,6 +358,12 @@ impl Compositor {
             rgba: pipelines(wgpu::TextureFormat::Rgba16Float),
             scalar: pipelines(wgpu::TextureFormat::R16Float),
             mask: pipeline(&mask_module, &mask_layout, wgpu::TextureFormat::R16Float),
+            height_normal: pipeline(
+                &height_normal_module,
+                &mask_layout,
+                wgpu::TextureFormat::Rgba16Float,
+            ),
+            flat_normal: pixel(ctx, wgpu::TextureFormat::Rgba16Float, 0.0),
             white: pixel(ctx, wgpu::TextureFormat::R16Float, 1.0),
             unused: pixel(ctx, wgpu::TextureFormat::R16Float, 0.0),
             blend_layout,
@@ -534,6 +593,83 @@ impl Compositor {
             pass.draw(0..3, 0..1);
         }
         true
+    }
+
+    /// Encodes the shading normal into mip 0 of `target` (`Rgba16Float`, `size`²) on the
+    /// tiles of `region`: the height channel's relief (`height`, force `force`) combined
+    /// with the normal channel (`normal`, flat without).
+    #[allow(clippy::too_many_arguments)]
+    pub fn height_normal(
+        &self,
+        ctx: &GpuContext,
+        encoder: &mut wgpu::CommandEncoder,
+        height: &wgpu::TextureView,
+        normal: Option<&wgpu::TextureView>,
+        target: &wgpu::TextureView,
+        force: f32,
+        size: u32,
+        region: &Region,
+    ) {
+        if region.is_empty() {
+            return;
+        }
+        let uniforms = HeightNormalUniforms {
+            params: [
+                force * HEIGHT_SCALE,
+                size as f32,
+                if normal.is_some() { 1.0 } else { 0.0 },
+                0.0,
+            ],
+        };
+        let buffer = ctx
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("compositor height normal"),
+                contents: bytemuck::bytes_of(&uniforms),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compositor height normal"),
+            layout: &self.mask_layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: buffer.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::TextureView(height),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(
+                        normal.unwrap_or(&self.flat_normal),
+                    ),
+                },
+            ],
+        });
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("compositor height normal"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view: target,
+                depth_slice: None,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+            })],
+            depth_stencil_attachment: None,
+            timestamp_writes: None,
+            occlusion_query_set: None,
+            multiview_mask: None,
+        });
+        pass.set_pipeline(&self.height_normal);
+        pass.set_bind_group(0, &bind_group, &[]);
+        for [x, y, width, height] in region.rects() {
+            pass.set_scissor_rect(x, y, width, height);
+            pass.draw(0..3, 0..1);
+        }
     }
 
     /// Copies the tiles of `region` from mip 0 of `source` to mip 0 of `destination`

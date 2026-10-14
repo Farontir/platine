@@ -112,7 +112,11 @@ gpu_test!(
         history.go_to(&mut project, 0).unwrap();
         gpu.sync(&ctx, &project);
         assert_eq!(gpu.pool.memory(), initial);
-        assert_eq!(gpu.pool.len(), 10, "two sets of five channels");
+        assert_eq!(
+            gpu.pool.len(),
+            12,
+            "two sets of five channels, each with its shading normal"
+        );
 
         match (device_initial, allocated_bytes(&ctx)) {
             (Some(before), Some(after)) => {

@@ -249,6 +249,23 @@ pub fn reoriented_normal(base: Rgb, detail: Rgb) -> Rgb {
     ])
 }
 
+/// The shading normal at texel `(x, y)` of a `size`² texture set whose height channel is
+/// `heights` (row by row) and whose normal there is `base` (flat without a normal
+/// channel): the relief's normal, by central differences in UV units scaled by `k`
+/// (height force × [`crate::compositor::HEIGHT_SCALE`]), combined by reoriented normal
+/// mapping. Must match `shaders/compositor/height_normal.wgsl`.
+pub fn height_normal(heights: &[f32], size: u32, x: u32, y: u32, k: f32, base: Rgb) -> Rgb {
+    let h = |dx: i32, dy: i32| {
+        let px = (x as i32 + dx).clamp(0, size as i32 - 1) as u32;
+        let py = (y as i32 + dy).clamp(0, size as i32 - 1) as u32;
+        heights[(py * size + px) as usize]
+    };
+    let du = (h(1, 0) - h(-1, 0)) * 0.5 * size as f32;
+    let dv = (h(0, 1) - h(0, -1)) * 0.5 * size as f32;
+    let detail = normalize([-k * du, -k * dv, 1.0]);
+    reoriented_normal(base, detail)
+}
+
 /// UDN detail blending: tilts add up, the base keeps its z.
 pub fn udn_normal(base: Rgb, detail: Rgb) -> Rgb {
     normalize([base[0] + detail[0], base[1] + detail[1], base[2]])

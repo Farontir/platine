@@ -41,7 +41,7 @@ use thiserror::Error;
 
 use crate::compositor::{BlendStep, Compositor, Ping, Region, Source};
 use crate::content::{ContentId, Contents};
-use crate::paint::{PaintRasters, StrokeUndo, layout_of, stroke_value};
+use crate::paint::{PaintRasters, StrokeUndo, layout_of, painted_channels, stroke_value};
 use crate::reference::ChannelKind;
 
 /// GPU format of a channel format.
@@ -93,15 +93,29 @@ fn scratch_descriptor(format: wgpu::TextureFormat, size: u32) -> wgpu::TextureDe
     }
 }
 
-/// Memory the final textures of `project` take, in bytes.
+/// Memory the final textures of `project` take, in bytes: every channel, and the
+/// shading normal of the texture sets with a height channel.
 pub fn expected_memory(project: &Project) -> u64 {
     project
         .texture_sets
         .iter()
-        .flat_map(|set| {
-            set.channels
+        .map(|set| {
+            let size = set.resolution.pixels();
+            let channels: u64 = set
+                .channels
                 .iter()
-                .map(|def| texture_bytes(&channel_descriptor(def.format, set.resolution.pixels())))
+                .map(|def| texture_bytes(&channel_descriptor(def.format, size)))
+                .sum();
+            let shading = if set
+                .channels
+                .iter()
+                .any(|def| def.channel == Channel::Height)
+            {
+                texture_bytes(&channel_descriptor(ChannelFormat::Rgba16Float, size))
+            } else {
+                0
+            };
+            channels + shading
         })
         .sum()
 }
@@ -152,6 +166,8 @@ pub struct GpuTextureSet {
     pub id: TextureSetId,
     /// One texture per active channel, in the order of the texture set.
     pub channels: Vec<ChannelTexture>,
+    /// The normal the viewport shades with, when the set has a height channel.
+    pub shading: Option<ShadingNormal>,
 }
 
 impl GpuTextureSet {
@@ -161,6 +177,28 @@ impl GpuTextureSet {
             .iter()
             .find(|texture| texture.def.channel == channel)
     }
+
+    /// The normal to shade with: the shading normal (normal channel and height relief)
+    /// when the set has a height channel, otherwise its normal channel.
+    pub fn shading_normal(&self) -> Option<&wgpu::TextureView> {
+        match &self.shading {
+            Some(shading) => Some(&shading.view),
+            None => self.channel(Channel::Normal).map(|texture| &texture.view),
+        }
+    }
+}
+
+/// The normal channel combined with the relief of the height channel
+/// (`Rgba16Float`, full mips, pinned).
+#[derive(Debug)]
+pub struct ShadingNormal {
+    /// Texture in the pool.
+    pub texture: TextureId,
+    /// View of every mip level.
+    pub view: wgpu::TextureView,
+    size: u32,
+    /// Height force it was built with.
+    force: f32,
 }
 
 /// Working textures, by size, format and slot (two slots per folder depth).
@@ -562,6 +600,9 @@ impl GpuDocument {
             for channel in set.channels {
                 release_channel(pool, channel);
             }
+            if let Some(shading) = set.shading {
+                pool.release(shading.texture);
+            }
         }
         for (_, mask) in self.masks.drain() {
             pool.release(mask.texture);
@@ -609,6 +650,25 @@ impl GpuDocument {
                 PaintRasters::needs_surface(set),
                 &mut used,
             );
+            let surface = self.contents.surface(set.id);
+            let contents = &mut self.contents;
+            let mut materials =
+                |stroke: &Stroke, pool: &mut TexturePool, encoder: &mut wgpu::CommandEncoder| {
+                    match &stroke.brush.material {
+                        FillSource::Procedural(procedural) => contents
+                            .brush_material(
+                                ctx,
+                                pool,
+                                compositor,
+                                encoder,
+                                set,
+                                procedural,
+                                &stroke.brush.projection,
+                            )
+                            .unwrap_or_default(),
+                        _ => Vec::new(),
+                    }
+                };
             let dirty = self.paints.sync_set(
                 ctx,
                 pool,
@@ -616,7 +676,8 @@ impl GpuDocument {
                 &mut encoder,
                 project,
                 set,
-                self.contents.surface(set.id),
+                surface,
+                &mut materials,
                 &mut painted,
             );
             if self.sync_masks(
@@ -630,12 +691,16 @@ impl GpuDocument {
             ) {
                 changed.push(set.id);
             }
-            let mut old = previous
+            let (mut old, old_shading) = previous
                 .iter()
                 .position(|gpu| gpu.id == set.id)
-                .map(|index| previous.remove(index).channels)
+                .map(|index| {
+                    let gpu = previous.remove(index);
+                    (gpu.channels, gpu.shading)
+                })
                 .unwrap_or_default();
             let mut set_changed = false;
+            let mut relief = Region::empty(size);
             let mut channels = Vec::with_capacity(set.channels.len());
             for def in &set.channels {
                 let reusable = old
@@ -677,7 +742,7 @@ impl GpuDocument {
                         }
                     }
                 };
-                self.evaluate(
+                let evaluated = self.evaluate(
                     ctx,
                     pool,
                     compositor,
@@ -686,24 +751,45 @@ impl GpuDocument {
                     &set.stack.layers,
                     &dirty,
                 );
+                if matches!(def.channel, Channel::Height | Channel::Normal) {
+                    relief.union(&evaluated);
+                }
                 channels.push(texture);
             }
             // Channels removed, or replaced at another size or format.
             for texture in old {
+                if matches!(texture.def.channel, Channel::Height | Channel::Normal) {
+                    relief = Region::full(size);
+                }
                 release_channel(pool, texture);
                 set_changed = true;
             }
+            let shading = sync_shading(
+                ctx,
+                pool,
+                compositor,
+                &mut encoder,
+                set,
+                &channels,
+                old_shading,
+                relief,
+                &mut set_changed,
+            );
             if set_changed && !changed.contains(&set.id) {
                 changed.push(set.id);
             }
             self.sets.push(GpuTextureSet {
                 id: set.id,
                 channels,
+                shading,
             });
         }
         for set in previous {
             for texture in set.channels {
                 release_channel(pool, texture);
+            }
+            if let Some(shading) = set.shading {
+                pool.release(shading.texture);
             }
         }
         // Masks of layers that were deleted or lost their mask: their views must leave
@@ -875,19 +961,19 @@ impl GpuDocument {
         texture: &mut ChannelTexture,
         layers: &[Layer],
         dirty: &Region,
-    ) {
+    ) -> Region {
         let channel = texture.def.channel;
         let (start, region) = match &texture.evaluated {
             None => (0, Region::full(texture.size)),
             Some(old) => match first_difference(old, layers, channel) {
-                None => return,
+                None => return Region::empty(texture.size),
                 Some(index) => {
                     if first_difference_with(old, layers, channel, true).is_none() {
                         // Only strokes changed: their tiles, already rasterized (or
                         // nothing, for a stroke composed live).
                         if dirty.is_empty() {
                             texture.evaluated = Some(layers.to_vec());
-                            return;
+                            return Region::empty(texture.size);
                         }
                         (index, dirty.clone())
                     } else {
@@ -899,12 +985,13 @@ impl GpuDocument {
         texture.evaluated = Some(layers.to_vec());
         self.compose(
             ctx, pool, compositor, encoder, texture, layers, start, region,
-        );
+        )
     }
 
     /// Composes `layers` into the channel texture `texture` from the top-level layer
     /// `start`, on the tiles of `region` (everywhere when a part of the stack below
-    /// `start` has to be composed and kept as the lower cache).
+    /// `start` has to be composed and kept as the lower cache). Returns the tiles
+    /// composed.
     #[allow(clippy::too_many_arguments)]
     fn compose(
         &mut self,
@@ -916,7 +1003,7 @@ impl GpuDocument {
         layers: &[Layer],
         start: usize,
         region: Region,
-    ) {
+    ) -> Region {
         let channel = texture.def.channel;
         let target = pool
             .peek(texture.texture)
@@ -927,7 +1014,7 @@ impl GpuDocument {
             if let Some(cache) = texture.cache.take() {
                 pool.release(cache.texture);
             }
-            return;
+            return Region::full(texture.size);
         }
 
         let kind = ChannelKind::of(channel);
@@ -1007,10 +1094,11 @@ impl GpuDocument {
         };
         evaluation.apply(encoder, pool, scratch, &layers[resume..], &mut pair, 0);
         let (Some(result), Some(target)) = (pool.peek(pair.0), pool.peek(texture.texture)) else {
-            return;
+            return Region::empty(texture.size);
         };
         compositor.copy(encoder, result, target, &evaluation.region);
         compositor.build_mips(ctx, encoder, kind, target, &evaluation.region);
+        evaluation.region
     }
 
     /// Makes sure the discardable textures a live stroke uses in texture set `set` are
@@ -1075,20 +1163,16 @@ impl GpuDocument {
         if !paintable {
             return Err(PaintError::NotPaintable);
         }
-        let channels: Vec<Channel> = match target {
+        let candidates: Vec<Channel> = match target {
             PaintTarget::Layer(_) => set
                 .channels
                 .iter()
                 .map(|def| def.channel)
-                .filter(|channel| {
-                    layer.channels.contains_key(channel)
-                        && stroke_value(&stroke, target, *channel).is_some()
-                })
+                .filter(|channel| layer.channels.contains_key(channel))
                 .collect(),
-            PaintTarget::Mask(..) => stroke_value(&stroke, target, MASK_VALUE_CHANNEL)
-                .map(|_| vec![MASK_VALUE_CHANNEL])
-                .unwrap_or_default(),
+            PaintTarget::Mask(..) => vec![MASK_VALUE_CHANNEL],
         };
+        let channels = painted_channels(&stroke, target, &candidates);
         if channels.is_empty() {
             return Err(PaintError::NoChannel);
         }
@@ -1106,9 +1190,9 @@ impl GpuDocument {
             return Err(PaintError::NoSurface);
         };
         let surface = SetSurface {
-            mesh,
+            mesh: &mesh,
             material: set.material_index,
-            surface_map: map,
+            surface_map: &map,
             geometry: &geometry,
             size,
         };
@@ -1148,6 +1232,8 @@ impl GpuDocument {
             return false;
         };
         let (target, set_id) = (live.target, live.set);
+        let brush = &live.stroke.stroke().brush;
+        let material = (brush.material.clone(), brush.projection);
         let Some(set) = project.texture_set(set_id) else {
             return false;
         };
@@ -1155,13 +1241,31 @@ impl GpuDocument {
         let geometry = self.paints.geometry(&project.mesh, set);
         let mut encoder = ctx.device.create_command_encoder(&Default::default());
         self.refresh_set(ctx, pool, compositor, &mut encoder, project, set);
+        // A procedural material deposits its texels, evaluated once on the set.
+        let values = match &material.0 {
+            FillSource::Procedural(procedural) => {
+                let (procedural, projection) = (procedural.clone(), material.1);
+                self.contents
+                    .brush_material(
+                        ctx,
+                        pool,
+                        compositor,
+                        &mut encoder,
+                        set,
+                        &procedural,
+                        &projection,
+                    )
+                    .unwrap_or_default()
+            }
+            _ => Vec::new(),
+        };
         let Some((mesh, map)) = self.contents.surface(set_id) else {
             return false;
         };
         let surface = SetSurface {
-            mesh,
+            mesh: &mesh,
             material: set.material_index,
-            surface_map: map,
+            surface_map: &map,
             geometry: &geometry,
             size,
         };
@@ -1183,7 +1287,10 @@ impl GpuDocument {
                 texture,
                 layout: layout_of(*channel),
                 value: stroke_value(live.stroke.stroke(), target, *channel).unwrap_or_default(),
-                values: None,
+                values: values
+                    .iter()
+                    .find(|(c, _)| c == channel)
+                    .map(|(_, view)| view),
             })
             .collect();
         let tiles = live.stroke.add(
@@ -1264,13 +1371,14 @@ impl GpuDocument {
             return;
         };
         let mut channels = std::mem::take(&mut self.sets[index].channels);
+        let mut relief = Region::empty(region.size());
         for texture in &mut channels {
             // Channels evaluated from the current document only: others wait for sync.
             if texture.evaluated.is_some()
                 && texture.size == region.size()
                 && affected.contains(&texture.def.channel)
             {
-                self.compose(
+                let composed = self.compose(
                     ctx,
                     pool,
                     compositor,
@@ -1280,7 +1388,15 @@ impl GpuDocument {
                     start,
                     region.clone(),
                 );
+                if matches!(texture.def.channel, Channel::Height | Channel::Normal) {
+                    relief.union(&composed);
+                }
             }
+        }
+        if let Some(shading) = &self.sets[index].shading
+            && shading.size == region.size()
+        {
+            update_shading(ctx, pool, compositor, encoder, &channels, shading, &relief);
         }
         self.sets[index].channels = channels;
     }
@@ -1358,13 +1474,135 @@ impl GpuDocument {
         pool.flush();
     }
 
-    /// Memory of the final textures, in bytes.
+    /// Memory of the final textures (channels and shading normals), in bytes.
     pub fn memory(&self) -> u64 {
         self.sets
             .iter()
-            .flat_map(|set| &set.channels)
-            .map(|texture| texture_bytes(&channel_descriptor(texture.def.format, texture.size)))
+            .map(|set| {
+                let channels: u64 = set
+                    .channels
+                    .iter()
+                    .map(|texture| {
+                        texture_bytes(&channel_descriptor(texture.def.format, texture.size))
+                    })
+                    .sum();
+                let shading = set.shading.as_ref().map_or(0, |shading| {
+                    texture_bytes(&channel_descriptor(
+                        ChannelFormat::Rgba16Float,
+                        shading.size,
+                    ))
+                });
+                channels + shading
+            })
             .sum()
+    }
+}
+
+/// The shading normal of `set` after its channels changed on `relief` (the tiles of its
+/// height and normal channels composed again): allocated when the set has a height
+/// channel (`set_changed` then tells that its view is new), released otherwise, and
+/// computed again where it changed.
+#[allow(clippy::too_many_arguments)]
+fn sync_shading(
+    ctx: &GpuContext,
+    pool: &mut TexturePool,
+    compositor: &Compositor,
+    encoder: &mut wgpu::CommandEncoder,
+    set: &patine_core::project::TextureSet,
+    channels: &[ChannelTexture],
+    old: Option<ShadingNormal>,
+    relief: Region,
+    set_changed: &mut bool,
+) -> Option<ShadingNormal> {
+    let size = set.resolution.pixels();
+    if !channels
+        .iter()
+        .any(|texture| texture.def.channel == Channel::Height)
+    {
+        if let Some(old) = old {
+            pool.release(old.texture);
+            *set_changed = true;
+        }
+        return None;
+    }
+    let mut region = relief;
+    let mut shading = match old {
+        Some(old) if old.size == size && pool.get(old.texture).is_some() => old,
+        other => {
+            if let Some(old) = other {
+                pool.release(old.texture);
+            }
+            let texture = pool.allocate(
+                ctx,
+                &channel_descriptor(ChannelFormat::Rgba16Float, size),
+                Residency::Pinned,
+            );
+            let view = pool
+                .peek(texture)
+                .expect("a texture that was just allocated")
+                .create_view(&wgpu::TextureViewDescriptor::default());
+            *set_changed = true;
+            region = Region::full(size);
+            ShadingNormal {
+                texture,
+                view,
+                size,
+                force: f32::NAN,
+            }
+        }
+    };
+    if shading.force != set.height_force {
+        shading.force = set.height_force;
+        region = Region::full(size);
+    }
+    update_shading(ctx, pool, compositor, encoder, channels, &shading, &region);
+    Some(shading)
+}
+
+/// Computes `shading` again on `relief` widened by one tile (central differences read
+/// the neighbors), mips included.
+fn update_shading(
+    ctx: &GpuContext,
+    pool: &TexturePool,
+    compositor: &Compositor,
+    encoder: &mut wgpu::CommandEncoder,
+    channels: &[ChannelTexture],
+    shading: &ShadingNormal,
+    relief: &Region,
+) {
+    if relief.is_empty() {
+        return;
+    }
+    let region = relief.dilated();
+    let level0 = |id: TextureId| {
+        pool.peek(id).map(|texture| {
+            texture.create_view(&wgpu::TextureViewDescriptor {
+                base_mip_level: 0,
+                mip_level_count: Some(1),
+                ..Default::default()
+            })
+        })
+    };
+    let channel = |c: Channel| channels.iter().find(|texture| texture.def.channel == c);
+    let (Some(height), Some(target)) = (
+        channel(Channel::Height).and_then(|texture| level0(texture.texture)),
+        level0(shading.texture),
+    ) else {
+        return;
+    };
+    let normal = channel(Channel::Normal).and_then(|texture| level0(texture.texture));
+    compositor.height_normal(
+        ctx,
+        encoder,
+        &height,
+        normal.as_ref(),
+        &target,
+        shading.force,
+        shading.size,
+        &region,
+    );
+    if let Some(texture) = pool.peek(shading.texture) {
+        compositor.build_mips(ctx, encoder, ChannelKind::Normal, texture, &region);
     }
 }
 
