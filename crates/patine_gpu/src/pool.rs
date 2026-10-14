@@ -147,6 +147,19 @@ impl TexturePool {
         self.entries.get(&id).map(|entry| &entry.texture)
     }
 
+    /// Changes whether the texture `id` may be evicted (a texture pinned while it is
+    /// being written, then kept as a cache). Making it discardable may evict at once
+    /// other textures not used since the last flush. Returns `false` for an unknown
+    /// texture.
+    pub fn set_residency(&mut self, id: TextureId, residency: Residency) -> bool {
+        let Some(entry) = self.entries.get_mut(&id) else {
+            return false;
+        };
+        entry.residency = residency;
+        self.evict();
+        true
+    }
+
     /// Removes the texture `id` from the pool and its memory from the accounting; it is
     /// destroyed by the next [`TexturePool::flush`]. Releasing an unknown texture does
     /// nothing.

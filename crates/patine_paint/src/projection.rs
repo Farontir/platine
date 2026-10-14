@@ -169,8 +169,9 @@ impl SetGeometry {
         let rects: Vec<(Vec2, Vec2)> = dabs
             .iter()
             .map(|dab| {
+                // An alpha turned by 45 degrees reaches the corners of its square.
                 let center = Vec2::from(dab.center);
-                let reach = Vec2::splat(dab.radius + 1.0);
+                let reach = Vec2::splat(dab.radius * std::f32::consts::SQRT_2 + 1.0);
                 (center - reach, center + reach)
             })
             .collect();

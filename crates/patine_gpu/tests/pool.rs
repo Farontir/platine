@@ -151,3 +151,25 @@ gpu_test!(
         assert_eq!(pool.evicted(), 1);
     }
 );
+
+gpu_test!(
+    /// A pinned texture made discardable becomes evictable, and the other way round.
+    fn residency_changes(ctx) {
+        let one = texture_bytes(&desc(64));
+        let mut pool = TexturePool::new(one);
+        let a = pool.allocate(&ctx, &desc(64), Residency::Pinned);
+        let b = pool.allocate(&ctx, &desc(64), Residency::Pinned);
+        pool.flush();
+        assert_eq!(pool.len(), 2, "pinned textures stay over budget");
+        // Not used since the flush: made discardable, `a` goes at once.
+        assert!(pool.set_residency(a, Residency::Discardable));
+        assert!(pool.get(a).is_none());
+        assert_eq!(pool.memory(), one);
+        assert!(!pool.set_residency(a, Residency::Pinned), "unknown once evicted");
+        // `b` becomes discardable within budget: kept until something needs room.
+        assert!(pool.set_residency(b, Residency::Discardable));
+        assert_eq!(pool.len(), 1);
+        let c = pool.allocate(&ctx, &desc(64), Residency::Discardable);
+        assert!(pool.get(b).is_none() && pool.get(c).is_some());
+    }
+);
