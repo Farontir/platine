@@ -1200,6 +1200,11 @@ impl GpuDocument {
             for tile in &tiles {
                 region.add_tile(tile[0], tile[1]);
             }
+            let painted = self
+                .live
+                .as_ref()
+                .map(|live| live.channels.clone())
+                .unwrap_or_default();
             self.recompose(
                 ctx,
                 pool,
@@ -1208,6 +1213,7 @@ impl GpuDocument {
                 project,
                 target,
                 set_id,
+                &painted,
                 &region,
             );
         }
@@ -1217,7 +1223,8 @@ impl GpuDocument {
     }
 
     /// Composes again, on `region`, the mask of the layer painted (for a mask target)
-    /// and the channels of its texture set, from the layer's top-level ancestor.
+    /// and the channels that changed: those `painted` on a layer, every channel the
+    /// layer affects for its mask; from the layer's top-level ancestor.
     #[allow(clippy::too_many_arguments)]
     fn recompose(
         &mut self,
@@ -1228,12 +1235,21 @@ impl GpuDocument {
         project: &Project,
         target: PaintTarget,
         set_id: TextureSetId,
+        painted: &[Channel],
         region: &Region,
     ) {
         let Some(set) = project.texture_set(set_id) else {
             return;
         };
         let layer = target.layer();
+        let affected: Vec<Channel> = match target {
+            PaintTarget::Layer(_) => painted.to_vec(),
+            PaintTarget::Mask(..) => set
+                .stack
+                .find(layer)
+                .map(|found| found.channels.keys().copied().collect())
+                .unwrap_or_default(),
+        };
         if let PaintTarget::Mask(..) = target
             && let Some(mask) = self.masks.remove(&layer)
         {
@@ -1249,7 +1265,10 @@ impl GpuDocument {
         let mut channels = std::mem::take(&mut self.sets[index].channels);
         for texture in &mut channels {
             // Channels evaluated from the current document only: others wait for sync.
-            if texture.evaluated.is_some() && texture.size == region.size() {
+            if texture.evaluated.is_some()
+                && texture.size == region.size()
+                && affected.contains(&texture.def.channel)
+            {
                 self.compose(
                     ctx,
                     pool,
@@ -1327,6 +1346,7 @@ impl GpuDocument {
                 project,
                 live.target,
                 live.set,
+                &live.channels,
                 &region,
             );
         }

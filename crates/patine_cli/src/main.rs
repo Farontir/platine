@@ -9,6 +9,8 @@
 //! - `patine_cli bench procedural [--layers N] [--resolution N] [--edits N] [--material ID]
 //!   [--triplanar]`: time to see a parameter of a procedural material at the bottom of a
 //!   stack (M7 criterion 3).
+//! - `patine_cli bench paint [--layers N] [--resolution N] [--dabs N] [--size PX]`: time
+//!   to see a dab on a paint layer in the middle of a stack (M8 criterion 3).
 //! - `patine_cli bench compositor [--layers N] [--resolution N] [--edits N] [--masks]`:
 //!   time to evaluate a stack again after editing its bottom fill (30 fills, 4K by
 //!   default), or its mask.
@@ -33,6 +35,7 @@ const USAGE: &str = "usage: patine_cli inspect <mesh> [--allow-missing-uvs]
        patine_cli bench viewport [--triangles N] [--frames N] [--size WxH] [--no-shadows] [--textures N]
        patine_cli bench project <mesh> [--out file.patine]
        patine_cli bench compositor [--layers N] [--resolution N] [--edits N] [--masks]
+       patine_cli bench paint [--layers N] [--resolution N] [--dabs N] [--size PX]
        patine_cli bench procedural [--layers N] [--resolution N] [--edits N]
                                    [--material ID] [--triplanar]
        patine_cli --version";
@@ -185,6 +188,9 @@ fn main() -> anyhow::Result<()> {
         }
         Some("bench") if args.get(1).map(String::as_str) == Some("procedural") => {
             bench::ProceduralBench::parse(&args[2..])?.run()
+        }
+        Some("bench") if args.get(1).map(String::as_str) == Some("paint") => {
+            bench::PaintBench::parse(&args[2..])?.run()
         }
         Some("bench") if args.get(1).map(String::as_str) == Some("compositor") => {
             bench::CompositorBench::parse(&args[2..])?.run()

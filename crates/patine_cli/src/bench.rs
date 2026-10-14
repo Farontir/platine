@@ -512,3 +512,238 @@ impl ProceduralBench {
         Ok(())
     }
 }
+
+/// Options of the paint benchmark (M8 criterion 3: a dab shows in less than 8 ms on a
+/// 4K stack of 20 layers).
+pub struct PaintBench {
+    /// Layers of the stack, the paint layer included (in the middle).
+    pub layers: usize,
+    /// Texture set resolution.
+    pub resolution: Resolution,
+    /// Dabs of the measured stroke, one per frame.
+    pub dabs: usize,
+    /// Brush diameter in pixels.
+    pub size: f32,
+}
+
+impl PaintBench {
+    /// Parses `--layers N --resolution N --dabs N --size PX`.
+    pub fn parse(args: &[String]) -> anyhow::Result<Self> {
+        let mut bench = Self {
+            layers: 20,
+            resolution: Resolution::new(4096).context("supported")?,
+            dabs: 200,
+            size: 80.0,
+        };
+        let mut args = args.iter();
+        while let Some(arg) = args.next() {
+            let mut value = || args.next().context("missing value");
+            match arg.as_str() {
+                "--layers" => bench.layers = value()?.parse()?,
+                "--resolution" => {
+                    let pixels = value()?.parse()?;
+                    bench.resolution = Resolution::new(pixels).context("resolution 512 to 8192")?;
+                }
+                "--dabs" => bench.dabs = value()?.parse()?,
+                "--size" => bench.size = value()?.parse()?,
+                other => bail!("unknown option {other}"),
+            }
+        }
+        Ok(bench)
+    }
+
+    /// Runs the benchmark and prints the results.
+    pub fn run(&self) -> anyhow::Result<()> {
+        use patine_core::command::Command;
+        use patine_core::commands::{PaintStroke, PaintTarget};
+        use patine_core::ids::IdSequence;
+        use patine_core::layer::{BlendMode, FillSource, Layer};
+        use patine_core::stroke::{
+            BrushSnapshot, Dab, SizeSpace, Stroke, StrokeCamera, Symmetry, Tool,
+        };
+
+        let ctx = GpuContext::new_headless(AdapterChoice::Hardware)?;
+        let info = ctx.adapter_info();
+        println!("adapter    {} ({:?})", info.name, info.backend);
+        let mesh = primitives::uv_sphere(128, 64);
+        let bounds = mesh.bounds().context("the sphere has bounds")?;
+        let mut project = Project::new(
+            mesh,
+            "bench".into(),
+            ProjectSettings {
+                resolution: self.resolution,
+                ..ProjectSettings::default()
+            },
+        );
+        let mut ids = IdSequence::starting_at(project.next_id);
+        let set = &mut project.texture_sets[0];
+        let defs = set.channels.clone();
+        let channels: Vec<Channel> = defs.iter().map(|def| def.channel).collect();
+        let below = self.layers.saturating_sub(1) / 2;
+        let fill = |i: usize, ids: &mut IdSequence| {
+            let mut layer = Layer::fill_for(ids.layer(), format!("fill {i}"), &defs);
+            for (channel, blend) in &mut layer.channels {
+                if *channel != Channel::Normal {
+                    blend.mode =
+                        [BlendMode::Normal, BlendMode::Multiply, BlendMode::Overlay][i % 3];
+                }
+                blend.opacity = 0.5;
+            }
+            layer
+        };
+        let mut layers = Vec::new();
+        for i in 0..below {
+            layers.push(fill(i, &mut ids));
+        }
+        let paint = ids.layer();
+        layers.push(Layer::paint(paint, "paint", &channels));
+        for i in below..self.layers.saturating_sub(1) {
+            layers.push(fill(i, &mut ids));
+        }
+        set.stack.layers = layers;
+        project.next_id = ids.next_raw();
+
+        let (width, height) = (1920u32, 1080u32);
+        let aspect = width as f32 / height as f32;
+        let mut camera = OrbitCamera::default();
+        camera.frame(&bounds, aspect);
+        let stroke_camera = StrokeCamera {
+            view_proj: camera.view_projection(aspect).to_cols_array_2d(),
+            viewport: [width, height],
+        };
+        // A circle around the sphere's center on screen, one dab per frame.
+        let dabs: Vec<Dab> = (0..self.dabs)
+            .map(|i| {
+                let angle = i as f32 / self.dabs as f32 * std::f32::consts::TAU;
+                Dab {
+                    position: [960.0 + 250.0 * angle.cos(), 540.0 + 250.0 * angle.sin()],
+                    pressure: 1.0,
+                    tilt: [0.0; 2],
+                    time: i as f32 / 60.0,
+                }
+            })
+            .collect();
+        let stroke = Stroke {
+            brush: BrushSnapshot {
+                size: self.size,
+                size_space: SizeSpace::Screen,
+                flow: 0.8,
+                opacity: 1.0,
+                hardness: 0.6,
+                spacing: 0.1,
+                angle: 0.0,
+                size_jitter: 0.0,
+                angle_jitter: 0.0,
+                flow_jitter: 0.0,
+                scatter: 0.0,
+                follow_path: false,
+                alpha: None,
+                material: FillSource::Uniform(
+                    [
+                        (Channel::BaseColor, [0.7, 0.2, 0.1, 1.0]),
+                        (Channel::Roughness, [0.3; 4]),
+                    ]
+                    .into(),
+                ),
+            },
+            tool: Tool::Brush,
+            camera: stroke_camera,
+            symmetry: Symmetry::default(),
+            seed: 0,
+            dabs: Vec::new(),
+        };
+
+        let compositor = Compositor::new(&ctx)?;
+        let mut pool = TexturePool::new(u64::MAX);
+        let mut document = GpuDocument::new();
+        let start = Instant::now();
+        document.sync(&ctx, &mut pool, &compositor, &project);
+        ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+        println!(
+            "stack      paint layer in the middle of {} layers, {} channels of {}², first evaluation {:.0} ms (surface map and pipelines included)",
+            self.layers,
+            defs.len(),
+            self.resolution.pixels(),
+            start.elapsed().as_secs_f64() * 1e3
+        );
+        let target = PaintTarget::Layer(paint);
+        let start = Instant::now();
+        document
+            .begin_stroke(&ctx, &mut pool, &compositor, &project, target, stroke, None)
+            .context("the paint layer takes strokes")?;
+        ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+        let begin = start.elapsed().as_secs_f64() * 1e3;
+        let mut times = Vec::new();
+        for dab in &dabs {
+            let start = Instant::now();
+            document.paint(
+                &ctx,
+                &mut pool,
+                &compositor,
+                &project,
+                std::slice::from_ref(dab),
+            );
+            ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+            times.push(start.elapsed().as_secs_f64() * 1e3);
+        }
+        let slowest = times
+            .iter()
+            .copied()
+            .enumerate()
+            .skip(1)
+            .max_by(|a, b| a.1.total_cmp(&b.1));
+        let first = times.first().copied().unwrap_or_default();
+        let rest = &times[1.min(times.len())..];
+        let average = rest.iter().sum::<f64>() / rest.len().max(1) as f64;
+        let max = rest.iter().copied().fold(0.0, f64::max);
+        let mut sorted = rest.to_vec();
+        sorted.sort_by(f64::total_cmp);
+        let p95 = sorted
+            .get(sorted.len() * 95 / 100)
+            .copied()
+            .unwrap_or_default();
+        println!(
+            "stroke     start {begin:.1} ms; first dab {first:.1} ms (composes the layers below once)"
+        );
+        println!(
+            "dab        {} px: average {average:.2} ms, 95th percentile {p95:.2} ms, max {max:.2} ms over {} dabs",
+            self.size,
+            rest.len()
+        );
+        if let Some((index, ms)) = slowest {
+            println!(
+                "slowest    dab {index}: {ms:.2} ms (new tiles saved for undo may need GPU memory)"
+            );
+        }
+        println!("budget     < 8 ms on the RTX 3080 Ti, < 16 ms on the RTX A2000 (M8 criterion 3)");
+
+        let start = Instant::now();
+        let painted = document
+            .end_stroke(&mut pool, &compositor)
+            .context("dabs were painted")?;
+        PaintStroke::new(target, painted, None, "paint")
+            .apply(&mut project)
+            .expect("the paint layer takes the stroke");
+        document.sync(&ctx, &mut pool, &compositor, &project);
+        ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+        println!(
+            "end        stroke added and synced in {:.1} ms (adopted, nothing rasterized again)",
+            start.elapsed().as_secs_f64() * 1e3
+        );
+        println!(
+            "memory     {:.0} MB in the pool, of which {:.0} MB of paint contents",
+            pool.memory() as f64 / 1e6,
+            document.paint_memory() as f64 / 1e6
+        );
+        let start = Instant::now();
+        let mut fresh_pool = TexturePool::new(u64::MAX);
+        let mut fresh = GpuDocument::new();
+        fresh.sync(&ctx, &mut fresh_pool, &compositor, &project);
+        ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+        println!(
+            "replay     a new document with the stroke: {:.0} ms (full evaluation and replay)",
+            start.elapsed().as_secs_f64() * 1e3
+        );
+        Ok(())
+    }
+}
