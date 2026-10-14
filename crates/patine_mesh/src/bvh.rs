@@ -426,11 +426,27 @@ impl Bvh {
         max: Vec3,
         out: &mut Vec<u32>,
     ) {
+        self.query_bounds(
+            positions,
+            triangles,
+            |node_min, node_max| node_min.cmple(max).all() && node_max.cmpge(min).all(),
+            out,
+        );
+    }
+
+    /// Appends to `out` every triangle whose bounding box passes `overlaps`, a test of a
+    /// box (minimum and maximum corners) that must hold for any box containing one that
+    /// passes: subtrees whose bounds fail are skipped.
+    pub fn query_bounds(
+        &self,
+        positions: &[[f32; 3]],
+        triangles: &[[u32; 3]],
+        mut overlaps: impl FnMut(Vec3, Vec3) -> bool,
+        out: &mut Vec<u32>,
+    ) {
         if self.nodes.is_empty() {
             return;
         }
-        let overlaps =
-            |node_min: Vec3, node_max: Vec3| node_min.cmple(max).all() && node_max.cmpge(min).all();
         let mut stack = vec![0u32];
         while let Some(index) = stack.pop() {
             let node = &self.nodes[index as usize];

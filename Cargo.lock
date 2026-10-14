@@ -2482,9 +2482,15 @@ dependencies = [
 name = "patine_paint"
 version = "0.1.0"
 dependencies = [
+ "bytemuck",
+ "glam",
+ "image",
  "patine_core",
  "patine_gpu",
  "patine_mesh",
+ "patine_procedural",
+ "proptest",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
