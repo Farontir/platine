@@ -267,9 +267,8 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, overlay: Option<&str>) -> Viewpor
     view.painting = painting;
     view.paint_events.extend(events);
 
-    if response.hovered()
-        && let Some((outline, paintable)) = &view.cursor
-    {
+    // Computed by the application while the viewport is hovered (or a hover is forced).
+    if let Some((outline, paintable)) = &view.cursor {
         crate::paint_tool::draw_cursor(ui.painter(), rect, pixels_per_point, outline, *paintable);
     }
     let now = ui.input(|input| input.time);

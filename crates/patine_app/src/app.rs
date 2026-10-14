@@ -1755,17 +1755,22 @@ impl App {
             None => {}
         }
 
-        // Strokes given on the command line, once the view has settled.
+        // Strokes given on the command line, once the view has settled: one per frame,
+        // each with its tool.
         if !view.frame_pending && view.texture.is_some() && !self.startup.strokes.is_empty() {
-            for points in std::mem::take(&mut self.startup.strokes) {
-                let mut events = points.iter().map(|p| PaintEvent::Move(*p));
-                if let Some(first) = points.first() {
-                    view.paint_events.push(PaintEvent::Press(*first));
-                    events.next();
-                }
-                view.paint_events.extend(events);
-                view.paint_events.push(PaintEvent::Release);
+            let stroke = self.startup.strokes.remove(0);
+            if stroke.eraser {
+                self.ui.tool.tool = crate::paint_tool::Tool::Eraser;
+            } else if self.startup.eraser != Some(true) {
+                self.ui.tool.tool = crate::paint_tool::Tool::Brush;
             }
+            let mut points = stroke.points.iter();
+            if let Some(first) = points.next() {
+                view.paint_events.push(PaintEvent::Press(*first));
+            }
+            view.paint_events
+                .extend(points.map(|p| PaintEvent::Move(*p)));
+            view.paint_events.push(PaintEvent::Release);
             gfx.window.request_redraw();
         }
         // Painting gestures of this frame, on the synced document.

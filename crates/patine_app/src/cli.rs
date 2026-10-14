@@ -53,8 +53,8 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
                                 hardness=V, spacing=V, angle=DEG, smoothing=PX,
                                 alpha=ID|round, color=R,G,B, roughness=V, metallic=V,
                                 height=V, mask=V, off=CHANNEL
-  --stroke X,Y;X,Y;...          paint a stroke through these viewport pixels, as with
-                                the mouse (repeatable)
+  --stroke [eraser:]X,Y;X,Y;... paint a stroke through these viewport pixels, as with
+                                the mouse, with the brush (or the eraser) (repeatable)
 
   A project file (.patine) can be given instead of a mesh.";
 
@@ -159,8 +159,21 @@ impl BrushOption {
     }
 }
 
-/// The viewport pixels of a `--stroke` value: `X,Y;X,Y;...`.
-fn stroke_points(value: &str) -> Option<Vec<[f32; 2]>> {
+/// A stroke given on the command line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StartupStroke {
+    /// Painted with the eraser instead of the tool chosen with `--tool`.
+    pub eraser: bool,
+    /// Viewport pixels the pointer goes through.
+    pub points: Vec<[f32; 2]>,
+}
+
+/// A `--stroke` value: `[eraser:]X,Y;X,Y;...`.
+fn stroke_points(value: &str) -> Option<StartupStroke> {
+    let (eraser, value) = match value.strip_prefix("eraser:") {
+        Some(rest) => (true, rest),
+        None => (false, value),
+    };
     let points: Vec<[f32; 2]> = value
         .split(';')
         .map(|point| {
@@ -168,7 +181,7 @@ fn stroke_points(value: &str) -> Option<Vec<[f32; 2]>> {
             Some([x.trim().parse().ok()?, y.trim().parse().ok()?])
         })
         .collect::<Option<_>>()?;
-    (!points.is_empty()).then_some(points)
+    (!points.is_empty()).then_some(StartupStroke { eraser, points })
 }
 
 impl StartupEdit {
@@ -305,7 +318,7 @@ pub struct StartupOptions {
     /// Brush settings, in order.
     pub brush: Vec<BrushOption>,
     /// Strokes to paint once the view has settled, in viewport pixels.
-    pub strokes: Vec<Vec<[f32; 2]>>,
+    pub strokes: Vec<StartupStroke>,
 }
 
 /// Invalid command line.
@@ -673,6 +686,8 @@ mod tests {
             "off=roughness",
             "--stroke",
             "10,20;30.5,40",
+            "--stroke",
+            "eraser:1,2",
         ])
         .unwrap();
         assert_eq!(
@@ -689,7 +704,19 @@ mod tests {
                 BrushOption::Off(Channel::Roughness),
             ]
         );
-        assert_eq!(options.strokes, [vec![[10.0, 20.0], [30.5, 40.0]]]);
+        assert_eq!(
+            options.strokes,
+            [
+                StartupStroke {
+                    eraser: false,
+                    points: vec![[10.0, 20.0], [30.5, 40.0]]
+                },
+                StartupStroke {
+                    eraser: true,
+                    points: vec![[1.0, 2.0]]
+                },
+            ]
+        );
         assert!(parse(&["--brush", "color=1,0"]).is_err());
         assert!(parse(&["--brush", "girth=3"]).is_err());
         assert!(parse(&["--stroke", "10;20"]).is_err());
