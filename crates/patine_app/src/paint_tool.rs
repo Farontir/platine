@@ -12,13 +12,20 @@ use fluent_bundle::FluentArgs;
 use glam::{Mat4, Vec2, Vec3};
 use patine_core::channel::{Channel, ChannelDef};
 use patine_core::commands::PaintTarget;
-use patine_core::layer::{FillSource, LayerKind};
+use patine_core::layer::{FillSource, LayerKind, ProceduralRef, Projection};
 use patine_core::mask::{MASK_VALUE_CHANNEL, MaskEffect};
 use patine_core::project::TextureSet;
 use patine_core::resource::{Resource, ResourceHash};
-use patine_core::stroke::{BrushSnapshot, SizeSpace, StrokeLog, Tool as StrokeTool};
+use patine_core::stroke::{
+    BrushSnapshot, Curve, PressureCurves, SizeSpace, StrokeLog, Symmetry, Tool as StrokeTool,
+};
 use patine_paint::alphas::{ALPHAS, find as find_alpha};
 use patine_paint::sampler::SamplerSettings;
+use patine_procedural::def::Category;
+
+use crate::brush_presets::{
+    BrushPreset, BrushSettings, PresetLibrary, PresetMaterial, SHIPPED_KEYS, file_name, shipped,
+};
 
 use crate::display_panel::gesture_ended;
 use crate::document::channel_name;
@@ -37,6 +44,15 @@ pub enum Tool {
 
 /// Smallest and largest brush sizes, in viewport pixels.
 pub const SIZE_RANGE: (f32, f32) = (1.0, 1000.0);
+
+/// The preset the brush was last set from.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PresetChoice {
+    /// A shipped preset, by its name's translation key.
+    Shipped(&'static str),
+    /// A preset of the user, by name.
+    User(String),
+}
 
 /// Brush settings and the active tool.
 #[derive(Clone, Debug, PartialEq)]
@@ -63,23 +79,67 @@ pub struct ToolState {
     pub channels: BTreeMap<Channel, (bool, [f32; 4])>,
     /// Gray painted into masks.
     pub mask_value: f32,
+    /// Random size variation, 0 to 1.
+    pub size_jitter: f32,
+    /// Random rotation, radians.
+    pub angle_jitter: f32,
+    /// Random flow variation, 0 to 1.
+    pub flow_jitter: f32,
+    /// Random offset across the stroke, as a fraction of the size.
+    pub scatter: f32,
+    /// Dabs turn along the stroke.
+    pub follow_path: bool,
+    /// The pen tilt turns the dabs.
+    pub tilt_angle: bool,
+    /// What the pen pressure changes.
+    pub pressure: PressureCurves,
+    /// Procedural material painted on layers instead of the channel values.
+    pub procedural: Option<ProceduralRef>,
+    /// Procedural pattern painted into masks instead of the gray.
+    pub mask_procedural: Option<ProceduralRef>,
+    /// Projection of the procedurals.
+    pub projection: Projection,
+    /// Symmetry of the strokes painted in the 3D view.
+    pub symmetry: Symmetry,
+    /// Shipped and user presets.
+    pub presets: PresetLibrary,
+    /// The preset the brush was last set from.
+    pub preset: Option<PresetChoice>,
+    /// Strokes started, for their seeds.
+    pub strokes_started: u64,
 }
 
 impl Default for ToolState {
     fn default() -> Self {
-        Self {
+        let mut state = Self {
             tool: Tool::Brush,
-            size: 40.0,
-            flow: 0.8,
-            opacity: 1.0,
-            hardness: 0.6,
-            spacing: 0.1,
+            size: 0.0,
+            flow: 0.0,
+            opacity: 0.0,
+            hardness: 0.0,
+            spacing: 0.0,
             angle: 0.0,
             smoothing: 0.0,
             alpha: None,
             channels: BTreeMap::new(),
             mask_value: 1.0,
-        }
+            size_jitter: 0.0,
+            angle_jitter: 0.0,
+            flow_jitter: 0.0,
+            scatter: 0.0,
+            follow_path: false,
+            tilt_angle: false,
+            pressure: PressureCurves::default(),
+            procedural: None,
+            mask_procedural: None,
+            projection: BrushSnapshot::default_projection(),
+            symmetry: Symmetry::default(),
+            presets: PresetLibrary::default(),
+            preset: None,
+            strokes_started: 0,
+        };
+        state.apply_settings(&BrushSettings::default());
+        state
     }
 }
 
@@ -95,6 +155,112 @@ fn initial(def: &ChannelDef) -> (bool, [f32; 4]) {
 }
 
 impl ToolState {
+    /// The brush settings, as a preset records them.
+    pub fn settings(&self) -> BrushSettings {
+        BrushSettings {
+            size: self.size,
+            flow: self.flow,
+            opacity: self.opacity,
+            hardness: self.hardness,
+            spacing: self.spacing,
+            angle: self.angle,
+            smoothing: self.smoothing,
+            alpha: self.alpha.map(str::to_owned),
+            size_jitter: self.size_jitter,
+            angle_jitter: self.angle_jitter,
+            flow_jitter: self.flow_jitter,
+            scatter: self.scatter,
+            follow_path: self.follow_path,
+            tilt_angle: self.tilt_angle,
+            pressure: self.pressure.clone(),
+        }
+    }
+
+    /// Sets the brush from `settings` (an unknown alpha gives round dabs).
+    pub fn apply_settings(&mut self, settings: &BrushSettings) {
+        self.size = settings.size.clamp(SIZE_RANGE.0, SIZE_RANGE.1);
+        self.flow = settings.flow;
+        self.opacity = settings.opacity;
+        self.hardness = settings.hardness;
+        self.spacing = settings.spacing;
+        self.angle = settings.angle;
+        self.smoothing = settings.smoothing;
+        self.alpha = settings
+            .alpha
+            .as_deref()
+            .and_then(find_alpha)
+            .map(|alpha| alpha.id);
+        self.size_jitter = settings.size_jitter;
+        self.angle_jitter = settings.angle_jitter;
+        self.flow_jitter = settings.flow_jitter;
+        self.scatter = settings.scatter;
+        self.follow_path = settings.follow_path;
+        self.tilt_angle = settings.tilt_angle;
+        self.pressure = settings.pressure.clone();
+    }
+
+    /// The painted material, as a user preset records it.
+    pub fn material(&self) -> PresetMaterial {
+        PresetMaterial {
+            channels: self
+                .channels
+                .iter()
+                .map(|(channel, (checked, value))| (*channel, *checked, *value))
+                .collect(),
+            mask_value: self.mask_value,
+            procedural: self.procedural.clone(),
+            mask_procedural: self.mask_procedural.clone(),
+            projection: self.projection,
+        }
+    }
+
+    /// Sets the painted material from `material`.
+    pub fn apply_material(&mut self, material: &PresetMaterial) {
+        self.channels = material
+            .channels
+            .iter()
+            .map(|(channel, checked, value)| (*channel, (*checked, *value)))
+            .collect();
+        self.mask_value = material.mask_value;
+        self.procedural = material.procedural.clone();
+        self.mask_procedural = material.mask_procedural.clone();
+        self.projection = material.projection;
+    }
+
+    /// Sets the brush from `preset` (and its material, if it has one).
+    pub fn apply_preset(&mut self, preset: &BrushPreset, choice: PresetChoice) {
+        self.apply_settings(&preset.brush);
+        if let Some(material) = &preset.material {
+            self.apply_material(material);
+        }
+        self.preset = Some(choice);
+    }
+
+    /// The brush and its material as a user preset called `name`.
+    pub fn user_preset(&self, name: &str) -> BrushPreset {
+        BrushPreset {
+            name: name.to_owned(),
+            brush: self.settings(),
+            material: Some(self.material()),
+        }
+    }
+
+    /// The seed of a new stroke: a different one for each stroke, the same sequence in
+    /// every session (captures are reproducible).
+    pub fn next_seed(&mut self) -> u64 {
+        self.strokes_started += 1;
+        // SplitMix64 of the stroke count.
+        let mut z = self.strokes_started.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// Switches the mirror symmetry across X on or off.
+    pub fn toggle_mirror_x(&mut self) {
+        self.symmetry.mirror[0] = !self.symmetry.mirror[0];
+    }
+
     /// Makes the size bigger (`factor` > 1) or smaller, within [`SIZE_RANGE`].
     pub fn scale_size(&mut self, factor: f32) {
         self.size = (self.size * factor).clamp(SIZE_RANGE.0, SIZE_RANGE.1);
@@ -139,16 +305,23 @@ impl ToolState {
         set: &TextureSet,
         target: PaintTarget,
     ) -> (BrushSnapshot, StrokeTool, Option<(ResourceHash, Resource)>) {
-        let material = match target {
-            PaintTarget::Layer(_) => set
-                .channels
-                .iter()
-                .filter_map(|def| {
-                    let (checked, value) = self.channel(def);
-                    checked.then_some((def.channel, value))
-                })
-                .collect(),
-            PaintTarget::Mask(..) => [(MASK_VALUE_CHANNEL, [self.mask_value; 4])].into(),
+        let material = match (target, &self.procedural, &self.mask_procedural) {
+            (PaintTarget::Layer(_), Some(procedural), _)
+            | (PaintTarget::Mask(..), _, Some(procedural)) => {
+                FillSource::Procedural(procedural.clone())
+            }
+            (PaintTarget::Layer(_), None, _) => FillSource::Uniform(
+                set.channels
+                    .iter()
+                    .filter_map(|def| {
+                        let (checked, value) = self.channel(def);
+                        checked.then_some((def.channel, value))
+                    })
+                    .collect(),
+            ),
+            (PaintTarget::Mask(..), _, None) => {
+                FillSource::Uniform([(MASK_VALUE_CHANNEL, [self.mask_value; 4])].into())
+            }
         };
         let alpha = self
             .alpha
@@ -162,16 +335,16 @@ impl ToolState {
             hardness: self.hardness,
             spacing: self.spacing,
             angle: self.angle,
-            size_jitter: 0.0,
-            angle_jitter: 0.0,
-            flow_jitter: 0.0,
-            scatter: 0.0,
-            follow_path: false,
+            size_jitter: self.size_jitter,
+            angle_jitter: self.angle_jitter,
+            flow_jitter: self.flow_jitter,
+            scatter: self.scatter,
+            follow_path: self.follow_path,
             alpha: alpha.as_ref().map(|(hash, _)| *hash),
-            material: FillSource::Uniform(material),
-            pressure: patine_core::stroke::PressureCurves::default(),
-            tilt_angle: false,
-            projection: BrushSnapshot::default_projection(),
+            material,
+            pressure: self.pressure.clone(),
+            tilt_angle: self.tilt_angle,
+            projection: self.projection,
         };
         let tool = match self.tool {
             Tool::Brush => StrokeTool::Brush,
@@ -248,6 +421,7 @@ pub fn brush_section(
                 .weak(),
         );
     }
+    presets_row(ui, i18n, state);
     ui.separator();
     let mut slider = |ui: &mut Ui,
                       value: &mut f32,
@@ -291,11 +465,57 @@ pub fn brush_section(
         }
     });
     ui.separator();
+    ended |= dynamics_section(ui, i18n, state);
+    ended |= symmetry_section(ui, i18n, &mut state.symmetry);
+    ui.separator();
+
+    // The material: values, or a procedural.
+    let (procedural, categories, values_key, procedural_key) = match target {
+        PaintTarget::Layer(_) => (
+            &mut state.procedural,
+            &[Category::Material][..],
+            "brush-material-values",
+            "brush-material-procedural",
+        ),
+        PaintTarget::Mask(..) => (
+            &mut state.mask_procedural,
+            &[Category::Noise, Category::Pattern][..],
+            "brush-mask-value",
+            "brush-mask-pattern",
+        ),
+    };
+    ui.label(RichText::new(i18n.tr("brush-material")).strong());
+    ui.horizontal(|ui| {
+        if ui
+            .selectable_label(procedural.is_none(), i18n.tr(values_key))
+            .clicked()
+        {
+            *procedural = None;
+        }
+        if ui
+            .selectable_label(procedural.is_some(), i18n.tr(procedural_key))
+            .clicked()
+            && procedural.is_none()
+        {
+            *procedural = patine_procedural::library::all()
+                .iter()
+                .find(|def| categories.contains(&def.category))
+                .map(|def| def.instance());
+        }
+    });
+    if let Some(instance) = procedural {
+        ui.push_id("brush procedural", |ui| {
+            ended |= procedural_editor(ui, i18n, instance, &mut state.projection, categories);
+        });
+        return ended;
+    }
 
     match target {
         PaintTarget::Mask(..) => {
-            ui.label(RichText::new(i18n.tr("brush-mask-value")).strong());
-            slider(ui, &mut state.mask_value, 0.0..=1.0, "mask-value", false);
+            let response = ui.add(
+                egui::Slider::new(&mut state.mask_value, 0.0..=1.0).text(i18n.tr("mask-value")),
+            );
+            ended |= gesture_ended(&response);
         }
         PaintTarget::Layer(_) => {
             ui.label(RichText::new(i18n.tr("brush-channels")).strong());
@@ -330,6 +550,261 @@ pub fn brush_section(
         }
     }
     ended
+}
+
+/// The preset list, and saving or deleting the user's presets.
+fn presets_row(ui: &mut Ui, i18n: &I18n, state: &mut ToolState) {
+    let shipped = shipped();
+    let selected_text = match &state.preset {
+        Some(PresetChoice::Shipped(key)) => i18n.tr(key).into_owned(),
+        Some(PresetChoice::User(name)) => name.clone(),
+        None => i18n.tr("brush-preset-none").into_owned(),
+    };
+    let mut chosen = None;
+    ui.horizontal(|ui| {
+        ui.label(i18n.tr("brush-preset"));
+        egui::ComboBox::from_id_salt("brush preset")
+            .selected_text(selected_text)
+            .show_ui(ui, |ui| {
+                for (preset, key) in shipped.iter().zip(SHIPPED_KEYS) {
+                    let choice = PresetChoice::Shipped(key);
+                    if ui
+                        .selectable_label(state.preset.as_ref() == Some(&choice), i18n.tr(key))
+                        .clicked()
+                    {
+                        chosen = Some((preset.clone(), choice));
+                    }
+                }
+                if !state.presets.user.is_empty() {
+                    ui.separator();
+                }
+                for preset in &state.presets.user {
+                    let choice = PresetChoice::User(preset.name.clone());
+                    if ui
+                        .selectable_label(state.preset.as_ref() == Some(&choice), &preset.name)
+                        .clicked()
+                    {
+                        chosen = Some((preset.clone(), choice));
+                    }
+                }
+            });
+    });
+    if let Some((preset, choice)) = chosen {
+        state.apply_preset(&preset, choice);
+    }
+
+    let name_id = ui.id().with("brush preset name");
+    let error_id = ui.id().with("brush preset error");
+    let mut name: String = ui.data(|d| d.get_temp(name_id)).unwrap_or_default();
+    let mut error: Option<String> = ui.data(|d| d.get_temp(error_id)).flatten();
+    ui.horizontal(|ui| {
+        ui.add(
+            egui::TextEdit::singleline(&mut name)
+                .hint_text(i18n.tr("brush-preset-name"))
+                .desired_width(110.0),
+        );
+        let can_save = state.presets.dir.is_some() && file_name(&name).is_some();
+        if ui
+            .add_enabled(can_save, egui::Button::new(i18n.tr("brush-preset-save")))
+            .clicked()
+        {
+            let name_ = name.trim().to_owned();
+            match state.presets.save(state.user_preset(&name_)) {
+                Ok(()) => {
+                    state.preset = Some(PresetChoice::User(name_));
+                    name.clear();
+                    error = None;
+                }
+                Err(e) => {
+                    let mut args = FluentArgs::new();
+                    args.set("error", e.to_string());
+                    error = Some(i18n.tr_args("brush-preset-error", &args));
+                }
+            }
+        }
+        if let Some(PresetChoice::User(user)) = state.preset.clone()
+            && ui
+                .button(format!(
+                    "{} {}",
+                    icons::TRASH,
+                    i18n.tr("brush-preset-delete")
+                ))
+                .clicked()
+        {
+            match state.presets.delete(&user) {
+                Ok(()) => state.preset = None,
+                Err(e) => error = Some(e.to_string()),
+            }
+        }
+    });
+    if let Some(text) = &error {
+        ui.colored_label(ui.visuals().error_fg_color, text);
+    }
+    ui.data_mut(|d| {
+        d.insert_temp(name_id, name);
+        d.insert_temp(error_id, error);
+    });
+}
+
+/// A slider labelled with the translation of `key`; returns whether its gesture ended.
+fn slider(
+    ui: &mut Ui,
+    i18n: &I18n,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    key: &str,
+) -> bool {
+    let response = ui.add(egui::Slider::new(value, range).text(i18n.tr(key)));
+    gesture_ended(&response)
+}
+
+/// Pressure curves, by the translation key of what they change.
+const PRESSURE_CURVES: [&str; 3] = ["pressure-size", "pressure-flow", "pressure-opacity"];
+
+/// Jitters, scatter, path and tilt, and the pressure curves. Returns whether a gesture
+/// ended.
+fn dynamics_section(ui: &mut Ui, i18n: &I18n, state: &mut ToolState) -> bool {
+    let mut ended = false;
+    egui::CollapsingHeader::new(i18n.tr("brush-dynamics"))
+        .id_salt("brush dynamics")
+        .show(ui, |ui| {
+            ended |= slider(
+                ui,
+                i18n,
+                &mut state.size_jitter,
+                0.0..=1.0,
+                "brush-size-jitter",
+            );
+            let mut degrees = state.angle_jitter.to_degrees();
+            ended |= slider(ui, i18n, &mut degrees, 0.0..=180.0, "brush-angle-jitter");
+            state.angle_jitter = degrees.to_radians();
+            ended |= slider(
+                ui,
+                i18n,
+                &mut state.flow_jitter,
+                0.0..=1.0,
+                "brush-flow-jitter",
+            );
+            ended |= slider(ui, i18n, &mut state.scatter, 0.0..=3.0, "brush-scatter");
+            ended |= ui
+                .checkbox(&mut state.follow_path, i18n.tr("brush-follow-path"))
+                .changed();
+            ended |= ui
+                .checkbox(&mut state.tilt_angle, i18n.tr("brush-tilt-angle"))
+                .changed();
+
+            ui.label(RichText::new(i18n.tr("brush-pressure")).strong());
+            let which_id = ui.id().with("pressure curve");
+            let mut which: usize = ui.data(|d| d.get_temp(which_id)).unwrap_or(0);
+            ui.horizontal(|ui| {
+                for (i, key) in PRESSURE_CURVES.iter().enumerate() {
+                    ui.selectable_value(&mut which, i, i18n.tr(key));
+                }
+            });
+            ui.data_mut(|d| d.insert_temp(which_id, which));
+            let curve = match which {
+                0 => &mut state.pressure.size,
+                1 => &mut state.pressure.flow,
+                _ => &mut state.pressure.opacity,
+            };
+            ui.horizontal(|ui| {
+                let (_, curve_ended) =
+                    crate::curve_editor::curve_editor(ui, which_id.with(which), curve, 120.0);
+                ended |= curve_ended;
+                ui.vertical(|ui| {
+                    if ui.button(i18n.tr("pressure-curve-reset")).clicked() {
+                        *curve = Curve::identity();
+                        ended = true;
+                    }
+                    if ui.button(i18n.tr("pressure-curve-off")).clicked() {
+                        *curve = Curve::constant(1.0);
+                        ended = true;
+                    }
+                });
+            });
+            ui.label(RichText::new(i18n.tr("pressure-curve-hint")).small().weak());
+        });
+    ended
+}
+
+/// Mirrors and radial copies. Returns whether a setting changed.
+fn symmetry_section(ui: &mut Ui, i18n: &I18n, symmetry: &mut Symmetry) -> bool {
+    let mut changed = false;
+    egui::CollapsingHeader::new(i18n.tr("brush-symmetry"))
+        .id_salt("brush symmetry")
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(i18n.tr("symmetry-mirror"));
+                for (axis, name) in ["X", "Y", "Z"].iter().enumerate() {
+                    changed |= ui.checkbox(&mut symmetry.mirror[axis], *name).changed();
+                }
+            });
+            ui.horizontal(|ui| {
+                let mut radial = symmetry.radial.max(1);
+                changed |= ui
+                    .add(egui::DragValue::new(&mut radial).range(1..=16))
+                    .changed();
+                symmetry.radial = radial;
+                ui.label(i18n.tr("symmetry-radial"));
+            });
+            let mirrors = 1usize << symmetry.mirror.iter().filter(|m| **m).count();
+            let wanted = mirrors * symmetry.radial.max(1) as usize;
+            if wanted > patine_paint::symmetry::MAX_COPIES {
+                let mut args = FluentArgs::new();
+                args.set("max", patine_paint::symmetry::MAX_COPIES);
+                ui.colored_label(
+                    ui.visuals().warn_fg_color,
+                    i18n.tr_args("symmetry-limit", &args),
+                );
+            }
+            ui.label(RichText::new(i18n.tr("symmetry-2d")).small().weak());
+        });
+    changed
+}
+
+/// The choice of a procedural among `categories`, its parameters and the projection.
+/// Returns whether a gesture ended.
+fn procedural_editor(
+    ui: &mut Ui,
+    i18n: &I18n,
+    instance: &mut ProceduralRef,
+    projection: &mut Projection,
+    categories: &[Category],
+) -> bool {
+    let mut ended = false;
+    let current = patine_procedural::library::find(&instance.id);
+    egui::ComboBox::from_id_salt("brush procedural choice")
+        .selected_text(current.map_or_else(
+            || instance.id.clone(),
+            |def| i18n.tr(&def.name_key).into_owned(),
+        ))
+        .show_ui(ui, |ui| {
+            for def in patine_procedural::library::all()
+                .iter()
+                .filter(|def| categories.contains(&def.category))
+            {
+                if ui
+                    .selectable_label(def.id == instance.id, i18n.tr(&def.name_key))
+                    .clicked()
+                    && def.id != instance.id
+                {
+                    *instance = def.instance();
+                    ended = true;
+                }
+            }
+        });
+    if let Some(def) = patine_procedural::library::find(&instance.id) {
+        let edited = crate::procedural_ui::params_editor(ui, i18n, def, instance);
+        if let Some(value) = edited.value {
+            *instance = value;
+        }
+        ended |= edited.ended;
+    }
+    let edited = crate::procedural_ui::projection_editor(ui, i18n, projection);
+    if let Some(value) = edited.value {
+        *projection = value;
+    }
+    ended | edited.ended
 }
 
 /// A point of the mesh under the cursor, for the brush cursor.
@@ -407,6 +882,43 @@ pub fn draw_cursor(
     painter.add(egui::Shape::line(points, Line::new(1.2, color)));
 }
 
+/// Translation keys of the brush's dynamics, presets and symmetry, for tests.
+pub const DYNAMICS_TRANSLATION_KEYS: [&str; 33] = [
+    "brush-preset",
+    "brush-preset-none",
+    "brush-preset-name",
+    "brush-preset-save",
+    "brush-preset-delete",
+    "brush-preset-error",
+    "brush-dynamics",
+    "brush-size-jitter",
+    "brush-angle-jitter",
+    "brush-flow-jitter",
+    "brush-scatter",
+    "brush-follow-path",
+    "brush-tilt-angle",
+    "brush-pressure",
+    "pressure-size",
+    "pressure-flow",
+    "pressure-opacity",
+    "pressure-curve-reset",
+    "pressure-curve-off",
+    "pressure-curve-hint",
+    "brush-symmetry",
+    "symmetry-mirror",
+    "symmetry-radial",
+    "symmetry-limit",
+    "symmetry-2d",
+    "brush-material",
+    "brush-material-values",
+    "brush-material-procedural",
+    "brush-mask-pattern",
+    "tool-picker",
+    "picker-nothing",
+    "paint-line-hint",
+    "texture-sets-height-force",
+];
+
 /// Every translation key of painting, for tests.
 pub const TRANSLATION_KEYS: [&str; 23] = [
     "menu-paint",
@@ -448,7 +960,7 @@ mod tests {
     fn texts_are_translated() {
         for language in Language::ALL {
             let i18n = I18n::new(language);
-            for key in TRANSLATION_KEYS {
+            for key in TRANSLATION_KEYS.iter().chain(&DYNAMICS_TRANSLATION_KEYS) {
                 assert!(i18n.has(key), "{language:?}: {key}");
             }
         }
@@ -539,6 +1051,80 @@ mod tests {
         assert_eq!(state.size, SIZE_RANGE.1);
         state.add_hardness(-5.0);
         assert_eq!(state.hardness, 0.0);
+    }
+
+    #[test]
+    fn snapshots_record_the_dynamics_and_the_procedural_material() {
+        let project = project();
+        let set = &project.texture_sets[0];
+        let mut state = ToolState {
+            size_jitter: 0.3,
+            angle_jitter: 1.0,
+            flow_jitter: 0.2,
+            scatter: 0.5,
+            follow_path: true,
+            tilt_angle: true,
+            ..ToolState::default()
+        };
+        state.pressure.opacity = Curve::identity();
+        let copper = patine_procedural::library::find("material.copper")
+            .expect("a shipped material")
+            .instance();
+        state.procedural = Some(copper.clone());
+        let (brush, _, _) = state.snapshot(set, PaintTarget::Layer(LayerId(1)));
+        assert_eq!(brush.size_jitter, 0.3);
+        assert_eq!(brush.angle_jitter, 1.0);
+        assert_eq!(brush.flow_jitter, 0.2);
+        assert_eq!(brush.scatter, 0.5);
+        assert!(brush.follow_path && brush.tilt_angle);
+        assert_eq!(brush.pressure.opacity, Curve::identity());
+        assert_eq!(brush.material, FillSource::Procedural(copper));
+        assert_eq!(brush.projection, state.projection);
+        // The layer's procedural is not painted into masks.
+        let (brush, _, _) = state.snapshot(set, PaintTarget::Mask(LayerId(2), EffectId(3)));
+        assert!(matches!(brush.material, FillSource::Uniform(_)));
+    }
+
+    #[test]
+    fn presets_set_the_brush_and_user_presets_the_material() {
+        let mut state = ToolState::default();
+        let chalk = &shipped()[3];
+        state
+            .channels
+            .insert(Channel::BaseColor, (true, [0.0, 1.0, 0.0, 1.0]));
+        let before = state.material();
+        state.apply_preset(chalk, PresetChoice::Shipped(SHIPPED_KEYS[3]));
+        assert_eq!(state.settings(), chalk.brush);
+        assert_eq!(state.alpha, Some("alpha.grain"));
+        assert_eq!(
+            state.material(),
+            before,
+            "a shipped preset keeps the material"
+        );
+
+        let saved = state.user_preset("mine");
+        let mut other = ToolState::default();
+        other.apply_preset(&saved, PresetChoice::User("mine".into()));
+        assert_eq!(other.settings(), state.settings());
+        assert_eq!(other.material(), state.material());
+        assert_eq!(other.preset, Some(PresetChoice::User("mine".into())));
+        // The default brush is the Standard preset.
+        assert_eq!(ToolState::default().settings(), shipped()[0].brush);
+    }
+
+    #[test]
+    fn each_stroke_gets_a_new_seed_and_l_mirrors_x() {
+        let mut a = ToolState::default();
+        let mut b = ToolState::default();
+        let seeds: Vec<u64> = (0..4).map(|_| a.next_seed()).collect();
+        assert_eq!(seeds, (0..4).map(|_| b.next_seed()).collect::<Vec<_>>());
+        for pair in seeds.windows(2) {
+            assert_ne!(pair[0], pair[1]);
+        }
+        a.toggle_mirror_x();
+        assert_eq!(a.symmetry.mirror, [true, false, false]);
+        a.toggle_mirror_x();
+        assert_eq!(a.symmetry, Symmetry::default());
     }
 
     #[test]

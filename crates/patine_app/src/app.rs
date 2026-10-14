@@ -369,6 +369,8 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
     if app.capture.is_none() || std::env::var_os("PATINE_AUTOSAVE_DIR").is_some() {
         app.start_autosave();
     }
+    app.ui.tool.presets =
+        crate::brush_presets::PresetLibrary::load(crate::brush_presets::default_dir());
     app.apply_startup_environment()?;
     match app.startup.mesh.clone() {
         Some(path) if is_project_file(&path) => {
@@ -906,6 +908,7 @@ impl App {
             wireframe: view.settings.wireframe,
             shadows: view.settings.shadows,
             eraser: self.ui.tool.tool == crate::paint_tool::Tool::Eraser,
+            mirror_x: self.ui.tool.symmetry.mirror[0],
         }
     }
 
@@ -1443,6 +1446,7 @@ impl App {
             ActionId::BrushLarger => self.ui.tool.scale_size(1.25),
             ActionId::BrushSofter => self.ui.tool.add_hardness(-0.1),
             ActionId::BrushHarder => self.ui.tool.add_hardness(0.1),
+            ActionId::SymmetryX => self.ui.tool.toggle_mirror_x(),
             ActionId::Undo => {
                 if let Some(document) = &mut self.document {
                     document.undo();
@@ -1815,8 +1819,8 @@ impl App {
                                 viewport: view.size,
                             },
                             space: patine_core::stroke::StrokeSpace::View,
-                            symmetry: patine_core::stroke::Symmetry::default(),
-                            seed: 0,
+                            symmetry: self.ui.tool.symmetry,
+                            seed: self.ui.tool.next_seed(),
                             dabs: Vec::new(),
                         };
                         let started = gfx.gpu_document.begin_stroke(

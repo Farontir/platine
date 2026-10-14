@@ -5,7 +5,9 @@
 pub mod actions;
 pub mod app;
 pub mod autosave;
+pub mod brush_presets;
 pub mod cli;
+pub mod curve_editor;
 pub mod display_panel;
 pub mod document;
 pub mod environment_sync;

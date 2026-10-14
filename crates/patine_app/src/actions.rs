@@ -64,6 +64,8 @@ pub enum ActionId {
     BrushSofter,
     /// Make the brush harder.
     BrushHarder,
+    /// Switch the mirror symmetry across X on or off.
+    SymmetryX,
 }
 
 /// Application state that actions read to decide whether they are enabled or checked.
@@ -95,6 +97,8 @@ pub struct ActionContext {
     pub layer_selected: bool,
     /// Whether the eraser is the active tool (else the brush).
     pub eraser: bool,
+    /// Whether strokes are mirrored across X.
+    pub mirror_x: bool,
 }
 
 /// Declaration of an action.
@@ -356,6 +360,15 @@ impl Default for ActionRegistry {
                     yields_to_text: false,
                 },
                 Action {
+                    id: ActionId::SymmetryX,
+                    name: "brush.symmetry_x",
+                    label_key: "action-symmetry-x",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::L)),
+                    enabled: always,
+                    checked: Some(|ctx| ctx.mirror_x),
+                    yields_to_text: false,
+                },
+                Action {
                     id: ActionId::BrushSmaller,
                     name: "brush.smaller",
                     label_key: "action-brush-smaller",
@@ -500,6 +513,7 @@ mod tests {
             ActionId::BrushLarger,
             ActionId::BrushSofter,
             ActionId::BrushHarder,
+            ActionId::SymmetryX,
         ] {
             assert_eq!(registry.get(id).id, id);
         }
@@ -605,7 +619,12 @@ mod tests {
             press(Key::CloseBracket, Modifiers::SHIFT, &context, false),
             [ActionId::BrushHarder]
         );
+        assert_eq!(
+            press(Key::L, Modifiers::NONE, &context, false),
+            [ActionId::SymmetryX]
+        );
         // Typing in a text field keeps the letters.
         assert!(press(Key::B, Modifiers::NONE, &context, true).is_empty());
+        assert!(press(Key::L, Modifiers::NONE, &context, true).is_empty());
     }
 }

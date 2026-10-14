@@ -432,6 +432,8 @@ fn menu_bar(ui: &mut Ui, info: &FrameInfo<'_>, triggered: &mut Vec<ActionId>) {
         action_item(ui, info, ActionId::BrushLarger, triggered);
         action_item(ui, info, ActionId::BrushSofter, triggered);
         action_item(ui, info, ActionId::BrushHarder, triggered);
+        ui.separator();
+        action_item(ui, info, ActionId::SymmetryX, triggered);
     });
     ui.menu_button(i18n.tr("menu-view"), |ui| {
         action_item(ui, info, ActionId::FrameMesh, triggered);

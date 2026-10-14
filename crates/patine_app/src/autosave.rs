@@ -37,7 +37,13 @@ pub fn default_root() -> Option<PathBuf> {
     if let Some(dir) = std::env::var_os("PATINE_AUTOSAVE_DIR") {
         return Some(PathBuf::from(dir));
     }
-    let data = if cfg!(windows) {
+    data_dir().map(|dir| dir.join("autosave"))
+}
+
+/// The user's application data folder of Patine (`%APPDATA%\Patine` on Windows,
+/// `$XDG_DATA_HOME/patine` elsewhere).
+pub fn data_dir() -> Option<PathBuf> {
+    if cfg!(windows) {
         std::env::var_os("APPDATA").map(|dir| PathBuf::from(dir).join("Patine"))
     } else {
         std::env::var_os("XDG_DATA_HOME")
@@ -46,8 +52,7 @@ pub fn default_root() -> Option<PathBuf> {
                 std::env::var_os("HOME").map(|home| PathBuf::from(home).join(".local/share"))
             })
             .map(|dir| dir.join("patine"))
-    };
-    data.map(|dir| dir.join("autosave"))
+    }
 }
 
 /// The session folder of this instance, locked while it lives.
