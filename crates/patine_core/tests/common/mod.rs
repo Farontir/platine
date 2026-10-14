@@ -81,3 +81,60 @@ pub fn folder(id: LayerId, name: &str) -> Layer {
 pub fn ids(project: &Project) -> IdSequence {
     IdSequence::starting_at(project.next_id)
 }
+
+/// A brush stroke of `dabs` dabs painting the base color and the roughness (or erasing
+/// them), its values drawn from `seed`.
+pub fn stroke(seed: u64, eraser: bool, dabs: usize) -> std::sync::Arc<patine_core::stroke::Stroke> {
+    use patine_core::stroke::{
+        BrushSnapshot, Dab, SizeSpace, Stroke, StrokeCamera, Symmetry, Tool,
+    };
+    let value = (seed % 97) as f32 / 97.0;
+    std::sync::Arc::new(Stroke {
+        brush: BrushSnapshot {
+            size: 20.0 + value * 30.0,
+            size_space: SizeSpace::Screen,
+            flow: 0.5,
+            opacity: 1.0 - value * 0.5,
+            hardness: value,
+            spacing: 0.1,
+            angle: 0.0,
+            size_jitter: 0.0,
+            angle_jitter: 0.0,
+            flow_jitter: 0.0,
+            scatter: 0.0,
+            follow_path: false,
+            alpha: None,
+            material: FillSource::Uniform(
+                [
+                    (Channel::BaseColor, [value, 0.2, 0.1, 1.0]),
+                    (Channel::Roughness, [1.0 - value; 4]),
+                ]
+                .into(),
+            ),
+        },
+        tool: if eraser { Tool::Eraser } else { Tool::Brush },
+        camera: StrokeCamera {
+            view_proj: identity(),
+            viewport: [640, 480],
+        },
+        symmetry: Symmetry::default(),
+        seed,
+        dabs: (0..dabs)
+            .map(|i| Dab {
+                position: [10.0 + i as f32 * 3.0, 200.0 + value * 50.0],
+                pressure: 1.0,
+                tilt: [0.0, 0.0],
+                time: i as f32 / 60.0,
+            })
+            .collect(),
+    })
+}
+
+fn identity() -> [[f32; 4]; 4] {
+    [
+        [1.0, 0.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0, 0.0],
+        [0.0, 0.0, 1.0, 0.0],
+        [0.0, 0.0, 0.0, 1.0],
+    ]
+}

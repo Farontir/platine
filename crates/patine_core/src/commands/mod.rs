@@ -8,6 +8,7 @@
 mod environment;
 mod layers;
 mod masks;
+mod paint;
 mod texture_set;
 
 pub use environment::{EnvironmentField, SetEnvironment};
@@ -16,6 +17,7 @@ pub use layers::{
     SetLayerVisible, SetProjection,
 };
 pub use masks::{InsertMaskEffect, MoveMaskEffect, RemoveMaskEffect, SetMask, SetMaskEffect};
+pub use paint::{PaintStroke, PaintTarget};
 pub use texture_set::{RenameTextureSet, SetChannelDef, SetTextureSetResolution};
 
 use crate::command::CommandError;

@@ -265,6 +265,13 @@ impl MaskEffect {
         }
     }
 
+    /// A paint effect without strokes.
+    pub fn paint() -> Self {
+        Self::Paint {
+            strokes: Arc::default(),
+        }
+    }
+
     /// The inversion filter (`1 − m`).
     pub fn invert() -> Self {
         Self::Filter {
@@ -284,10 +291,11 @@ impl MaskEffect {
         }
     }
 
-    /// Short identifier of the operation, for history labels: `fill`, `levels`,
-    /// `invert` or `other`.
+    /// Short identifier of the operation, for history labels: `paint`, `fill`,
+    /// `levels`, `invert` or `other`.
     pub fn kind_id(&self) -> &'static str {
         match self {
+            Self::Paint { .. } => "paint",
             Self::Fill { .. } => "fill",
             Self::Levels(_) => "levels",
             Self::Filter {

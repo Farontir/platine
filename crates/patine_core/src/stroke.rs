@@ -2,27 +2,44 @@
 //!
 //! A paint layer stores its strokes, not pixels: replaying them at any resolution
 //! rebuilds the layer (see the resolution independence section of `docs/PLAN.md`).
-//! Brush and pressure details are completed in M8 and M9, through format migrations.
+//! Brush and pressure details are completed in M9, through format migrations.
+//!
+//! Strokes are shared (`Arc`): adding one to a log copies pointers, not dabs, and the
+//! pointer identifies a stroke for the GPU caches (tiles saved for undo). An `Arc<T>` is
+//! serialized exactly as `T`, so the file format does not see it.
+
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::channel::Channel;
 use crate::layer::FillSource;
 use crate::resource::ResourceHash;
 
 /// Every stroke of a paint layer or a paint mask effect, oldest first.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct StrokeLog {
     /// Strokes in painting order.
-    pub strokes: Vec<Stroke>,
+    pub strokes: Vec<Arc<Stroke>>,
 }
 
 impl StrokeLog {
     /// Approximate heap memory, for history budgets.
     pub fn heap_size(&self) -> usize {
-        self.strokes
-            .iter()
-            .map(|s| std::mem::size_of::<Stroke>() + s.dabs.len() * std::mem::size_of::<Dab>())
-            .sum()
+        self.strokes.iter().map(|stroke| stroke.heap_size()).sum()
+    }
+}
+
+impl PartialEq for StrokeLog {
+    /// Equal strokes, compared by pointer first: logs sharing their strokes compare
+    /// without reading thousands of dabs.
+    fn eq(&self, other: &Self) -> bool {
+        self.strokes.len() == other.strokes.len()
+            && self
+                .strokes
+                .iter()
+                .zip(&other.strokes)
+                .all(|(a, b)| Arc::ptr_eq(a, b) || a == b)
     }
 }
 
@@ -129,4 +146,20 @@ pub struct Stroke {
     pub seed: u64,
     /// Dabs in order.
     pub dabs: Vec<Dab>,
+}
+
+impl Stroke {
+    /// Approximate heap memory, for history budgets.
+    pub fn heap_size(&self) -> usize {
+        std::mem::size_of::<Stroke>() + self.dabs.len() * std::mem::size_of::<Dab>()
+    }
+
+    /// Channels the stroke paints or erases: those of its uniform material, in channel
+    /// order. Other materials paint nothing until their milestone.
+    pub fn channels(&self) -> Vec<Channel> {
+        match &self.brush.material {
+            FillSource::Uniform(values) => values.keys().copied().collect(),
+            _ => Vec::new(),
+        }
+    }
 }

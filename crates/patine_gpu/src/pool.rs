@@ -5,7 +5,7 @@
 //! *discardable* (caches that can be computed again). When the discardable textures
 //! push the total over the budget, the least recently used ones are destroyed; their
 //! owner finds out through [`TexturePool::get`] returning `None`, and recomputes them.
-//! Offloading textures to compressed CPU memory comes with the painted layers (M8).
+//! Offloading textures to compressed CPU memory comes with the raster caches (M10).
 //!
 //! One command encoder records many passes before its submit, allocating along the way.
 //! So that a pass never loses a texture recorded earlier in the same encoder:

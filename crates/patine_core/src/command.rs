@@ -69,6 +69,12 @@ pub enum CommandError {
     /// The layer is not a fill.
     #[error("layer {0} is not a fill")]
     NotAFill(LayerId),
+    /// The layer is not a paint layer.
+    #[error("layer {0} is not a paint layer")]
+    NotAPaintLayer(LayerId),
+    /// The mask effect is not a paint effect.
+    #[error("mask effect {0} is not a paint effect")]
+    NotAPaintEffect(EffectId),
     /// The layer has no mask.
     #[error("layer {0} has no mask")]
     NoMask(LayerId),

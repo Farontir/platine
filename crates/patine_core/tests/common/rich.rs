@@ -27,7 +27,7 @@ use super::{folder, project};
 
 fn strokes(seed: u64, alpha: ResourceHash) -> Arc<StrokeLog> {
     Arc::new(StrokeLog {
-        strokes: vec![Stroke {
+        strokes: vec![Arc::new(Stroke {
             brush: BrushSnapshot {
                 size: 32.5,
                 size_space: SizeSpace::Screen,
@@ -67,7 +67,7 @@ fn strokes(seed: u64, alpha: ResourceHash) -> Arc<StrokeLog> {
                     time: i as f32 / 120.0,
                 })
                 .collect(),
-        }],
+        })],
     })
 }
 

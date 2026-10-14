@@ -241,6 +241,7 @@ command-black-mask = Black mask on “{ $name }”
 command-white-mask = White mask on “{ $name }”
 command-remove-mask = Remove the mask of “{ $name }”
 command-add-mask-effect = Add { $effect ->
+        [paint] paint
         [fill] a fill
         [levels] a levels
         [invert] an invert
@@ -249,6 +250,7 @@ command-add-mask-effect = Add { $effect ->
 command-remove-mask-effect = Remove an effect from the mask of “{ $name }”
 command-move-mask-effect = Move an effect in the mask of “{ $name }”
 command-mask-effect = { $effect ->
+        [paint] Paint
         [fill] Fill
         [levels] Levels
         [invert] Invert
@@ -369,3 +371,8 @@ option-triangle = Triangle
 option-radial = Radial
 option-x = X
 option-y = Y
+
+## Painting
+command-paint-stroke = Stroke on “{ $name }”
+command-paint-mask-stroke = Stroke on the mask of “{ $name }”
+command-erase-stroke = Erase on “{ $name }”

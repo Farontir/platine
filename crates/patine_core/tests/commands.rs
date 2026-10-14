@@ -9,9 +9,10 @@ use patine_core::channel::Channel;
 use patine_core::channel::ChannelDef;
 use patine_core::command::{Command, CommandError};
 use patine_core::commands::{
-    InsertLayer, InsertMaskEffect, MoveLayer, MoveMaskEffect, RemoveLayer, RemoveMaskEffect,
-    RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef, SetEnvironment, SetFillSource,
-    SetFillValue, SetLayerVisible, SetMask, SetMaskEffect, SetProjection, SetTextureSetResolution,
+    InsertLayer, InsertMaskEffect, MoveLayer, MoveMaskEffect, PaintStroke, PaintTarget,
+    RemoveLayer, RemoveMaskEffect, RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef,
+    SetEnvironment, SetFillSource, SetFillValue, SetLayerVisible, SetMask, SetMaskEffect,
+    SetProjection, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::history::History;
@@ -863,4 +864,209 @@ fn fill_sources_and_projections_are_set_and_merged() {
         &[Channel::BaseColor, Channel::Roughness],
     );
     assert_eq!(layer.channels.len(), 2);
+}
+
+/// `layered()` with a paint layer (id 4) on top, and a black mask with a paint effect
+/// (id 5) on the fill 3.
+fn with_paint() -> Project {
+    let mut project = layered();
+    let mut history = History::default();
+    let paint = patine_core::layer::Layer::paint(
+        LayerId(4),
+        "paint",
+        &[Channel::BaseColor, Channel::Roughness],
+    );
+    history
+        .push(&mut project, Box::new(InsertLayer::new(SET, top(2), paint)))
+        .expect("the paint layer goes on top");
+    history
+        .push(
+            &mut project,
+            Box::new(SetMask::new(
+                LayerId(3),
+                Some(MaskStack::new(MaskInitial::Black)),
+                "outer",
+            )),
+        )
+        .expect("the fill takes a mask");
+    let entry = MaskEffectEntry::new(EffectId(5), MaskEffect::paint());
+    history
+        .push(
+            &mut project,
+            Box::new(InsertMaskEffect::new(LayerId(3), 0, entry, "outer")),
+        )
+        .expect("the mask takes a paint effect");
+    project
+}
+
+fn log(project: &Project, target: PaintTarget) -> Vec<Arc<patine_core::stroke::Stroke>> {
+    let layer = project.texture_sets[0]
+        .stack
+        .find(target.layer())
+        .expect("the target layer exists");
+    let strokes = match target {
+        PaintTarget::Layer(_) => match &layer.kind {
+            LayerKind::Paint { strokes } => strokes.clone(),
+            _ => panic!("a paint layer"),
+        },
+        PaintTarget::Mask(_, effect) => {
+            let mask = layer.mask.as_ref().expect("the target has a mask");
+            let index = mask.index_of(effect).expect("the target effect exists");
+            match &mask.effects[index].effect {
+                MaskEffect::Paint { strokes } => strokes.clone(),
+                _ => panic!("a paint effect"),
+            }
+        }
+    };
+    strokes.strokes.clone()
+}
+
+#[test]
+fn strokes_are_painted_into_layers_and_masks() {
+    let project = with_paint();
+    for target in [
+        PaintTarget::Layer(LayerId(4)),
+        PaintTarget::Mask(LayerId(3), EffectId(5)),
+    ] {
+        let first = common::stroke(1, false, 12);
+        let after = round_trip(
+            &project,
+            Box::new(PaintStroke::new(target, first.clone(), None, "paint")),
+        );
+        let strokes = log(&after, target);
+        assert_eq!(strokes.len(), 1);
+        assert!(
+            Arc::ptr_eq(&strokes[0], &first),
+            "the log shares the stroke"
+        );
+
+        // A second stroke goes on top; undo removes it only.
+        let mut project = after;
+        let mut history = History::default();
+        let second = common::stroke(2, true, 5);
+        history
+            .push(
+                &mut project,
+                Box::new(PaintStroke::new(target, second.clone(), None, "paint")),
+            )
+            .unwrap();
+        let strokes = log(&project, target);
+        assert!(Arc::ptr_eq(&strokes[1], &second));
+        history.undo(&mut project).unwrap();
+        assert_eq!(log(&project, target).len(), 1);
+    }
+
+    // Anything else is refused, leaving the document unchanged.
+    let stroke = common::stroke(3, false, 4);
+    for (target, error) in [
+        (
+            PaintTarget::Layer(LayerId(3)),
+            CommandError::NotAPaintLayer(LayerId(3)),
+        ),
+        (
+            PaintTarget::Layer(LayerId(9)),
+            CommandError::MissingLayer(LayerId(9)),
+        ),
+        (
+            PaintTarget::Mask(LayerId(2), EffectId(5)),
+            CommandError::NoMask(LayerId(2)),
+        ),
+        (
+            PaintTarget::Mask(LayerId(3), EffectId(8)),
+            CommandError::MissingEffect(EffectId(8)),
+        ),
+    ] {
+        let mut copy = project.clone();
+        let mut command = PaintStroke::new(target, stroke.clone(), None, "x");
+        assert_eq!(command.apply(&mut copy), Err(error));
+        assert_eq!(copy, project);
+    }
+    let mut copy = project.clone();
+    let entry = MaskEffectEntry::new(EffectId(6), MaskEffect::invert());
+    InsertMaskEffect::new(LayerId(3), 1, entry, "outer")
+        .apply(&mut copy)
+        .unwrap();
+    let before = copy.clone();
+    let mut command = PaintStroke::new(
+        PaintTarget::Mask(LayerId(3), EffectId(6)),
+        stroke,
+        None,
+        "x",
+    );
+    assert_eq!(
+        command.apply(&mut copy),
+        Err(CommandError::NotAPaintEffect(EffectId(6)))
+    );
+    assert_eq!(copy, before);
+}
+
+#[test]
+fn a_stroke_brings_its_alpha_into_the_project() {
+    let project = with_paint();
+    let (hash, alpha) = Resource::new(
+        "alpha.png",
+        ResourceKind::Image,
+        Arc::from(&b"alpha bytes"[..]),
+    );
+    let target = PaintTarget::Layer(LayerId(4));
+    let after = round_trip(
+        &project,
+        Box::new(PaintStroke::new(
+            target,
+            common::stroke(4, false, 3),
+            Some((hash, alpha.clone())),
+            "paint",
+        )),
+    );
+    assert_eq!(after.resources.get(&hash), Some(&alpha));
+
+    // A second stroke with the same alpha does not own it: undoing it keeps it.
+    let mut project = after;
+    let mut command = PaintStroke::new(
+        target,
+        common::stroke(5, false, 3),
+        Some((hash, alpha.clone())),
+        "paint",
+    );
+    command.apply(&mut project).unwrap();
+    command.revert(&mut project).unwrap();
+    assert!(project.resources.contains_key(&hash));
+
+    // Bytes that do not match their hash are refused.
+    let (_, other) = Resource::new("x.png", ResourceKind::Image, Arc::from(&b"other"[..]));
+    let mut command = PaintStroke::new(
+        target,
+        common::stroke(6, false, 3),
+        Some((hash, other)),
+        "paint",
+    );
+    assert_eq!(
+        command.apply(&mut project.clone()),
+        Err(CommandError::ResourceHash)
+    );
+}
+
+#[test]
+fn stroke_logs_compare_by_pointer_then_by_value() {
+    use patine_core::stroke::StrokeLog;
+    let a = common::stroke(7, false, 3);
+    let shared = StrokeLog {
+        strokes: vec![a.clone()],
+    };
+    let copied = StrokeLog {
+        strokes: vec![Arc::new((*a).clone())],
+    };
+    let other = StrokeLog {
+        strokes: vec![common::stroke(8, false, 3)],
+    };
+    assert_eq!(shared, shared.clone());
+    assert_eq!(shared, copied, "equal strokes in different allocations");
+    assert_ne!(shared, other);
+    assert_ne!(shared, StrokeLog::default());
+    assert_eq!(MaskEffect::paint().kind_id(), "paint");
+    assert_eq!(
+        a.channels(),
+        vec![Channel::BaseColor, Channel::Roughness],
+        "the channels of its material"
+    );
 }

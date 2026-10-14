@@ -4,9 +4,10 @@ use patine_core::channel::Channel;
 use patine_core::channel::ChannelDef;
 use patine_core::command::Command;
 use patine_core::commands::{
-    InsertLayer, InsertMaskEffect, MoveLayer, MoveMaskEffect, RemoveLayer, RemoveMaskEffect,
-    RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef, SetEnvironment, SetFillSource,
-    SetFillValue, SetLayerVisible, SetMask, SetMaskEffect, SetProjection, SetTextureSetResolution,
+    InsertLayer, InsertMaskEffect, MoveLayer, MoveMaskEffect, PaintStroke, PaintTarget,
+    RemoveLayer, RemoveMaskEffect, RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef,
+    SetEnvironment, SetFillSource, SetFillValue, SetLayerVisible, SetMask, SetMaskEffect,
+    SetProjection, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::ids::LayerId;
@@ -19,16 +20,17 @@ use patine_core::mask::{LevelsParams, MaskEffect, MaskEffectEntry, MaskInitial, 
 use patine_core::project::{Project, Resolution, TextureSetId};
 use proptest::prelude::*;
 
-use super::{fill, folder, ids};
+use super::{fill, folder, ids, stroke};
 
 /// A user action, with indices resolved against the document when it runs.
 #[derive(Clone, Debug)]
 pub enum Op {
+    /// Inserts a fill, a folder or a paint layer (`kind` modulo 3).
     Insert {
         set: u8,
         parent: u8,
         index: u8,
-        folder: bool,
+        kind: u8,
     },
     Remove {
         layer: u8,
@@ -108,6 +110,14 @@ pub enum Op {
         triplanar: bool,
         scale: f32,
     },
+    /// Paints or erases a stroke on a paint layer or a paint mask effect (`target`
+    /// chooses among them), optionally with an alpha image.
+    Stroke {
+        target: u8,
+        seed: u64,
+        eraser: bool,
+        alpha: bool,
+    },
     Rotation(f32),
     Exposure(f32),
     Source(u8),
@@ -119,8 +129,8 @@ pub enum Op {
 pub fn op() -> impl Strategy<Value = Op> {
     let name = "[a-z ]{0,8}";
     prop_oneof![
-        3 => (any::<u8>(), any::<u8>(), any::<u8>(), any::<bool>())
-            .prop_map(|(set, parent, index, folder)| Op::Insert { set, parent, index, folder }),
+        3 => (any::<u8>(), any::<u8>(), any::<u8>(), any::<u8>())
+            .prop_map(|(set, parent, index, kind)| Op::Insert { set, parent, index, kind }),
         1 => any::<u8>().prop_map(|layer| Op::Remove { layer }),
         2 => (any::<u8>(), any::<u8>(), any::<u8>())
             .prop_map(|(layer, parent, index)| Op::Move { layer, parent, index }),
@@ -149,6 +159,8 @@ pub fn op() -> impl Strategy<Value = Op> {
             .prop_map(|(layer, scale)| Op::Procedural { layer, scale }),
         1 => (any::<u8>(), any::<bool>(), 0.5f32..8.0)
             .prop_map(|(layer, triplanar, scale)| Op::Projection { layer, triplanar, scale }),
+        3 => (any::<u8>(), any::<u64>(), any::<bool>(), any::<bool>())
+            .prop_map(|(target, seed, eraser, alpha)| Op::Stroke { target, seed, eraser, alpha }),
         2 => (-10.0f32..10.0).prop_map(Op::Rotation),
         2 => (-6.0f32..6.0).prop_map(Op::Exposure),
         1 => any::<u8>().prop_map(Op::Source),
@@ -210,6 +222,22 @@ const MODES: [BlendMode; 4] = [
     BlendMode::NormalMapCombine,
 ];
 
+/// Every paint layer and paint mask effect of the project, in a stable order.
+fn paint_targets(project: &Project) -> Vec<(PaintTarget, String)> {
+    let mut found = Vec::new();
+    project.visit_layers(&mut |_, layer| {
+        if matches!(layer.kind, LayerKind::Paint { .. }) {
+            found.push((PaintTarget::Layer(layer.id), layer.name.clone()));
+        }
+        for entry in layer.mask.iter().flat_map(|mask| &mask.effects) {
+            if matches!(entry.effect, MaskEffect::Paint { .. }) {
+                found.push((PaintTarget::Mask(layer.id, entry.id), layer.name.clone()));
+            }
+        }
+    });
+    found
+}
+
 /// The effects of the mask of layer `id`, if it has a mask.
 fn mask_effects(project: &Project, id: LayerId) -> Option<&[MaskEffectEntry]> {
     project
@@ -231,14 +259,18 @@ pub fn command(project: &Project, op: &Op) -> Option<Box<dyn Command>> {
             set,
             parent,
             index,
-            folder: is_folder,
+            kind,
         } => {
             let set = TextureSetId(u32::from(set % sets));
             let mut ids = ids(project);
-            let layer = if *is_folder {
-                folder(ids.layer(), "folder")
-            } else {
-                fill(ids.layer(), "fill")
+            let layer = match kind % 3 {
+                0 => fill(ids.layer(), "fill"),
+                1 => folder(ids.layer(), "folder"),
+                _ => patine_core::layer::Layer::paint(
+                    ids.layer(),
+                    "paint",
+                    &[Channel::BaseColor, Channel::Roughness],
+                ),
             };
             Box::new(InsertLayer::new(
                 set,
@@ -336,12 +368,13 @@ pub fn command(project: &Project, op: &Op) -> Option<Box<dyn Command>> {
         } => {
             let (_, id, _, name) = pick(&all, *layer)?;
             let len = mask_effects(project, id).map_or(0, |effects| effects.len());
-            let effect = match kind % 3 {
+            let effect = match kind % 4 {
                 0 => MaskEffect::uniform(*value),
                 1 => MaskEffect::Levels(LevelsParams {
                     gamma: 0.5 + value,
                     ..LevelsParams::default()
                 }),
+                2 => MaskEffect::paint(),
                 _ => MaskEffect::invert(),
             };
             let entry = MaskEffectEntry::new(ids(project).effect(), effect);
@@ -419,6 +452,28 @@ pub fn command(project: &Project, op: &Op) -> Option<Box<dyn Command>> {
                 ..Projection::default()
             };
             Box::new(SetProjection::new(id, projection, name))
+        }
+        Op::Stroke {
+            target,
+            seed,
+            eraser,
+            alpha,
+        } => {
+            let (target, name) = pick(&paint_targets(project), *target)?;
+            let alpha = alpha.then(|| {
+                // Two alphas only, so that strokes often share one.
+                patine_core::resource::Resource::new(
+                    "alpha.png",
+                    patine_core::resource::ResourceKind::Image,
+                    std::sync::Arc::from(&[(seed % 2) as u8, 7, 7][..]),
+                )
+            });
+            Box::new(PaintStroke::new(
+                target,
+                stroke(*seed, *eraser, (*seed % 7) as usize),
+                alpha,
+                name,
+            ))
         }
         Op::Rotation(radians) => Box::new(SetEnvironment::rotation(env, *radians)),
         Op::Exposure(ev) => Box::new(SetEnvironment::exposure(env, *ev)),

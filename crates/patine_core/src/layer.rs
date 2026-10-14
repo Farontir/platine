@@ -259,6 +259,18 @@ impl Layer {
         )
     }
 
+    /// An empty paint layer affecting `channels`: it changes nothing until painted.
+    pub fn paint(id: LayerId, name: impl Into<String>, channels: &[Channel]) -> Self {
+        Self::new(
+            id,
+            name,
+            LayerKind::Paint {
+                strokes: Arc::default(),
+            },
+            channels,
+        )
+    }
+
     /// An empty folder affecting `channels` (normals blend as Normal in a folder).
     pub fn folder(id: LayerId, name: impl Into<String>, channels: &[Channel]) -> Self {
         let mut folder = Self::new(
