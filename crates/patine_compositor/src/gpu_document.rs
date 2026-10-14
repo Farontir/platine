@@ -450,6 +450,7 @@ impl GpuDocument {
         }
         self.contents.clear(pool);
         self.scratch.release(pool);
+        pool.flush();
     }
 
     /// Brings the GPU textures in line with `project`: allocates, reallocates and
@@ -577,6 +578,9 @@ impl GpuDocument {
         let sets: Vec<TextureSetId> = project.texture_sets.iter().map(|set| set.id).collect();
         self.contents.release_unused(pool, &used, &sets);
         ctx.queue.submit([encoder.finish()]);
+        // Textures released or evicted while recording may be used by the commands just
+        // submitted: only now can they be destroyed.
+        pool.flush();
         changed
     }
 

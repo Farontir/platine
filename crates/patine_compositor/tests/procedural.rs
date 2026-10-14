@@ -311,3 +311,41 @@ gpu_test!(
         let _ = Arc::strong_count(&project.mesh);
     }
 );
+
+gpu_test!(
+    /// Under a pool budget too small for any cache, every allocation during a sync evicts
+    /// discardable textures that commands recorded earlier in the same encoder still use
+    /// (scratch, lower caches, masks, contents, surface map). The submit must stay valid
+    /// and the result must not change, through an edit and its undo as well.
+    fn a_tiny_pool_budget_gives_the_same_result(ctx) {
+        let compositor = Compositor::new(&ctx).expect("shaders compile");
+        let (mut project, copper) = stack();
+        let render = |pool: &mut TexturePool, document: &mut GpuDocument, project: &Project| {
+            document.sync(&ctx, pool, &compositor, project);
+            CHANNELS.map(|channel| gpu(&ctx, pool, document, channel))
+        };
+        let mut unlimited = (TexturePool::new(u64::MAX), GpuDocument::new());
+        let mut tiny = (TexturePool::new(1), GpuDocument::new());
+        let expected = render(&mut unlimited.0, &mut unlimited.1, &project);
+        assert_eq!(render(&mut tiny.0, &mut tiny.1, &project), expected);
+        assert!(tiny.0.evicted() > 0, "the budget forces evictions");
+
+        let mut history = History::default();
+        let LayerKind::Fill { source: FillSource::Procedural(instance), .. } = &find(&project, copper).kind else {
+            panic!("copper is procedural");
+        };
+        let mut instance = instance.clone();
+        instance.params.insert("variation".into(), ParamValue::Float(0.9));
+        history
+            .push(&mut project, Box::new(SetFillSource::new(copper, FillSource::Procedural(instance), "copper")))
+            .unwrap();
+        let edited = render(&mut unlimited.0, &mut unlimited.1, &project);
+        assert_ne!(edited, expected);
+        assert_eq!(render(&mut tiny.0, &mut tiny.1, &project), edited);
+        history.undo(&mut project).unwrap();
+        assert_eq!(render(&mut tiny.0, &mut tiny.1, &project), expected);
+        // Only the final channel textures, pinned, are left.
+        let pinned: u64 = tiny.1.memory();
+        assert_eq!(tiny.0.memory(), pinned);
+    }
+);

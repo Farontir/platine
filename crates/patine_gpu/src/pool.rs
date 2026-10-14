@@ -6,6 +6,15 @@
 //! push the total over the budget, the least recently used ones are destroyed; their
 //! owner finds out through [`TexturePool::get`] returning `None`, and recomputes them.
 //! Offloading textures to compressed CPU memory comes with the painted layers (M8).
+//!
+//! One command encoder records many passes before its submit, allocating along the way.
+//! So that a pass never loses a texture recorded earlier in the same encoder:
+//! - a texture allocated or used ([`TexturePool::get`]) since the last
+//!   [`TexturePool::flush`] is never evicted: the pool may go over budget while
+//!   recording, and gets back under it at the flush;
+//! - released textures leave the accounting at once, but are only destroyed by the flush.
+//!
+//! The owner of the encoder calls the flush right after its submit.
 
 use std::collections::HashMap;
 
@@ -31,6 +40,8 @@ struct Entry {
     residency: Residency,
     /// Logical time of the last use, for the LRU order.
     last_use: u64,
+    /// Flush count at the last use: the texture is busy while it equals the pool's.
+    epoch: u64,
 }
 
 /// Memory taken by a texture described by `desc`, mips and layers included, in bytes.
@@ -74,6 +85,10 @@ pub struct TexturePool {
     budget: u64,
     memory: u64,
     evicted: u64,
+    /// Number of flushes so far.
+    epoch: u64,
+    /// Released or evicted, not yet destroyed: commands not submitted yet may use them.
+    pending: Vec<wgpu::Texture>,
 }
 
 impl TexturePool {
@@ -86,11 +101,13 @@ impl TexturePool {
             budget,
             memory: 0,
             evicted: 0,
+            epoch: 0,
+            pending: Vec::new(),
         }
     }
 
-    /// Creates a texture and counts it. Allocating may evict discardable textures
-    /// (never the new one).
+    /// Creates a texture and counts it. Allocating may evict discardable textures that
+    /// were not used since the last flush.
     pub fn allocate(
         &mut self,
         ctx: &GpuContext,
@@ -108,10 +125,11 @@ impl TexturePool {
                 bytes,
                 residency,
                 last_use: self.clock,
+                epoch: self.epoch,
             },
         );
         self.memory += bytes;
-        self.evict(Some(id));
+        self.evict();
         id
     }
 
@@ -120,6 +138,7 @@ impl TexturePool {
         self.clock += 1;
         let entry = self.entries.get_mut(&id)?;
         entry.last_use = self.clock;
+        entry.epoch = self.epoch;
         Some(&entry.texture)
     }
 
@@ -128,12 +147,31 @@ impl TexturePool {
         self.entries.get(&id).map(|entry| &entry.texture)
     }
 
-    /// Destroys the texture `id` now. Releasing an unknown texture does nothing.
+    /// Removes the texture `id` from the pool and its memory from the accounting; it is
+    /// destroyed by the next [`TexturePool::flush`]. Releasing an unknown texture does
+    /// nothing.
     pub fn release(&mut self, id: TextureId) {
         if let Some(entry) = self.entries.remove(&id) {
             self.memory -= entry.bytes;
-            entry.texture.destroy();
+            self.pending.push(entry.texture);
         }
+    }
+
+    /// Ends a recording: call it once the commands recorded since the last flush have
+    /// been submitted. Every texture becomes evictable again, the pool evicts down to its
+    /// budget, and the released and evicted textures are destroyed (wgpu frees them when
+    /// the GPU is done with them).
+    pub fn flush(&mut self) {
+        self.epoch += 1;
+        self.evict();
+        for texture in self.pending.drain(..) {
+            texture.destroy();
+        }
+    }
+
+    /// Number of released or evicted textures waiting for [`TexturePool::flush`].
+    pub fn pending(&self) -> usize {
+        self.pending.len()
     }
 
     /// Memory of the live textures, in bytes.
@@ -161,26 +199,27 @@ impl TexturePool {
         self.evicted
     }
 
-    /// Changes the budget, evicting at once if needed.
+    /// Changes the budget, evicting the textures not used since the last flush at once
+    /// if needed (the others at the next flush).
     pub fn set_budget(&mut self, budget: u64) {
         self.budget = budget;
-        self.evict(None);
+        self.evict();
     }
 
-    /// Destroys the least recently used discardable textures (except `keep`) while the
-    /// pool is over budget.
-    fn evict(&mut self, keep: Option<TextureId>) {
+    /// Releases the least recently used discardable textures not used since the last
+    /// flush, while the pool is over budget.
+    fn evict(&mut self) {
         while self.memory > self.budget {
             let victim = self
                 .entries
                 .iter()
-                .filter(|(id, entry)| {
-                    entry.residency == Residency::Discardable && Some(**id) != keep
+                .filter(|(_, entry)| {
+                    entry.residency == Residency::Discardable && entry.epoch != self.epoch
                 })
                 .min_by_key(|(_, entry)| entry.last_use)
                 .map(|(id, _)| *id);
             let Some(victim) = victim else {
-                // Only pinned textures are left: the budget cannot be met.
+                // Only pinned or busy textures are left: the budget cannot be met now.
                 break;
             };
             tracing::debug!(?victim, "texture evicted");
