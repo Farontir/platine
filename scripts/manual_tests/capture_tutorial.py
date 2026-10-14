@@ -73,6 +73,20 @@ M7_BASE = [HELMET, "--orbit", "30,10", "--texture-set", "1", "--capture-frames",
 M7_PANELS = ["--tab", "library", "--tab", "properties"]
 SUITCASE_VIEW = ["--orbit", "30,20", "--zoom", "0.8"]
 
+# M8: a paint layer on the first suitcase (texture set 0), strokes in viewport pixels.
+M8_BASE = [SUITCASE, "--capture-frames", "60"] + SUITCASE_VIEW
+M8_PAINT = ["--edit", "paint-layer=", "--brush", "size=50", "--brush", "color=0.75,0.12,0.08"]
+M8_STROKES = ["--stroke", "590,270;760,285;905,275", "--stroke", "640,390;780,340;880,310"]
+M8_ERASE = ["--stroke", "eraser:745,200;765,430"]
+M8_MASK = [
+    "--edit", "fill=0.15,0.45,0.85,0.3",
+    "--edit", "mask=black",
+    "--edit", "mask-paint=",
+    "--brush", "size=70",
+    "--stroke", "590,270;760,285;905,275",
+    "--stroke", "640,390;780,340;880,310",
+]
+
 # name -> arguments (mesh first, if any)
 CAPTURES = {
     "interface_fr": [],
@@ -159,6 +173,13 @@ CAPTURES = {
     "m7_mask": M7_BASE + ["--tab", "layers", "--tab", "properties", "--edit", "fill=0.8,0.1,0.08,0.4", "--edit", "mask=black", "--edit", "mask-procedural=noise.perlin", "--edit", "param=scale:6"],
     "m7_mask_view": M7_BASE + ["--tab", "layers", "--tab", "properties", "--edit", "fill=0.8,0.1,0.08,0.4", "--edit", "mask=black", "--edit", "mask-procedural=noise.perlin", "--edit", "param=scale:6", "--display", "mask"],
     "m7_history": M7_BASE + ["--tab", "layers", "--tab", "history", "--edit", "material=material.copper", "--edit", "param=oxidation:0.5", "--edit", "projection=triplanar,2"],
+    "m8_stroke": M8_BASE + ["--tab", "layers", "--tab", "properties"] + M8_PAINT + M8_STROKES,
+    "m8_eraser": M8_BASE + ["--tab", "layers", "--tab", "history"] + M8_PAINT + M8_STROKES + M8_ERASE,
+    "m8_roughness": M8_BASE + M8_PAINT + M8_STROKES + ["--display", "channel:roughness"],
+    "m8_alpha": M8_BASE + M8_PAINT + ["--brush", "size=130", "--brush", "alpha=alpha.splatter", "--brush", "spacing=0.6", "--stroke", "600,280;890,280"],
+    "m8_cursor": M8_BASE + ["--tab", "layers", "--tab", "properties"] + M8_PAINT + ["--brush", "size=90", "--hover", "760,330"],
+    "m8_mask": M8_BASE + ["--tab", "layers", "--tab", "properties"] + M8_MASK,
+    "m8_mask_view": M8_BASE + ["--tab", "layers", "--tab", "properties"] + M8_MASK + ["--display", "mask"],
 }
 
 # Captures run with extra environment variables.

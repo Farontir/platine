@@ -177,3 +177,77 @@ Le modèle de document a déjà ce qu'il faut depuis le M3 :
 8. Enregistrer puis rouvrir : identique.
 9. Masque noir sur un fill, Ajouter de la peinture, puis peindre en blanc : le fill apparaît sous le trait (touche M pour voir le masque).
 10. `patine_cli bench paint` sur la RTX A2000 : moins de 16 ms par dab.
+
+## Mesures (14/10/2026, RTX 3080 Ti, build release)
+
+`cargo run --release -p patine_cli -- bench paint [--resolution N] [--size PX]` :
+- la scène est un calque de peinture au milieu de 20 calques, sur une sphère, avec 5 canaux ;
+- le trait mesuré compte 200 dabs le long d'un cercle, un dab par image ;
+- chaque dab est chronométré jusqu'à la fin du travail du GPU : rastérisation, tuiles sauvegardées, recomposition des canaux peints sur les tuiles touchées, mips.
+
+| Brosse | Résolution | Moyenne | 95e centile | Pire dab |
+| --- | --- | --- | --- | --- |
+| 80 px | 4096² | 3,1 ms | 4,4 ms | 9,0 ms |
+| 200 px | 4096² | 5,8 ms | 7,3 ms | 12,9 ms |
+| 80 px | 2048² | 1,8 ms | 2,2 ms | 2,9 ms |
+
+**Critère 3 tenu en moyenne et au 95e centile** : 3,1 ms et 4,4 ms, pour un budget de 8 ms.
+
+**Les dépassements sont isolés** :
+- **Pire dab à 9 ms, une fois par trait** : il survient quand les tuiles sauvegardées pour l'undo demandent un nouveau bloc de mémoire GPU.
+  - Un second tour sur les mêmes tuiles ne le montre plus (pire dab 4,9 ms).
+  - Changer la taille des pages déplace le dab concerné.
+  - Piste, si la mesure sur la RTX A2000 l'exige : recycler les pages libérées au lieu d'en allouer de nouvelles.
+- **Premier dab d'un trait, de 12 à 15 ms** : il compose une fois les calques du dessous dans le cache inférieur, quand le calque peint n'était pas celui en cours d'édition.
+
+**Autres temps du trait** :
+- début du trait : 10 ms ;
+- fin du trait, avec l'adoption par la commande : 0,1 ms ;
+- rejeu complet dans un nouveau document : 80 ms.
+
+**Mémoire** : un calque 4K peint sur deux canaux occupe 201 Mo de contenus (épinglés).
+
+## Écarts constatés pendant l'implémentation
+
+- **Composition d'un trait** : une copie exacte des tuiles « avant », puis le blending matériel.
+  - Dépôt : `src + dst × (1 − src.a)`. Gomme : `dst × (1 − src.a)`.
+  - La gomme a son propre pipeline : avec un seul pipeline, la couverture d'un contenu couleur (son alpha) remontait. Le test de référence l'a détecté.
+- **Instantanés d'undo** :
+  - ceux des traits peints en direct sont pris au premier contact de chaque tuile ;
+  - ceux des traits rejoués par `sync` (redo) sont pris avant le rejeu, jusqu'à 8 traits par synchronisation ;
+  - au-delà (chargement, rejeu complet), aucun instantané n'est gardé.
+- **Alpha d'un trait en direct** : la commande n'ajoute l'alpha au projet qu'au relâchement. `begin_stroke` reçoit donc la ressource de l'alpha, et un alpha absent du projet n'est plus mémorisé comme inutilisable. Sans ce correctif, le direct aurait peint des dabs ronds, et le rejeu, l'alpha.
+- **Textures jetables pendant un trait** : avant chaque lot de dabs, la carte de surface, les contenus procéduraux et les masques sont vérifiés, et reconstruits s'ils ont été évincés depuis la dernière synchronisation. Le test avec un budget minuscule l'a montré : la carte de surface évincée entre deux images invalidait le lot.
+- **Recomposition en direct** : seuls les canaux peints sont recomposés, ou tous les canaux du calque pour un masque.
+- **Captures** :
+  - `--stroke` accepte le préfixe `eraser:` ;
+  - les traits de la ligne de commande sont injectés un par image ;
+  - le curseur est dessiné dès que l'application l'a calculé, ce qui permet de le capturer avec `--hover`.
+- **Raccourcis Maj + [ et Maj + ]** : ils sont déclarés avant [ et ], car egui associe un raccourci sans Maj à une touche de ponctuation pressée avec Maj.
+- **Hors du M8**, comme prévu :
+  - peindre un matériau procédural (M9) ;
+  - l'isolation des dossiers ;
+  - les outils de projection, clone et smudge ;
+  - le déchargement CPU (M10).
+
+## État à la clôture (14/10/2026)
+
+- **Critère 1** :
+  - un trait qui va du dessus à la face +X du cube en croix traverse une couture UV ;
+  - chaque pixel du cœur du trait montre une couverture ≥ 0,99, lue par les UV avec un filtrage bilinéaire ;
+  - le témoin sans dilatation tombe sous 0,9, ce qui prouve que le test voit les trous ;
+  - le test passe sur WARP et sur la RTX 3080 Ti.
+- **Critère 2** :
+  - **dans le moteur** : un trait peint par lots de 1 à 17 dabs donne exactement, à l'octet près, le contenu de son rejeu ; cela vaut pour la brosse, un alpha et la gomme ;
+  - **dans `GpuDocument`** : des traits peints en direct (lots de 1, 3, 7 et 13 dabs, sur un calque et sur un masque, avec un alpha) donnent, à 1/512 près, les textures d'un document neuf après enregistrement et rechargement du projet.
+- **Critère 3** : 3,1 ms en moyenne et 4,4 ms au 95e centile sur la RTX 3080 Ti ; voir les mesures pour les dabs isolés.
+- **Tests de référence** :
+  - rastérisation GPU = CPU ;
+  - profondeur comparée au lancer de rayons ;
+  - dépôt et gomme ;
+  - mélange et effets de masque avec couverture ;
+  - pile peinte texel par texel.
+- **Undo et redo par tuiles** : sans rejeu, et un rejeu en secours si les tuiles ont été évincées.
+- **Format** : il ne change pas. La fixture v1 est relue, et les proptests d'undo et de fichier incluent des traits.
+- **Tests** : 283 passent sur WARP.
+- **À vérifier à la main** : la checklist ci-dessus, et le bench sur la RTX A2000.

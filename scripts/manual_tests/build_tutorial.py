@@ -4,7 +4,7 @@ Run from the repository root after capture_tutorial.py:
     python scripts/manual_tests/build_tutorial.py
 
 Writes manual_tests/tutorial/ (HTML and cropped images) and
-manual_tests/Patine-tutoriel-M0-M7.pdf, printed by Microsoft Edge (or Chrome) headless.
+manual_tests/Patine-tutoriel-M0-M8.pdf, printed by Microsoft Edge (or Chrome) headless.
 """
 
 import html
@@ -19,7 +19,7 @@ from PIL import Image
 CAPTURES = os.path.join("manual_tests", "captures")
 OUT = os.path.join("manual_tests", "tutorial")
 IMAGES = os.path.join(OUT, "img")
-PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M7.pdf")
+PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M8.pdf")
 
 # Regions of the 1600 x 900 captures.
 FULL = None
@@ -138,6 +138,9 @@ SHORTCUTS = [
     ["Suppr, Ctrl+G", "Édition › Supprimer le calque (ou le masque, ou l'effet sélectionné), Grouper dans un dossier (M5)"],
     ["M", "Affichage › Masque du calque sélectionné (M6)"],
     ["Clic droit", "sur un calque : ajouter ou supprimer un masque ; sur un masque ou un effet : ajouter un fill, un levels, une inversion (M6)"],
+    ["B, E", "Peinture › Brosse, Gomme (M8)"],
+    ["[ et ], Maj+[ et Maj+]", "Peinture › Brosse plus petite, plus grande, plus douce, plus dure (M8)"],
+    ["Clic gauche glissé", "peint dans la vue 3D, quand un calque de peinture ou un effet de peinture de masque est sélectionné (M8)"],
     ["F", "Affichage › Cadrer le mesh"],
     ["Ctrl+Maj+P", "Affichage › Profileur"],
     ["—", "Affichage › Orthographique, Fil de fer, Ombres, Réinitialiser la disposition"],
@@ -163,6 +166,9 @@ OPTIONS = [
     ["<code>--capture PNG</code>, <code>--capture-frames N</code>", "enregistre la fenêtre en PNG puis quitte"],
     ["<code>projet.patine</code>", "ouvre un projet au lieu d'importer un mesh"],
     ["<code>--edit rotation=DEG|exposure=EV|rename=SET:NOM|undo=N</code>", "applique des commandes au projet ouvert (une entrée d'historique chacune)"],
+    ["<code>--edit paint-layer=|mask-paint=</code>", "ajoute un calque de peinture au-dessus de la sélection, ou un effet de peinture au masque sélectionné, et le sélectionne (M8)"],
+    ["<code>--tool brush|eraser</code>, <code>--brush CLÉ=VALEUR</code>", "outil et réglages de brosse : size, flow, opacity, hardness, spacing, angle, smoothing, alpha=ID|round, color=R,V,B, roughness, metallic, height, mask, off=CANAL (M8)"],
+    ["<code>--stroke [eraser:]X,Y;X,Y;…</code>", "peint un trait passant par ces pixels de la vue 3D, comme à la souris (M8)"],
     ["<code>--edit material=ID|mask-procedural=ID|param=NOM:VALEUR|projection=TYPE,ÉCHELLE</code>", "ajoute un matériau procédural au-dessus de la sélection, ou un bruit ou motif au masque sélectionné ; règle un paramètre ou la projection de la sélection (M7)"],
     ["<code>--edit mask=black|white|mask-fill=V,MODE,OPACITÉ|mask-levels=A,B,G,C,D|mask-invert=</code>", "donne un masque au calque sélectionné, puis lui ajoute un fill, un levels ou une inversion au-dessus de l'effet sélectionné (M6)"],
     ["<code>--edit fill=R,V,B,ROUGHNESS|mode=MODE,OPACITÉ|group=</code>", "ajoute un fill au-dessus de la sélection et le sélectionne ; règle le mélange de la couleur de base du calque sélectionné ; le groupe dans un dossier (M5)"],
@@ -180,7 +186,7 @@ def body():
         '<div class="kicker">Tutoriel et cahier de tests manuels</div>'
         "<h1>Patine</h1>"
         '<p class="subtitle">Texturing PBR par calques sur mesh 3D<br>'
-        "Fonctionnalités des jalons M0 à M7</p>"
+        "Fonctionnalités des jalons M0 à M8</p>"
         + figure("helmet_texture_sets", FULL, "full", "Le casque d'aviateur importé, panneau Texture sets au premier plan.", "92%")
         + '<p class="meta">Version 0.1.0 — 11 octobre 2026 — captures réalisées sur RTX 3080 Ti (Vulkan), '
         "interface en français, fenêtre 1600 × 900.</p></section>")
@@ -196,6 +202,7 @@ def body():
         "<li>M5 — Calques : fills, dossiers, blend modes et opacité par canal</li>"
         "<li>M6 — Masques : masque noir ou blanc, fill, levels, inversion, affichage du masque</li>"
         "<li>M7 — Bibliothèque procédurale : matériaux, bruits et motifs, projections</li>"
+        "<li>M8 — Peinture : brosse, gomme, alphas, masques peints, undo par tuiles</li>"
         "<li>Checklist complète des tests manuels</li>"
         "<li>Annexe : options de lancement et régénération de ce document</li>"
         "</ol>"
@@ -874,8 +881,83 @@ def body():
         + "<p>Budget : un paramètre modifié se voit en moins de 100 ms (RTX A2000 <b>à mesurer</b>).</p>"
         + "</section>")
 
-    # 10. Checklist.
-    add("<section><h2>10. Checklist complète des tests manuels</h2>"
+    # 10. M8.
+    add("<section><h2>10. M8 — Peinture</h2>"
+        "<p>La <b>peinture</b> dépose un matériau complet (couleur, roughness, metallic, hauteur…) directement "
+        "sur le mesh, à la souris. Un calque de peinture ne stocke pas de pixels mais ses <b>traits</b> : la "
+        "caméra, la brosse et la liste des dabs. Les rejouer redonne exactement ce qui a été peint, à n'importe "
+        "quelle résolution.</p>"
+        "<h3>10.1 Peindre un calque</h3>"
+        "<p>Bouton <b>Peinture</b> du panneau Calques (ou Peinture › Nouveau calque de peinture). Le calque "
+        "sélectionné, le <b>clic gauche glissé</b> dans la vue 3D peint ; Alt garde la navigation. Le panneau "
+        "Propriétés montre la <b>Brosse</b> : outil, taille, flux, opacité, dureté, espacement, angle, lissage, "
+        "alpha, et les <b>canaux peints</b> avec leur valeur. Un trait ne déborde pas d'un texture set à "
+        "l'autre.</p>"
+        + '<div class="grid c2a">'
+        + figure("m8_stroke", (560, 180, 1000, 560), "view", "Deux traits rouges sur la valise.")
+        + figure("m8_stroke", PROPERTIES, "props", "La brosse dans les Propriétés.")
+        + "</div>"
+        + test(["Ouvrir la valise, cliquer Peinture, puis peindre plusieurs traits sur la face avant et sur le côté.",
+                "Tourner (Alt + clic gauche) et peindre de nouveau ; peindre aussi en passant par-dessus une arête."],
+               "Le trait suit le curseur en direct, sans retard ; il continue d'une face à l'autre sans trou à la "
+               "couture ; l'arrière du mesh n'est pas peint ; le panneau indique le nombre de traits.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>10.2 Gomme, canaux et alphas</h3>"
+        "<p>La <b>gomme</b> (E) retire la peinture des canaux cochés, ce qui fait réapparaître les calques du "
+        "dessous. Les canaux cochés sont peints ensemble : la couleur et la roughness changent d'un même "
+        "geste. Un <b>alpha</b> remplace le disque de la brosse par une forme : carré, éclaboussure, grain, "
+        "biseau.</p>"
+        + '<div class="grid c2">'
+        + figure("m8_eraser", (560, 180, 1000, 560), "view", "Un trait de gomme coupe la bande.")
+        + figure("m8_roughness", (560, 180, 1000, 560), "view", "La roughness peinte en même temps (canal isolé).")
+        + figure("m8_alpha", (560, 180, 1000, 560), "view", "Alpha « Éclaboussure », espacement 0,6.")
+        + figure("m8_cursor", (560, 180, 1000, 560), "view", "Le curseur : un cercle posé sur la surface.")
+        + "</div>"
+        + test(["Gomme (E) sur une partie du trait ; décocher Roughness puis repeindre ; F1 et C pour voir les "
+                "canaux.",
+                "Choisir chaque alpha, régler la dureté ; [ et ] pour la taille, Maj + [ et ] pour la dureté."],
+               "La gomme rend le dessous visible ; seuls les canaux cochés changent ; chaque alpha donne sa forme ; "
+               "le curseur suit la surface, à la taille de la brosse, orienté selon la normale.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>10.3 Peindre un masque</h3>"
+        "<p><b>Clic droit sur un masque</b> › « Ajouter de la peinture », puis sélectionner l'effet : la "
+        "brosse peint alors le masque en gris (blanc par défaut, réglable). Sur un masque noir, peindre en "
+        "blanc révèle le calque sous le trait.</p>"
+        + '<div class="grid c2">'
+        + figure("m8_mask", (560, 180, 1000, 560), "view", "Fill bleu révélé par la peinture de son masque.")
+        + figure("m8_mask_view", (560, 180, 1000, 560), "view", "Le masque peint (touche M).")
+        + "</div>"
+        + test(["Fill bleu, masque noir, Ajouter de la peinture ; peindre ; M pour voir le masque ; gomme sur le "
+                "masque."],
+               "Le bleu apparaît sous les traits ; le masque montre les traits en blanc ; la gomme les retire.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>10.4 Annuler, enregistrer</h3>"
+        "<p>Chaque trait est une entrée d'historique. Annuler restaure les <b>tuiles</b> de 128 × 128 texels "
+        "que le trait a touchées, sans rien rejouer : c'est instantané. Rétablir rejoue ce seul trait. "
+        "À l'enregistrement, les traits partent dans le fichier ; à l'ouverture, ils sont rejoués.</p>"
+        + figure("m8_eraser", HISTORY, "history", "L'historique : un calque, deux traits, une gomme.", "70%")
+        + test(["Ctrl+Z et Ctrl+Y plusieurs fois sur des traits ; enregistrer, fermer, rouvrir."],
+               "Annuler et rétablir sont immédiats et exacts ; le projet rouvert est identique.")
+        + "<h3>10.5 Mesure</h3>"
+        + code("cargo run --release -p patine_cli -- bench paint [--resolution N] [--size PX]")
+        + "<p>Un calque de peinture au milieu de 20 calques, sur une sphère en 4096², avec 5 canaux : un trait "
+        "de 200 dabs, un par image, chaque dab chronométré jusqu'à la fin du travail du GPU. Mesures sur la "
+        "RTX 3080 Ti :</p>"
+        + table(["Brosse", "Moyenne", "95e centile", "Pire dab"],
+                [["80 px, 4K", "3,1 ms", "4,4 ms", "9,0 ms (une allocation mémoire)"],
+                 ["200 px, 4K", "5,8 ms", "7,3 ms", "12,9 ms"],
+                 ["80 px, 2K", "1,8 ms", "2,2 ms", "2,9 ms"]])
+        + "<p>Budget : un dab en moins de 8 ms (16 ms sur la RTX A2000, <b>à mesurer</b>).</p>"
+        + "</section>")
+
+    # 11. Checklist.
+    add("<section><h2>11. Checklist complète des tests manuels</h2>"
         "<h3>M0 — Fondations</h3>"
         + checklist(["<code>cargo run -p patine_app</code> ouvre une fenêtre sans erreur dans le terminal.",
                      "Les 9 panneaux sont présents ; on peut les détacher, les déplacer et les réancrer.",
@@ -960,10 +1042,20 @@ def body():
                      "Ctrl+Z et Ctrl+Y sur chaque opération ; enregistrer, rouvrir : identique.",
                      "<code>patine_cli bench procedural --triplanar --material material.copper</code> sur la RTX "
                      "A2000 : moins de 100 ms."])
+        + "<h3>M8 — Peinture</h3>"
+        + checklist(["Casque et valise : Nouveau calque de peinture, peindre à la souris ; pas de trou aux coutures, "
+                     "l'arrière du mesh n'est pas peint.",
+                     "Un trait qui traverse plusieurs îlots UV reste continu.",
+                     "Couleur et roughness cochées : les deux canaux changent (F1, C).",
+                     "Gomme (E) : la peinture disparaît, le calque du dessous réapparaît.",
+                     "Alphas et dureté ; [ et ], Maj + [ et ] ; le curseur suit la surface à la taille de la brosse.",
+                     "Ctrl+Z et Ctrl+Y sur plusieurs traits : immédiats et exacts ; enregistrer, rouvrir : identique.",
+                     "Masque noir sur un fill, Ajouter de la peinture, peindre en blanc : le fill apparaît sous le trait.",
+                     "<code>patine_cli bench paint</code> sur la RTX A2000 : moins de 16 ms par dab."])
         + "</section>")
 
     # Appendix.
-    add("<section><h2>11. Annexe</h2>"
+    add("<section><h2>12. Annexe</h2>"
         "<h3>Options de lancement de patine_app</h3>"
         "<p>Ces options servent aux captures et aux tests ; <code>patine_app --help</code> les liste.</p>"
         + table(["Option", "Effet"], OPTIONS)
@@ -974,7 +1066,7 @@ def body():
         + code("cargo build --release -p patine_app -p patine_cli\n"
                "python scripts/manual_tests/capture_tutorial.py\n"
                "python scripts/manual_tests/build_tutorial.py")
-        + "<p>Le premier script produit les 78 captures dans <code>manual_tests/captures/</code> (et le projet "
+        + "<p>Le premier script produit les 85 captures dans <code>manual_tests/captures/</code> (et le projet "
         "<code>manual_tests/casque.patine</code>) ; le second les "
         "recadre et imprime ce PDF avec Microsoft Edge (ou Chrome) sans interface.</p>"
         "<h3>Crédits</h3>"
@@ -1059,7 +1151,7 @@ def main():
     os.makedirs(IMAGES)
     document = (
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
-        f"<title>Patine — tutoriel M0 à M7</title><style>{STYLE}</style></head>"
+        f"<title>Patine — tutoriel M0 à M8</title><style>{STYLE}</style></head>"
         f"<body>{body()}</body></html>"
     )
     page = os.path.join(OUT, "index.html")
