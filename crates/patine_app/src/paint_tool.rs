@@ -111,6 +111,8 @@ pub struct ToolState {
     pub strokes_started: u64,
     /// The tool the picker gives the hand back to.
     pub previous_tool: Tool,
+    /// Whether the dynamics and symmetry sections start open (captures).
+    pub expand_sections: bool,
 }
 
 impl Default for ToolState {
@@ -142,6 +144,7 @@ impl Default for ToolState {
             preset: None,
             strokes_started: 0,
             previous_tool: Tool::Brush,
+            expand_sections: false,
         };
         state.apply_settings(&BrushSettings::default());
         state
@@ -518,7 +521,7 @@ pub fn brush_section(
     });
     ui.separator();
     ended |= dynamics_section(ui, i18n, state);
-    ended |= symmetry_section(ui, i18n, &mut state.symmetry);
+    ended |= symmetry_section(ui, i18n, &mut state.symmetry, state.expand_sections);
     ui.separator();
 
     // The material: values, or a procedural.
@@ -719,6 +722,7 @@ fn dynamics_section(ui: &mut Ui, i18n: &I18n, state: &mut ToolState) -> bool {
     let mut ended = false;
     egui::CollapsingHeader::new(i18n.tr("brush-dynamics"))
         .id_salt("brush dynamics")
+        .default_open(state.expand_sections)
         .show(ui, |ui| {
             ended |= slider(
                 ui,
@@ -780,10 +784,11 @@ fn dynamics_section(ui: &mut Ui, i18n: &I18n, state: &mut ToolState) -> bool {
 }
 
 /// Mirrors and radial copies. Returns whether a setting changed.
-fn symmetry_section(ui: &mut Ui, i18n: &I18n, symmetry: &mut Symmetry) -> bool {
+fn symmetry_section(ui: &mut Ui, i18n: &I18n, symmetry: &mut Symmetry, open: bool) -> bool {
     let mut changed = false;
     egui::CollapsingHeader::new(i18n.tr("brush-symmetry"))
         .id_salt("brush symmetry")
+        .default_open(open)
         .show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.label(i18n.tr("symmetry-mirror"));

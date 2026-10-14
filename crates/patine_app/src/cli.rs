@@ -60,6 +60,7 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
   --preset NAME                 brush preset: standard, airbrush, hard-felt, chalk,
                                 splatter, scratches, or a saved preset's name
   --symmetry x,y,z,radial=N     symmetry of the strokes (any of the items)
+  --expand-brush                open the Dynamics and Symmetry sections of the brush
   --stroke [PREFIX:]X,Y[,P];... paint a stroke through these pixels, as with the mouse,
                                 at pen pressure P (default 1) (repeatable). Prefixes,
                                 combinable: eraser: (with the eraser), uv: (in the 2D
@@ -418,6 +419,8 @@ pub struct StartupOptions {
     pub preset: Option<String>,
     /// Symmetry of the strokes.
     pub symmetry: Option<patine_core::stroke::Symmetry>,
+    /// Open the Dynamics and Symmetry sections of the brush.
+    pub expand_brush: bool,
     /// Strokes to paint once their view has settled.
     pub strokes: Vec<StartupStroke>,
 }
@@ -602,6 +605,7 @@ impl StartupOptions {
                         .push(stroke_points(&v).ok_or_else(|| invalid(&v))?);
                 }
                 "--preset" => options.preset = Some(value()?),
+                "--expand-brush" => options.expand_brush = true,
                 "--symmetry" => {
                     let v = value()?;
                     options.symmetry = Some(symmetry(&v).ok_or_else(|| invalid(&v))?);
@@ -848,6 +852,8 @@ mod tests {
         ])
         .unwrap();
         assert_eq!(options.preset.as_deref(), Some("chalk"));
+        assert!(!options.expand_brush);
+        assert!(parse(&["--expand-brush"]).unwrap().expand_brush);
         assert_eq!(
             options.symmetry,
             Some(patine_core::stroke::Symmetry {

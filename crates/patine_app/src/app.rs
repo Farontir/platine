@@ -887,6 +887,7 @@ impl App {
         if let Some(symmetry) = options.symmetry {
             self.ui.tool.symmetry = symmetry;
         }
+        self.ui.tool.expand_sections = options.expand_brush;
         for option in &options.brush {
             use crate::cli::BrushOption;
             let tool = &mut self.ui.tool;
