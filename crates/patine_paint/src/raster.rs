@@ -26,7 +26,8 @@ use patine_procedural::surface::MeshBuffers;
 use wgpu::util::DeviceExt as _;
 
 use crate::alphas::AlphaImage;
-use crate::projection::{GpuDab, SetGeometry, StrokeProjection, TILE, gpu_dab};
+use crate::dynamics::gpu_dabs;
+use crate::projection::{GpuDab, SetGeometry, StrokeProjection, TILE};
 use crate::reference::ContentLayout;
 use crate::{DEPTH_BIAS, DILATION, GRAZING};
 
@@ -868,10 +869,8 @@ impl Painter {
         contents: &[Content<'_>],
     ) -> Vec<[u32; 2]> {
         let target = self.begin_stroke(ctx, pool, encoder, stroke, set, alpha);
-        let dabs: Vec<GpuDab> = stroke.dabs.iter().map(|dab| gpu_dab(stroke, dab)).collect();
-        let tiles = set
-            .geometry
-            .touched_tiles(&target.projection, &dabs, set.size);
+        let dabs = gpu_dabs(stroke, 0..stroke.dabs.len());
+        let tiles = set.geometry.stroke_tiles(stroke, &dabs, set.size);
         self.rasterize_dabs(ctx, pool, encoder, &target, set, &dabs, &tiles);
         for content in contents {
             self.composite(ctx, pool, encoder, &target, content, &tiles);
@@ -1073,11 +1072,10 @@ impl LiveStroke {
         contents: &[Content<'_>],
         dabs: &[Dab],
     ) -> Vec<[u32; 2]> {
-        let gpu: Vec<GpuDab> = dabs.iter().map(|dab| gpu_dab(&self.stroke, dab)).collect();
+        let start = self.stroke.dabs.len();
         self.stroke.dabs.extend_from_slice(dabs);
-        let tiles = set
-            .geometry
-            .touched_tiles(&self.target.projection, &gpu, set.size);
+        let gpu = gpu_dabs(&self.stroke, start..self.stroke.dabs.len());
+        let tiles = set.geometry.stroke_tiles(&self.stroke, &gpu, set.size);
         if tiles.is_empty() {
             return tiles;
         }

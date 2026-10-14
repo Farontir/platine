@@ -119,23 +119,49 @@ pub fn texel_view(
     Some((pixel, angle))
 }
 
-/// Paint accumulated by the stroke buffer after one more dab of weight `a`.
-pub fn accumulate(s: f32, a: f32) -> f32 {
-    s + (1.0 - s) * a
+/// What a texel of a stroke painted in UV space shows to its camera: where its surface
+/// point's UV lands on the 2D view (no occlusion, no angle), or `None` when it takes no
+/// paint (no surface, too far from its island, outside the camera).
+pub fn texel_view_uv(
+    projection: &StrokeProjection,
+    surface: &Surface,
+    texel: [u32; 2],
+    size: u32,
+) -> Option<(Vec2, f32)> {
+    if surface.normal == Vec3::ZERO {
+        return None;
+    }
+    let p = (Vec2::new(texel[0] as f32, texel[1] as f32) + 0.5) / size as f32;
+    if (p - surface.uv).length() * size as f32 > DILATION {
+        return None;
+    }
+    let pixel = projection.pixel(projection.clip(surface.uv.extend(0.0)))?;
+    Some((pixel, 1.0))
 }
 
-/// The stroke buffer value of a texel after `dabs`, from `s`.
+/// Paint accumulated by the stroke buffer after one more dab of weight `a` whose
+/// opacity is `opacity`: the paint grows toward 1 but never past the dab's opacity, and
+/// never decreases. With an opacity of 1, `s + (1 − s) × a` exactly.
+pub fn accumulate(s: f32, a: f32, opacity: f32) -> f32 {
+    s.max(opacity.min(s + (1.0 - s) * a))
+}
+
+/// The stroke buffer value of a texel after `dabs`, from `s`, seen through `views`
+/// (one per symmetry copy): dabs in order, and for each dab the copies in order.
 pub fn stroke_texel(
     s: f32,
-    view: Option<(Vec2, f32)>,
+    views: &[Option<(Vec2, f32)>],
     dabs: &[GpuDab],
     alpha: Option<&AlphaImage>,
 ) -> f32 {
-    let Some((pixel, angle)) = view else {
-        return s;
-    };
     dabs.iter().fold(s, |s, dab| {
-        accumulate(s, dab.flow * dab_coverage(dab, pixel, alpha) * angle)
+        views.iter().flatten().fold(s, |s, (pixel, angle)| {
+            accumulate(
+                s,
+                dab.flow * dab_coverage(dab, *pixel, alpha) * angle,
+                dab.opacity,
+            )
+        })
     })
 }
 
@@ -215,7 +241,7 @@ mod tests {
             flow: 1.0,
             rotation: [1.0, 0.0],
             hardness,
-            padding: 0.0,
+            opacity: 1.0,
         }
     }
 
@@ -269,7 +295,12 @@ mod tests {
             ([0.0; 4], 0.0)
         );
         // The stroke buffer saturates without exceeding 1.
-        let s = (0..100).fold(0.0, |s, _| accumulate(s, 0.3));
+        let s = (0..100).fold(0.0, |s, _| accumulate(s, 0.3, 1.0));
         assert!(s <= 1.0 && s > 0.999);
+        // A dab's opacity caps what it adds, and never removes paint.
+        let capped = (0..100).fold(0.0, |s, _| accumulate(s, 0.3, 0.4));
+        assert_eq!(capped, 0.4);
+        assert_eq!(accumulate(0.7, 0.9, 0.2), 0.7);
+        assert_eq!(accumulate(0.25, 0.5, 1.0), 0.25 + 0.75 * 0.5);
     }
 }

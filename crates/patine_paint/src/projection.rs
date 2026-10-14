@@ -6,7 +6,7 @@ use std::collections::BTreeSet;
 use bytemuck::{Pod, Zeroable};
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use patine_core::mesh::MeshAsset;
-use patine_core::stroke::{Dab, Stroke, StrokeCamera};
+use patine_core::stroke::{Stroke, StrokeCamera, StrokeSpace};
 use patine_mesh::bvh::Bvh;
 use patine_procedural::surface::material_triangles;
 
@@ -37,7 +37,13 @@ pub struct StrokeProjection {
 impl StrokeProjection {
     /// The projection of `camera`.
     pub fn new(camera: &StrokeCamera) -> Self {
-        let view_proj = Mat4::from_cols_array_2d(&camera.view_proj);
+        Self::transformed(camera, Mat4::IDENTITY)
+    }
+
+    /// The projection of `camera` seeing the mesh moved by `transform`: the camera of a
+    /// symmetry copy.
+    pub fn transformed(camera: &StrokeCamera, transform: Mat4) -> Self {
+        let view_proj = Mat4::from_cols_array_2d(&camera.view_proj) * transform;
         let row = |i: usize| view_proj.row(i);
         let w_gradient = row(3).truncate();
         let depth_axis = if w_gradient.length() > 1e-6 {
@@ -112,22 +118,91 @@ pub struct GpuDab {
     pub rotation: [f32; 2],
     /// Edge hardness, 0 to 1.
     pub hardness: f32,
-    /// Unused, for alignment.
-    pub padding: f32,
+    /// Most paint the stroke may hold where this dab lands (pen pressure through the
+    /// opacity curve), 0 to 1.
+    pub opacity: f32,
 }
 
-/// The dab `dab` of `stroke` as the shaders read it. Pressure, jitters and the
-/// direction of the path shape dabs from M9 on.
-pub fn gpu_dab(stroke: &Stroke, dab: &Dab) -> GpuDab {
-    let brush = &stroke.brush;
-    GpuDab {
-        center: dab.position,
-        radius: (brush.size * 0.5).max(0.5),
-        flow: brush.flow.clamp(0.0, 1.0),
-        rotation: [brush.angle.cos(), brush.angle.sin()],
-        hardness: brush.hardness.clamp(0.0, 1.0),
-        padding: 0.0,
+/// The projections of `stroke`: in the 3D view, one per symmetry copy (the stroke's
+/// camera first); in UV space, the camera alone.
+pub fn stroke_projections(stroke: &Stroke) -> Vec<StrokeProjection> {
+    match stroke.space {
+        StrokeSpace::View => crate::symmetry::copies(&stroke.symmetry)
+            .into_iter()
+            .map(|copy| StrokeProjection::transformed(&stroke.camera, copy))
+            .collect(),
+        StrokeSpace::Uv => vec![StrokeProjection::new(&stroke.camera)],
     }
+}
+
+/// Screen rectangle a dab may paint, a pixel wider than its alpha turned by 45 degrees.
+fn dab_rect(dab: &GpuDab) -> (Vec2, Vec2) {
+    let center = Vec2::from(dab.center);
+    let reach = Vec2::splat(dab.radius * std::f32::consts::SQRT_2 + 1.0);
+    (center - reach, center + reach)
+}
+
+/// Tiles of a `size`² texture holding the texel rectangle `lo..hi` (texel coordinates,
+/// widened by the painted margin).
+fn tiles_of(lo: Vec2, hi: Vec2, size: u32, tiles: &mut BTreeSet<[u32; 2]>) {
+    let columns = size.div_ceil(TILE).max(1);
+    let margin = DILATION + 1.0;
+    let (lo, hi) = (lo - margin, hi + margin);
+    if hi.x < 0.0 || hi.y < 0.0 {
+        return;
+    }
+    let tile = |v: f32| ((v.max(0.0) as u32) / TILE).min(columns - 1);
+    for y in tile(lo.y)..=tile(hi.y) {
+        for x in tile(lo.x)..=tile(hi.x) {
+            tiles.insert([y, x]);
+        }
+    }
+}
+
+/// The tiles of a `size`² texture that `dabs` of a stroke painted in UV space may paint:
+/// the UV rectangles under the dabs (the camera maps UVs to pixels).
+pub fn touched_tiles_uv(
+    projection: &StrokeProjection,
+    dabs: &[GpuDab],
+    size: u32,
+) -> Vec<[u32; 2]> {
+    let pixel_of = |u: f32, v: f32| {
+        let clip = projection.clip(Vec3::new(u, v, 0.0));
+        projection.pixel(clip)
+    };
+    let (Some(origin), Some(along_u), Some(along_v)) =
+        (pixel_of(0.0, 0.0), pixel_of(1.0, 0.0), pixel_of(0.0, 1.0))
+    else {
+        return Vec::new();
+    };
+    // pixel = origin + A × uv; invert A.
+    let (a, b) = (along_u - origin, along_v - origin);
+    let det = a.x * b.y - a.y * b.x;
+    if det.abs() < 1e-12 {
+        return Vec::new();
+    }
+    let uv_of = |p: Vec2| {
+        let d = p - origin;
+        Vec2::new(d.x * b.y - d.y * b.x, a.x * d.y - a.y * d.x) / det
+    };
+    let mut tiles = BTreeSet::new();
+    for dab in dabs {
+        let (lo, hi) = dab_rect(dab);
+        let corners = [lo, hi, Vec2::new(lo.x, hi.y), Vec2::new(hi.x, lo.y)].map(uv_of);
+        let uv_lo = corners
+            .iter()
+            .fold(Vec2::splat(f32::INFINITY), |m, c| m.min(*c));
+        let uv_hi = corners
+            .iter()
+            .fold(Vec2::splat(f32::NEG_INFINITY), |m, c| m.max(*c));
+        tiles_of(
+            uv_lo * size as f32 - 0.5,
+            uv_hi * size as f32 - 0.5,
+            size,
+            &mut tiles,
+        );
+    }
+    tiles.into_iter().map(|[y, x]| [x, y]).collect()
 }
 
 /// The triangles of one texture set, with a hierarchy to find those under the dabs.
@@ -156,25 +231,41 @@ impl SetGeometry {
         }
     }
 
-    /// The tiles of a `size`² texture of the set that `dabs` may paint, sorted: the
-    /// tiles around every triangle whose screen bounds meet a dab, widened by the
-    /// painted margin around the islands ([`DILATION`]). Conservative: a texel outside
-    /// gets nothing from these dabs.
+    /// The tiles of a `size`² texture of the set that `dabs` of `stroke` may paint,
+    /// sorted (see [`SetGeometry::touched_tiles`] and [`touched_tiles_uv`]).
+    pub fn stroke_tiles(&self, stroke: &Stroke, dabs: &[GpuDab], size: u32) -> Vec<[u32; 2]> {
+        let projections = stroke_projections(stroke);
+        match stroke.space {
+            StrokeSpace::View => self.touched_tiles(&projections, dabs, size),
+            StrokeSpace::Uv => touched_tiles_uv(&projections[0], dabs, size),
+        }
+    }
+
+    /// The tiles of a `size`² texture of the set that `dabs` may paint through any of
+    /// `projections` (the symmetry copies), sorted: the tiles around every triangle
+    /// whose screen bounds meet a dab, widened by the painted margin around the islands
+    /// ([`DILATION`]). Conservative: a texel outside gets nothing from these dabs.
     pub fn touched_tiles(
         &self,
-        projection: &StrokeProjection,
+        projections: &[StrokeProjection],
         dabs: &[GpuDab],
         size: u32,
     ) -> Vec<[u32; 2]> {
-        let rects: Vec<(Vec2, Vec2)> = dabs
-            .iter()
-            .map(|dab| {
-                // An alpha turned by 45 degrees reaches the corners of its square.
-                let center = Vec2::from(dab.center);
-                let reach = Vec2::splat(dab.radius * std::f32::consts::SQRT_2 + 1.0);
-                (center - reach, center + reach)
-            })
-            .collect();
+        let rects: Vec<(Vec2, Vec2)> = dabs.iter().map(dab_rect).collect();
+        let mut tiles = BTreeSet::new();
+        for projection in projections {
+            self.touched_by(projection, &rects, size, &mut tiles);
+        }
+        tiles.into_iter().map(|[y, x]| [x, y]).collect()
+    }
+
+    fn touched_by(
+        &self,
+        projection: &StrokeProjection,
+        rects: &[(Vec2, Vec2)],
+        size: u32,
+        tiles: &mut BTreeSet<[u32; 2]>,
+    ) {
         // Screen bounds of a world box, or `None` when part of it is behind the camera.
         let screen = |min: Vec3, max: Vec3| -> Option<(Vec2, Vec2)> {
             let mut lo = Vec2::splat(f32::INFINITY);
@@ -200,26 +291,13 @@ impl SetGeometry {
         let mut found = Vec::new();
         self.bvh
             .query_bounds(&self.positions, &self.triangles, meets, &mut found);
-
-        let columns = size.div_ceil(TILE).max(1);
-        let margin = DILATION + 1.0;
-        let mut tiles = BTreeSet::new();
         for triangle in found {
             let corners =
                 self.triangles[triangle as usize].map(|v| Vec2::from(self.uvs[v as usize]));
-            let lo = corners[0].min(corners[1]).min(corners[2]) * size as f32 - 0.5 - margin;
-            let hi = corners[0].max(corners[1]).max(corners[2]) * size as f32 - 0.5 + margin;
-            let tile = |v: f32| ((v.max(0.0) as u32) / TILE).min(columns - 1);
-            if hi.x < 0.0 || hi.y < 0.0 {
-                continue;
-            }
-            for y in tile(lo.y)..=tile(hi.y) {
-                for x in tile(lo.x)..=tile(hi.x) {
-                    tiles.insert([y, x]);
-                }
-            }
+            let lo = corners[0].min(corners[1]).min(corners[2]) * size as f32 - 0.5;
+            let hi = corners[0].max(corners[1]).max(corners[2]) * size as f32 - 0.5;
+            tiles_of(lo, hi, size, tiles);
         }
-        tiles.into_iter().map(|[y, x]| [x, y]).collect()
     }
 }
 
@@ -320,10 +398,10 @@ mod tests {
                 flow: 1.0,
                 rotation: [0.8, 0.6],
                 hardness: 0.3,
-                padding: 0.0,
+                opacity: 1.0,
             })
             .collect();
-        let tiles = geometry.touched_tiles(&projection, &dabs, size);
+        let tiles = geometry.touched_tiles(&[projection], &dabs, size);
         assert!(!tiles.is_empty());
         assert!(
             tiles
@@ -380,6 +458,141 @@ mod tests {
             radius: 3.0,
             ..dabs[0]
         }];
-        assert!(geometry.touched_tiles(&projection, &away, size).is_empty());
+        assert!(
+            geometry
+                .touched_tiles(&[projection], &away, size)
+                .is_empty()
+        );
+    }
+
+    /// Texels a stroke paints through `projections` (in UV space with `uv`) that lie
+    /// outside `tiles`, and texels painted: brute force over the surface of every texel.
+    fn outside(
+        mesh: &MeshAsset,
+        geometry: &SetGeometry,
+        projections: &[StrokeProjection],
+        uv: bool,
+        dabs: &[GpuDab],
+        tiles: &[[u32; 2]],
+        size: u32,
+    ) -> (usize, usize) {
+        use patine_procedural::reference::surface::{closest_barycentric, surface_at};
+        use patine_procedural::surface::gpu_vertices;
+
+        use crate::reference::dab_coverage;
+
+        let vertices = gpu_vertices(mesh);
+        let triangles = &geometry.triangles;
+        let (mut outside, mut painted) = (0, 0);
+        for y in 0..size {
+            for x in 0..size {
+                let p = (Vec2::new(x as f32, y as f32) + 0.5) / size as f32;
+                let nearest = (0..triangles.len())
+                    .map(|i| {
+                        let [a, b, c] = triangles[i].map(|v| Vec2::from(geometry.uvs[v as usize]));
+                        let w = closest_barycentric(p, a, b, c);
+                        ((a * w.x + b * w.y + c * w.z - p).length(), i)
+                    })
+                    .min_by(|a, b| a.0.total_cmp(&b.0))
+                    .expect("the set has triangles");
+                if nearest.0 * size as f32 > DILATION {
+                    continue;
+                }
+                let surface = surface_at(
+                    &vertices,
+                    triangles,
+                    nearest.1 as u32 + 1,
+                    [x, y],
+                    size as f32,
+                );
+                let point = if uv {
+                    surface.uv.extend(0.0)
+                } else {
+                    surface.position
+                };
+                let covered = projections.iter().any(|projection| {
+                    projection
+                        .pixel(projection.clip(point))
+                        .is_some_and(|pixel| {
+                            dabs.iter().any(|dab| dab_coverage(dab, pixel, None) > 0.0)
+                        })
+                });
+                if covered {
+                    painted += 1;
+                    outside += usize::from(!tiles.contains(&[x / TILE, y / TILE]));
+                }
+            }
+        }
+        (outside, painted)
+    }
+
+    /// With symmetry copies, and in UV space, every painted texel lies in a touched tile.
+    #[test]
+    fn touched_tiles_hold_symmetry_copies_and_uv_strokes() {
+        use patine_core::stroke::Symmetry;
+
+        let mesh = patine_mesh::primitives::cube_cross();
+        let geometry = SetGeometry::new(&mesh, 0);
+        let size = 512;
+        let proj = Mat4::from_cols(
+            Vec4::new(1.2, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, 2.4, 0.0, 0.0),
+            Vec4::new(0.0, 0.0, 0.0, -1.0),
+            Vec4::new(0.0, 0.0, 0.05, 0.0),
+        );
+        let camera = camera(proj * look(Vec3::new(2.0, 1.5, 2.5), Vec3::ZERO));
+        let dabs: Vec<GpuDab> = [[90.0, 40.0], [100.0, 55.0], [130.0, 70.0]]
+            .iter()
+            .map(|center| GpuDab {
+                center: *center,
+                radius: 12.0,
+                flow: 1.0,
+                rotation: [1.0, 0.0],
+                hardness: 0.3,
+                opacity: 1.0,
+            })
+            .collect();
+        let projections: Vec<StrokeProjection> = crate::symmetry::copies(&Symmetry {
+            mirror: [true, false, false],
+            radial: 3,
+        })
+        .into_iter()
+        .map(|copy| StrokeProjection::transformed(&camera, copy))
+        .collect();
+        let tiles = geometry.touched_tiles(&projections, &dabs, size);
+        let (out, painted) = outside(&mesh, &geometry, &projections, false, &dabs, &tiles, size);
+        assert_eq!(out, 0, "{painted} texels painted");
+        // The copies paint more than the stroke alone.
+        let (_, alone) = outside(
+            &mesh,
+            &geometry,
+            &projections[..1],
+            false,
+            &dabs,
+            &tiles,
+            size,
+        );
+        assert!(painted > alone && alone > 100, "{painted} against {alone}");
+
+        // UV space: a camera mapping the UV square to a 200 × 200 view.
+        let uv_camera = StrokeCamera {
+            view_proj: Mat4::from_cols(
+                Vec4::new(2.0, 0.0, 0.0, 0.0),
+                Vec4::new(0.0, -2.0, 0.0, 0.0),
+                Vec4::new(0.0, 0.0, 1.0, 0.0),
+                Vec4::new(-1.0, 1.0, 0.0, 1.0),
+            )
+            .to_cols_array_2d(),
+            viewport: [200, 200],
+        };
+        let uv = StrokeProjection::new(&uv_camera);
+        assert_eq!(
+            uv.pixel(uv.clip(Vec3::new(0.25, 0.5, 0.0))),
+            Some(Vec2::new(50.0, 100.0))
+        );
+        let tiles = touched_tiles_uv(&uv, &dabs, size);
+        let (out, painted) = outside(&mesh, &geometry, &[uv], true, &dabs, &tiles, size);
+        assert_eq!(out, 0);
+        assert!(painted > 100, "{painted}");
     }
 }

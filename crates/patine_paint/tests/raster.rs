@@ -12,7 +12,8 @@ use patine_gpu::{GpuContext, gpu_test, readback, wgpu};
 use patine_mesh::bvh::{Bvh, Ray};
 use patine_mesh::primitives;
 use patine_paint::alphas;
-use patine_paint::projection::{GpuDab, SetGeometry, StrokeProjection, gpu_dab};
+use patine_paint::dynamics::gpu_dabs;
+use patine_paint::projection::{GpuDab, SetGeometry, StrokeProjection};
 use patine_paint::raster::{Content, LiveStroke, Painter, SetSurface, content_descriptor};
 use patine_paint::reference::{
     ContentLayout, DepthImage, deposit, erase, stroke_texel, texel_view,
@@ -299,10 +300,10 @@ fn rasterize(
     let set = fixture.surface(view);
     let mut encoder = ctx.device.create_command_encoder(&Default::default());
     let target = painter.begin_stroke(ctx, &mut pool, &mut encoder, stroke, &set, alpha);
-    let dabs: Vec<GpuDab> = stroke.dabs.iter().map(|d| gpu_dab(stroke, d)).collect();
+    let dabs: Vec<GpuDab> = gpu_dabs(stroke, 0..stroke.dabs.len());
     let tiles = fixture
         .geometry
-        .touched_tiles(&target.projection, &dabs, fixture.size);
+        .touched_tiles(&[target.projection], &dabs, fixture.size);
     painter.rasterize_dabs(ctx, &pool, &mut encoder, &target, &set, &dabs, &tiles);
     ctx.queue.submit([encoder.finish()]);
     let buffer = read_f32(ctx, pool.peek(target.buffer).expect("pinned"));
@@ -334,14 +335,14 @@ gpu_test!(
             let stroke = stroke(camera, brush, Tool::Brush, &path);
             let (gpu, depth, tiles) = rasterize(&ctx, &painter, &fixture, &view, &stroke, alpha);
             let projection = StrokeProjection::new(&camera);
-            let dabs: Vec<GpuDab> = stroke.dabs.iter().map(|d| gpu_dab(&stroke, d)).collect();
+            let dabs: Vec<GpuDab> = gpu_dabs(&stroke, 0..stroke.dabs.len());
             let (mut worst, mut painted, mut flipped) = (0.0f32, 0, 0);
             for tile in &tiles {
                 for y in tile[1] * 128..((tile[1] + 1) * 128).min(fixture.size) {
                     for x in tile[0] * 128..((tile[0] + 1) * 128).min(fixture.size) {
                         let surface = fixture.surface_at([x, y]);
                         let view = texel_view(&projection, &depth, fixture.buffers.extent, &surface, [x, y], fixture.size);
-                        let expected = stroke_texel(0.0, view, &dabs, alpha);
+                        let expected = stroke_texel(0.0, &[view], &dabs, alpha);
                         let got = gpu[(y * fixture.size + x) as usize];
                         let error = (got - expected).abs();
                         if error > 1e-3 {

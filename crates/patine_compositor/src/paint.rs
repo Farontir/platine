@@ -26,7 +26,8 @@ use patine_core::stroke::{Stroke, StrokeLog};
 use patine_gpu::pool::{Residency, TextureId, TexturePool, texture_bytes};
 use patine_gpu::{GpuContext, wgpu};
 use patine_paint::alphas::{self, AlphaImage};
-use patine_paint::projection::{GpuDab, SetGeometry, StrokeProjection, gpu_dab};
+use patine_paint::dynamics::gpu_dabs;
+use patine_paint::projection::SetGeometry;
 use patine_paint::raster::{Content, Painter, SetSurface, TileSnapshot, content_descriptor};
 use patine_paint::reference::ContentLayout;
 
@@ -438,10 +439,8 @@ impl PaintRasters {
                     })
                     .collect();
                 if save {
-                    let projection = StrokeProjection::new(&stroke.camera);
-                    let dabs: Vec<GpuDab> =
-                        stroke.dabs.iter().map(|dab| gpu_dab(stroke, dab)).collect();
-                    let tiles = geometry.touched_tiles(&projection, &dabs, size);
+                    let dabs = gpu_dabs(stroke, 0..stroke.dabs.len());
+                    let tiles = geometry.stroke_tiles(stroke, &dabs, size);
                     let before = textures
                         .iter()
                         .map(|(channel, texture, _)| {

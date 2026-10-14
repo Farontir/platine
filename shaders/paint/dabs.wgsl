@@ -35,7 +35,8 @@ struct Dab {
     // Cosine and sine of the rotation.
     rotation: vec2<f32>,
     hardness: f32,
-    padding: f32,
+    // Most paint the stroke may hold where this dab lands.
+    opacity: f32,
 }
 
 @group(0) @binding(0) var<uniform> u: DabUniforms;
