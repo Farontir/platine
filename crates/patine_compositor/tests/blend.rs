@@ -301,7 +301,7 @@ gpu_test!(
                 wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
             );
             let mut encoder = ctx.device.create_command_encoder(&Default::default());
-            compositor.build_mips(&ctx, &mut encoder, kind, &texture);
+            compositor.build_mips(&ctx, &mut encoder, kind, &texture, &Region::full(SIZE));
             ctx.queue.submit([encoder.finish()]);
             let mut expected = level0;
             let mut size = SIZE as usize;
@@ -317,6 +317,141 @@ gpu_test!(
                 }
                 // Continue from what the GPU stored, as the next level does.
                 expected = gpu;
+            }
+        }
+    }
+);
+
+gpu_test!(
+    /// Mips rebuilt over a region equal a full rebuild once only that region of level 0
+    /// changed, at every level (the region's texels in coarser levels cover partial
+    /// texels of its border).
+    fn regional_mips_match_a_full_rebuild(ctx) {
+        let compositor = Compositor::new(&ctx).expect("shaders compile");
+        let size = 512u32;
+        let levels = 10;
+        let make = || {
+            ctx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("mips"),
+                size: wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+                mip_level_count: levels,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format: wgpu::TextureFormat::Rgba16Float,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::COPY_SRC
+                    | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            })
+        };
+        let write = |texture: &wgpu::Texture, seed: u32| {
+            let bytes: Vec<u8> = (0..size * size)
+                .flat_map(|i| {
+                    let x = i % size;
+                    let y = i / size;
+                    // The second image differs only in tile (1, 2).
+                    let v = if seed == 1 && x / 128 == 1 && y / 128 == 2 { 0.9 } else { (i % 13) as f32 / 13.0 };
+                    [v, 1.0 - v, 0.5, 1.0].map(|c| half::f16::from_f32(c).to_le_bytes()).concat()
+                })
+                .collect();
+            ctx.queue.write_texture(
+                texture.as_image_copy(),
+                &bytes,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(size * 8), rows_per_image: None },
+                wgpu::Extent3d { width: size, height: size, depth_or_array_layers: 1 },
+            );
+        };
+        let partial = make();
+        let full = make();
+        write(&partial, 0);
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        compositor.build_mips(&ctx, &mut encoder, ChannelKind::Color, &partial, &Region::full(size));
+        ctx.queue.submit([encoder.finish()]);
+        write(&partial, 1);
+        write(&full, 1);
+        let mut region = Region::empty(size);
+        region.add_tile(1, 2);
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        compositor.build_mips(&ctx, &mut encoder, ChannelKind::Color, &partial, &region);
+        compositor.build_mips(&ctx, &mut encoder, ChannelKind::Color, &full, &Region::full(size));
+        ctx.queue.submit([encoder.finish()]);
+        for level in 1..levels {
+            assert_eq!(
+                readback::read_rgba16f_level(&ctx, &partial, level, 0).unwrap(),
+                readback::read_rgba16f_level(&ctx, &full, level, 0).unwrap(),
+                "level {level}"
+            );
+        }
+    }
+);
+
+gpu_test!(
+    /// Paint contents (premultiplied value and coverage, coverages 0 to 1 including tiny
+    /// ones) blend as the reference: value divided by the coverage, weight scaled by it.
+    fn paint_sources_match_the_reference(ctx) {
+        use patine_paint::reference::{ContentLayout, unpremultiply};
+        let compositor = Compositor::new(&ctx).expect("shaders compile");
+        let mut random = Random(23);
+        for kind in [ChannelKind::Color, ChannelKind::Scalar, ChannelKind::Normal] {
+            let dst = destination(kind, &mut random);
+            let (layout, format, components) = match kind {
+                ChannelKind::Scalar => (ContentLayout::Scalar, wgpu::TextureFormat::Rg16Float, 2usize),
+                _ => (ContentLayout::Vector, wgpu::TextureFormat::Rgba16Float, 4),
+            };
+            let values = destination(kind, &mut random);
+            let paint: Vec<[f32; 4]> = values
+                .iter()
+                .enumerate()
+                .map(|(i, v)| {
+                    let c = match i {
+                        0 => 0.0,
+                        1 => 1.0,
+                        2 => 2e-4,
+                        3 => 5e-5,
+                        _ => random.next(),
+                    };
+                    let stored = match layout {
+                        ContentLayout::Scalar => [v[0] * c, c, 0.0, 0.0],
+                        ContentLayout::Vector => [v[0] * c, v[1] * c, v[2] * c, c],
+                    };
+                    stored.map(round_f16)
+                })
+                .collect();
+            let source = ctx.device.create_texture(&wgpu::TextureDescriptor {
+                label: Some("paint source"),
+                size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+                mip_level_count: 1,
+                sample_count: 1,
+                dimension: wgpu::TextureDimension::D2,
+                format,
+                usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                view_formats: &[],
+            });
+            let bytes: Vec<u8> = paint
+                .iter()
+                .flat_map(|t| t[..components].to_vec())
+                .flat_map(|v| half::f16::from_f32(v).to_le_bytes())
+                .collect();
+            ctx.queue.write_texture(
+                source.as_image_copy(),
+                &bytes,
+                wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(SIZE * 2 * components as u32), rows_per_image: None },
+                source.size(),
+            );
+            let view = source.create_view(&Default::default());
+            let modes: &[BlendMode] = match kind {
+                ChannelKind::Normal => &[BlendMode::Normal, BlendMode::NormalMapCombine],
+                _ => &[BlendMode::Normal, BlendMode::Multiply, BlendMode::Overlay],
+            };
+            for &mode in modes {
+                let step = BlendStep { mode, opacity: 0.7, source: Source::Paint(&view), mask: None };
+                let gpu = run(&ctx, &compositor, kind, &dst, step, &Region::full(SIZE));
+                for ((g, d), p) in gpu.iter().zip(&dst).zip(&paint) {
+                    let (s, c) = unpremultiply(layout, *p);
+                    let cpu = reference::apply(mode, kind, *d, s, 0.7 * c).map(round_f16);
+                    assert!((0..4).all(|i| within(g[i], cpu[i])), "{kind:?} {mode:?}: {g:?} vs {cpu:?} (paint {p:?})");
+                }
             }
         }
     }

@@ -696,7 +696,7 @@ impl GpuDocument {
             return;
         };
         compositor.copy(encoder, result, target, &region);
-        compositor.build_mips(ctx, encoder, ChannelKind::Scalar, target);
+        compositor.build_mips(ctx, encoder, ChannelKind::Scalar, target, &region);
     }
 
     /// Evaluates the composition of one channel if its layers changed since the last
@@ -804,7 +804,7 @@ impl GpuDocument {
             return;
         };
         compositor.copy(encoder, result, target, &evaluation.region);
-        compositor.build_mips(ctx, encoder, kind, target);
+        compositor.build_mips(ctx, encoder, kind, target, &evaluation.region);
     }
 
     /// Memory of the final textures, in bytes.

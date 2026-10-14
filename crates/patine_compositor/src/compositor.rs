@@ -13,8 +13,8 @@ use wgpu::util::DeviceExt as _;
 
 use crate::reference::{ChannelKind, mode_index};
 
-/// Side of a tile, in texels.
-pub const TILE: u32 = 128;
+/// Side of a tile, in texels (the paint engine's tiles).
+pub const TILE: u32 = patine_paint::projection::TILE;
 
 /// Tiles of a square texture to recompute.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -101,8 +101,11 @@ impl Region {
 pub enum Source<'a> {
     /// A constant (uniform fill).
     Value([f32; 4]),
-    /// A texture of the target size (folder result).
+    /// A texture of the target size (folder result, procedural content).
     Texture(&'a wgpu::TextureView),
+    /// A paint content of the target size: premultiplied value with its coverage (see
+    /// `patine_paint::reference::ContentLayout`), which scales the blend weight.
+    Paint(&'a wgpu::TextureView),
 }
 
 /// One layer to blend onto the composition.
@@ -356,6 +359,7 @@ impl Compositor {
         let (src, from_texture, texture) = match step.source {
             Source::Value(value) => (value, 0.0, &self.unused),
             Source::Texture(view) => ([0.0; 4], 1.0, view),
+            Source::Paint(view) => ([0.0; 4], 2.0, view),
         };
         let uniforms = BlendUniforms {
             src,
@@ -421,7 +425,7 @@ impl Compositor {
 
     /// Encodes `ping.write = entry(ping.read)` on the tiles of `region`, for a mask
     /// (`R16Float` textures). A procedural fill reads `source` (its evaluated content, at
-    /// the mask's size). Returns `false` without encoding anything when the effect leaves
+    /// the mask's size), and so does a paint effect (its paint content). Returns `false` without encoding anything when the effect leaves
     /// the mask unchanged: hidden, disabled, a procedural fill without content, or an
     /// effect of a later milestone (see [`crate::reference::mask_source`]); the
     /// composition then stays in `ping.read`.
@@ -451,6 +455,12 @@ impl Compositor {
                     return false;
                 }
                 uniforms.params[2] = 3.0;
+            }
+            MaskEffect::Paint { .. } => {
+                if source.is_none() {
+                    return false;
+                }
+                uniforms.params[2] = 4.0;
             }
             MaskEffect::Fill { .. } => match entry.effect.fill_value() {
                 Some(value) => uniforms.params[3] = value,
@@ -552,14 +562,20 @@ impl Compositor {
     }
 
     /// Rebuilds mips 1 and up of `texture` from mip 0 (2 × 2 averages, renormalized for
-    /// normals).
+    /// normals), over the part of each level that the tiles of `region` (in level 0)
+    /// cover.
     pub fn build_mips(
         &self,
         ctx: &GpuContext,
         encoder: &mut wgpu::CommandEncoder,
         kind: ChannelKind,
         texture: &wgpu::Texture,
+        region: &Region,
     ) {
+        if region.is_empty() {
+            return;
+        }
+        let rects = region.rects();
         let buffer = ctx
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -576,6 +592,8 @@ impl Compositor {
             })
         };
         for level in 1..texture.mip_level_count() {
+            let width = (texture.width() >> level).max(1);
+            let height = (texture.height() >> level).max(1);
             let source = level_view(level - 1);
             let target = level_view(level);
             let bind_group = ctx.device.create_bind_group(&wgpu::BindGroupDescriptor {
@@ -599,7 +617,7 @@ impl Compositor {
                     depth_slice: None,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Load,
                         store: wgpu::StoreOp::Store,
                     },
                 })],
@@ -610,7 +628,15 @@ impl Compositor {
             });
             pass.set_pipeline(&self.pipelines(kind).downsample);
             pass.set_bind_group(0, &bind_group, &[]);
-            pass.draw(0..3, 0..1);
+            for [x, y, w, h] in &rects {
+                // The texels of this level that the rectangle of level 0 covers.
+                let x0 = (x >> level).min(width - 1);
+                let y0 = (y >> level).min(height - 1);
+                let x1 = (x + w).div_ceil(1 << level).clamp(x0 + 1, width);
+                let y1 = (y + h).div_ceil(1 << level).clamp(y0 + 1, height);
+                pass.set_scissor_rect(x0, y0, x1 - x0, y1 - y0);
+                pass.draw(0..3, 0..1);
+            }
         }
     }
 }

@@ -203,6 +203,8 @@ fn cpu(project: &Project, channel: Channel, surface: &Surface, size: u32) -> [f3
     let texel = Texel {
         content: &content,
         mask_fill: &mask_fill,
+        paint: &|_, _| None,
+        mask_paint: &|_, _| None,
     };
     composite_texel(&set.stack.layers, channel, default, &texel)
 }

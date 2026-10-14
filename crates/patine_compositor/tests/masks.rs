@@ -337,3 +337,66 @@ gpu_test!(
         assert_eq!(pool.memory(), unmasked);
     }
 );
+
+gpu_test!(
+    /// A paint effect reads its content (premultiplied value, coverage) like the
+    /// reference: value divided by the coverage, opacity scaled by it.
+    fn paint_effects_match_the_reference(ctx) {
+        use patine_compositor::reference::mask_effect_with;
+        let compositor = Compositor::new(&ctx).expect("shaders compile");
+        let mut random = Random(5);
+        let below: Vec<f32> = (0..SIZE * SIZE).map(|_| round_f16(random.next())).collect();
+        let paint: Vec<[f32; 2]> = (0..SIZE * SIZE)
+            .map(|i| {
+                let c = if i == 0 { 0.0 } else if i == 1 { 1.0 } else { random.next() };
+                [round_f16(random.next() * c), round_f16(c)]
+            })
+            .collect();
+        let source = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("mask paint"),
+            size: wgpu::Extent3d { width: SIZE, height: SIZE, depth_or_array_layers: 1 },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rg16Float,
+            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+            view_formats: &[],
+        });
+        let bytes: Vec<u8> = paint.iter().flatten().flat_map(|v| half::f16::from_f32(*v).to_le_bytes()).collect();
+        ctx.queue.write_texture(
+            source.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(SIZE * 4), rows_per_image: None },
+            source.size(),
+        );
+        let view = source.create_view(&Default::default());
+        for (mode, opacity) in [(BlendMode::Normal, 1.0), (BlendMode::Multiply, 0.6), (BlendMode::Screen, 0.8)] {
+            let entry = entry(MaskEffect::paint(), mode, opacity);
+            let input = texture(&ctx, &below);
+            let target = texture(&ctx, &below);
+            let mut encoder = ctx.device.create_command_encoder(&Default::default());
+            let ran = compositor.mask_effect(
+                &ctx,
+                &mut encoder,
+                Ping {
+                    read: &input.create_view(&Default::default()),
+                    write: &target.create_view(&Default::default()),
+                },
+                &entry,
+                Some(&view),
+                &Region::full(SIZE),
+            );
+            ctx.queue.submit([encoder.finish()]);
+            assert!(ran);
+            let gpu = readback::read_r16f_level(&ctx, &target, 0, 0).expect("readback");
+            for i in 0..(SIZE * SIZE) as usize {
+                let cpu = round_f16(mask_effect_with(&entry, below[i], None, Some(paint[i])));
+                assert!((gpu[i] - cpu).abs() <= 1.0 / 512.0, "{mode:?} texel {i}: {} vs {cpu}", gpu[i]);
+            }
+        }
+        // Without content, the effect is skipped.
+        let entry = entry(MaskEffect::paint(), BlendMode::Normal, 1.0);
+        let (ran, _) = run(&ctx, &compositor, &below, &entry);
+        assert!(!ran);
+    }
+);

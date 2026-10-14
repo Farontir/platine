@@ -11,6 +11,7 @@ publish.workspace = true
 patine_core.workspace = true
 patine_gpu.workspace = true
 patine_procedural.workspace = true
+patine_paint.workspace = true
 half.workspace = true
 bytemuck.workspace = true
 tracing.workspace = true

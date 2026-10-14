@@ -2420,6 +2420,7 @@ dependencies = [
  "patine_core",
  "patine_gpu",
  "patine_mesh",
+ "patine_paint",
  "patine_procedural",
  "proptest",
  "tracing",
