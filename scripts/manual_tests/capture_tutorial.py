@@ -4,7 +4,8 @@ Run from the repository root after `cargo build --release -p patine_app -p patin
 and the manual-test assets (see generate_assets.py):
     python scripts/manual_tests/capture_tutorial.py
 
-Writes manual_tests/captures/<name>.png (1600 x 900 client area, French interface).
+Writes manual_tests/captures/<name>.png (1600 x 900 client area unless WINDOW says
+otherwise, French interface).
 Also writes manual_tests/casque.patine (a project made from the flight helmet) and a
 simulated crashed session in manual_tests/autosave_demo, for the M3 captures.
 """
@@ -85,6 +86,21 @@ M8_MASK = [
     "--brush", "size=70",
     "--stroke", "590,270;760,285;905,275",
     "--stroke", "640,390;780,340;880,310",
+]
+
+# M9: strokes in viewport pixels on the suitcase; pressure is the third number of a point.
+M9_PANELS = ["--tab", "layers", "--tab", "properties"]
+M9_PRESET_STROKE = ["--stroke", "590,270;700,300;800,285;905,275"]
+M9_HEIGHT = [
+    "--edit", "paint-layer=",
+    "--edit", "height-force=3",
+    "--brush", "off=base-color",
+    "--brush", "off=roughness",
+    "--brush", "height=1",
+    "--brush", "size=40",
+    "--brush", "hardness=0.9",
+    "--stroke", "620,300;900,300",
+    "--stroke", "620,380;900,380",
 ]
 
 # name -> arguments (mesh first, if any)
@@ -180,6 +196,45 @@ CAPTURES = {
     "m8_cursor": M8_BASE + ["--tab", "layers", "--tab", "properties"] + M8_PAINT + ["--brush", "size=90", "--hover", "760,330"],
     "m8_mask": M8_BASE + ["--tab", "layers", "--tab", "properties"] + M8_MASK,
     "m8_mask_view": M8_BASE + ["--tab", "layers", "--tab", "properties"] + M8_MASK + ["--display", "mask"],
+    "m9_pressure": M8_BASE + M8_PAINT + [
+        "--brush", "size=70", "--brush", "hardness=1", "--brush", "flow=1",
+        "--brush", "pressure-opacity=linear",
+        "--stroke", "620,300,0.05;760,300,1;900,300,0.05",
+        "--stroke", "620,420,0.1;900,420,1",
+    ],
+    "m9_panel": M8_BASE + M9_PANELS + M8_PAINT + [
+        "--preset", "chalk", "--brush", "pressure-opacity=linear",
+        "--symmetry", "x,radial=4", "--expand-brush",
+    ],
+    "m9_chalk": M8_BASE + M8_PAINT + ["--preset", "chalk"] + M9_PRESET_STROKE,
+    "m9_splatter": M8_BASE + M8_PAINT + ["--preset", "splatter", "--brush", "size=70"] + M9_PRESET_STROKE,
+    "m9_scratches": M8_BASE + M8_PAINT + ["--preset", "scratches", "--brush", "size=20"] + M9_PRESET_STROKE,
+    "m9_airbrush": M8_BASE + M8_PAINT + ["--preset", "airbrush"] + M9_PRESET_STROKE,
+    "m9_symmetry_helmet": [
+        HELMET, "--orbit", "0,10", "--texture-set", "1", "--capture-frames", "60",
+        "--edit", "paint-layer=", "--brush", "size=16", "--brush", "color=0.8,0.1,0.08",
+        "--symmetry", "x",
+        "--stroke", "552,82;540,110;532,140", "--stroke", "575,70;555,95",
+    ],
+    "m9_symmetry_lantern": [
+        LANTERN, "--orbit", "35,30", "--zoom", "0.85", "--capture-frames", "60",
+        "--edit", "paint-layer=", "--brush", "size=22", "--brush", "color=0.1,0.35,0.85",
+        "--symmetry", "radial=6", "--stroke", "535,505;538,545",
+    ],
+    "m9_line": M8_BASE + M8_PAINT + ["--stroke", "600,250;700,262", "--stroke", "line:880,420"],
+    "m9_uv": M8_BASE + ["--tab", "view-2d"] + M8_PAINT + [
+        "--brush", "size=40", "--stroke", "uv:300,300;500,350;700,320",
+    ],
+    "m9_material": M8_BASE + M8_PAINT + [
+        "--brush", "material=material.copper", "--brush", "size=120",
+        "--stroke", "620,300;760,330;900,300",
+    ],
+    "m9_height": M8_BASE + ["--tab", "texture-sets"] + M9_HEIGHT,
+}
+
+# Captures in a window other than 1600 x 900.
+WINDOW = {
+    "m9_panel": "1600x1600",
 }
 
 # Captures run with extra environment variables.
@@ -213,10 +268,11 @@ def main():
         if only and name not in only:
             continue
         target = os.path.join(OUT, f"{name}.png")
-        command = [APP] + args + ["--language", "fr", "--window", "1600x900", "--capture", target]
+        window = WINDOW.get(name, "1600x900")
+        command = [APP] + args + ["--language", "fr", "--window", window, "--capture", target]
         # The last --language wins: interface_en passes its own before.
         if "--language" in args:
-            command = [APP] + args + ["--window", "1600x900", "--capture", target]
+            command = [APP] + args + ["--window", window, "--capture", target]
         env = dict(os.environ, **ENVIRONMENT.get(name, {}))
         result = subprocess.run(command, capture_output=True, text=True, timeout=300, env=env)
         ok = result.returncode == 0 and os.path.exists(target)

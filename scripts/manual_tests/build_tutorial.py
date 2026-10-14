@@ -4,7 +4,7 @@ Run from the repository root after capture_tutorial.py:
     python scripts/manual_tests/build_tutorial.py
 
 Writes manual_tests/tutorial/ (HTML and cropped images) and
-manual_tests/Patine-tutoriel-M0-M8.pdf, printed by Microsoft Edge (or Chrome) headless.
+manual_tests/Patine-tutoriel-M0-M9.pdf, printed by Microsoft Edge (or Chrome) headless.
 """
 
 import html
@@ -19,7 +19,7 @@ from PIL import Image
 CAPTURES = os.path.join("manual_tests", "captures")
 OUT = os.path.join("manual_tests", "tutorial")
 IMAGES = os.path.join(OUT, "img")
-PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M8.pdf")
+PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M9.pdf")
 
 # Regions of the 1600 x 900 captures.
 FULL = None
@@ -35,6 +35,12 @@ RECOVERY = (520, 380, 1080, 540)
 LAYERS = (1178, 30, 1600, 215)
 PROPERTIES = (1178, 405, 1600, 862)
 LIBRARY = (10, 640, 1180, 868)
+SUITCASE_CROP = (560, 180, 1000, 560)
+HELMET_HEAD = (480, 110, 740, 370)
+LANTERN_CROP = (420, 100, 780, 628)
+TEXTURE_SETS = (1178, 30, 1600, 340)
+# The Properties panel of the 1600 x 1600 capture, brush sections open.
+BRUSH_SECTIONS = (1180, 1090, 1600, 1545)
 
 BROWSERS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -140,7 +146,10 @@ SHORTCUTS = [
     ["Clic droit", "sur un calque : ajouter ou supprimer un masque ; sur un masque ou un effet : ajouter un fill, un levels, une inversion (M6)"],
     ["B, E", "Peinture › Brosse, Gomme (M8)"],
     ["[ et ], Maj+[ et Maj+]", "Peinture › Brosse plus petite, plus grande, plus douce, plus dure (M8)"],
-    ["Clic gauche glissé", "peint dans la vue 3D, quand un calque de peinture ou un effet de peinture de masque est sélectionné (M8)"],
+    ["Clic gauche glissé", "peint dans la vue 3D, quand un calque de peinture ou un effet de peinture de masque est sélectionné (M8), et dans la vue 2D (M9)"],
+    ["Maj + clic", "ligne droite depuis la fin du trait précédent (M9)"],
+    ["I", "Peinture › Pipette : prend les valeurs sous le curseur, puis revient à l'outil précédent (M9)"],
+    ["L", "Peinture › Symétrie miroir X (M9)"],
     ["F", "Affichage › Cadrer le mesh"],
     ["Ctrl+Maj+P", "Affichage › Profileur"],
     ["—", "Affichage › Orthographique, Fil de fer, Ombres, Réinitialiser la disposition"],
@@ -168,12 +177,16 @@ OPTIONS = [
     ["<code>--edit rotation=DEG|exposure=EV|rename=SET:NOM|undo=N</code>", "applique des commandes au projet ouvert (une entrée d'historique chacune)"],
     ["<code>--edit paint-layer=|mask-paint=</code>", "ajoute un calque de peinture au-dessus de la sélection, ou un effet de peinture au masque sélectionné, et le sélectionne (M8)"],
     ["<code>--tool brush|eraser</code>, <code>--brush CLÉ=VALEUR</code>", "outil et réglages de brosse : size, flow, opacity, hardness, spacing, angle, smoothing, alpha=ID|round, color=R,V,B, roughness, metallic, height, mask, off=CANAL (M8)"],
-    ["<code>--stroke [eraser:]X,Y;X,Y;…</code>", "peint un trait passant par ces pixels de la vue 3D, comme à la souris (M8)"],
+    ["<code>--stroke [eraser:][uv:][line:]X,Y[,P];…</code>", "peint un trait passant par ces pixels de la vue 3D, comme à la souris (M8), à la pression P ; <code>uv:</code> dans la vue 2D, <code>line:</code> comme Maj + clic (M9)"],
+    ["<code>--brush CLÉ=VALEUR</code> (M9)", "size-jitter, angle-jitter=DEG, flow-jitter, scatter, follow-path=on|off, tilt-angle=on|off, pressure-size|pressure-flow|pressure-opacity=linear|off, material=ID|values, mask-pattern=ID|value"],
+    ["<code>--preset NOM</code>, <code>--symmetry x,y,z,radial=N</code>, <code>--expand-brush</code>", "preset de brosse (standard, airbrush, hard-felt, chalk, splatter, scratches ou un preset enregistré), symétrie, sections Dynamique et Symétrie ouvertes (M9)"],
+    ["<code>--edit height-force=V</code>", "force du relief du texture set courant (M9)"],
     ["<code>--edit material=ID|mask-procedural=ID|param=NOM:VALEUR|projection=TYPE,ÉCHELLE</code>", "ajoute un matériau procédural au-dessus de la sélection, ou un bruit ou motif au masque sélectionné ; règle un paramètre ou la projection de la sélection (M7)"],
     ["<code>--edit mask=black|white|mask-fill=V,MODE,OPACITÉ|mask-levels=A,B,G,C,D|mask-invert=</code>", "donne un masque au calque sélectionné, puis lui ajoute un fill, un levels ou une inversion au-dessus de l'effet sélectionné (M6)"],
     ["<code>--edit fill=R,V,B,ROUGHNESS|mode=MODE,OPACITÉ|group=</code>", "ajoute un fill au-dessus de la sélection et le sélectionne ; règle le mélange de la couleur de base du calque sélectionné ; le groupe dans un dossier (M5)"],
     ["<code>--autosave-interval SECS</code>", "délai entre deux autosaves (300 par défaut)"],
     ["variable <code>PATINE_AUTOSAVE_DIR</code>", "dossier des autosaves (par défaut %APPDATA%\\Patine\\autosave)"],
+    ["variable <code>PATINE_PRESETS_DIR</code>", "dossier des presets de brosse de l'utilisateur (par défaut %APPDATA%\\Patine\\presets)"],
 ]
 
 
@@ -186,9 +199,9 @@ def body():
         '<div class="kicker">Tutoriel et cahier de tests manuels</div>'
         "<h1>Patine</h1>"
         '<p class="subtitle">Texturing PBR par calques sur mesh 3D<br>'
-        "Fonctionnalités des jalons M0 à M8</p>"
+        "Fonctionnalités des jalons M0 à M9</p>"
         + figure("helmet_texture_sets", FULL, "full", "Le casque d'aviateur importé, panneau Texture sets au premier plan.", "92%")
-        + '<p class="meta">Version 0.1.0 — 11 octobre 2026 — captures réalisées sur RTX 3080 Ti (Vulkan), '
+        + '<p class="meta">Version 0.1.0 — 14 octobre 2026 — captures réalisées sur RTX 3080 Ti (Vulkan), '
         "interface en français, fenêtre 1600 × 900.</p></section>")
 
     # Contents.
@@ -203,6 +216,8 @@ def body():
         "<li>M6 — Masques : masque noir ou blanc, fill, levels, inversion, affichage du masque</li>"
         "<li>M7 — Bibliothèque procédurale : matériaux, bruits et motifs, projections</li>"
         "<li>M8 — Peinture : brosse, gomme, alphas, masques peints, undo par tuiles</li>"
+        "<li>M9 — Peinture v2 : tablette, dynamique, presets, symétrie, ligne droite, pipette, vue 2D, "
+        "relief</li>"
         "<li>Checklist complète des tests manuels</li>"
         "<li>Annexe : options de lancement et régénération de ce document</li>"
         "</ol>"
@@ -956,8 +971,115 @@ def body():
         + "<p>Budget : un dab en moins de 8 ms (16 ms sur la RTX A2000, <b>à mesurer</b>).</p>"
         + "</section>")
 
-    # 11. Checklist.
-    add("<section><h2>11. Checklist complète des tests manuels</h2>"
+    # 11. M9.
+    add("<section><h2>11. M9 — Peinture v2</h2>"
+        "<p>Le M9 donne à la brosse le confort d'un outil professionnel : la <b>tablette graphique</b> "
+        "(pression et inclinaison), la <b>dynamique</b> des dabs, des <b>presets</b>, la <b>symétrie</b>, la "
+        "ligne droite, la pipette, la peinture dans la <b>vue 2D</b>, un matériau procédural au pinceau, et le "
+        "canal hauteur converti en relief en direct. Tout reste enregistré dans les traits : le rejeu donne le "
+        "même résultat, jitters compris.</p>"
+        "<h3>11.1 Tablette : pression, inclinaison et courbes</h3>"
+        "<p>La tablette passe par Windows Ink : rien à configurer. Quand le stylet approche, c'est lui qui "
+        "peint, avec sa pression et son inclinaison ; la souris reste disponible, à pleine pression. Section "
+        "<b>Dynamique</b> de la brosse : trois <b>courbes de pression</b> (taille, flux, opacité). On glisse "
+        "les points ; double-clic pour en ajouter, clic droit pour en retirer ; « Linéaire » et « Désactivée » "
+        "réinitialisent la courbe. La case « L'inclinaison du stylet oriente les dabs » tourne la forme de "
+        "l'alpha selon le stylet.</p>"
+        + '<div class="grid c2">'
+        + figure("m9_pressure", SUITCASE_CROP, "view", "Pression simulée de 0,05 à 1 puis 0,05 (taille et opacité suivent).")
+        + figure("m9_panel", BRUSH_SECTIONS, "panel", "Dynamique, courbe de pression et symétrie.")
+        + "</div>"
+        + test(["Brancher une tablette Wacom ; peindre en appuyant de plus en plus fort, puis en relâchant.",
+                "Courbe d'opacité « Linéaire », puis courbe de taille « Désactivée » ; repeindre.",
+                "Alpha Biseau, case inclinaison cochée : incliner le stylet dans plusieurs directions.",
+                "Approcher le stylet, puis peindre à la souris : la souris peint aussi."],
+               "Le trait s'élargit avec la pression, puis suit les courbes ; l'alpha tourne avec l'inclinaison ; "
+               "un trait n'est jamais peint deux fois (pas de double trait souris + stylet).")
+        + "</section>")
+
+    add("<section>"
+        "<h3>11.2 Dynamique et presets</h3>"
+        "<p>Variations de taille, d'angle et de flux, dispersion (décalage perpendiculaire au trait) et "
+        "suivi de trajectoire (les dabs tournent avec le trait). Chaque trait tire sa propre graine : deux "
+        "traits diffèrent, mais un trait rejoué est identique. Le menu <b>Preset</b> propose six brosses "
+        "livrées ; « Enregistrer » garde la brosse actuelle, matériau compris, sous un nom (dans "
+        "%APPDATA%\\Patine\\presets) ; « Supprimer » retire un preset enregistré.</p>"
+        + '<div class="grid c2">'
+        + figure("m9_chalk", SUITCASE_CROP, "view", "Craie : alpha grain, variations de taille, d'angle et de flux.")
+        + figure("m9_splatter", SUITCASE_CROP, "view", "Éclaboussures : dispersion et variations.")
+        + figure("m9_scratches", SUITCASE_CROP, "view", "Rayures : biseau qui suit la trajectoire.")
+        + figure("m9_airbrush", SUITCASE_CROP, "view", "Aérographe : flux faible, la pression règle le flux.")
+        + "</div>"
+        + test(["Essayer chaque preset ; régler la variation d'angle et la dispersion ; Ctrl+Z puis Ctrl+Y.",
+                "Enregistrer un preset, relancer l'application, le retrouver dans la liste ; le supprimer."],
+               "Chaque preset donne son trait ; Ctrl+Y redonne exactement le même trait ; le preset enregistré "
+               "survit au redémarrage, puis disparaît une fois supprimé.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>11.3 Symétrie</h3>"
+        "<p>Section <b>Symétrie</b> : miroirs X, Y, Z autour de l'origine de l'objet, et copies radiales autour "
+        "de l'axe Y (16 copies au plus ; au-delà, un avertissement s'affiche). <b>L</b> active ou coupe le "
+        "miroir X. Chaque copie peint comme si le trait avait été fait de l'autre côté, avec sa propre "
+        "occlusion : les copies apparaissent en direct, même hors de la vue.</p>"
+        + '<div class="grid c2">'
+        + figure("m9_symmetry_helmet", HELMET_HEAD, "view", "Miroir X : deux traits sur le côté gauche du casque.")
+        + figure("m9_symmetry_lantern", LANTERN_CROP, "view", "Radial 6 : un trait vertical sur le pied de la lanterne.")
+        + "</div>"
+        + test(["L, puis peindre sur un côté du casque ; tourner autour.",
+                "Radial 6 sur la lanterne ; X et radial 8 ensemble (16 copies)."],
+               "Les copies apparaissent au bon endroit, en même temps que le trait ; Ctrl+Z les retire toutes.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>11.4 Ligne droite et pipette</h3>"
+        "<p><b>Maj + clic</b> trace une ligne droite depuis la fin du trait précédent, si la caméra n'a pas "
+        "bougé ; sinon le clic commence un trait ordinaire. La <b>pipette</b> (I) lit, sous le curseur, la "
+        "valeur de chaque canal du texture set (le gris pour un masque) et la donne à la brosse, puis rend "
+        "la main à l'outil précédent.</p>"
+        + figure("m9_line", SUITCASE_CROP, "view", "Un trait, puis Maj + clic en bas à droite.", "60%")
+        + test(["Peindre un trait, puis Maj + clic ailleurs ; tourner la caméra et refaire Maj + clic.",
+                "Remplir avec un matériau, I, cliquer sur une zone, puis peindre ailleurs."],
+               "La ligne part de la fin du trait ; après un mouvement de caméra, un trait simple ; la brosse "
+               "prend la couleur et la roughness de la zone, et l'outil précédent revient.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>11.5 Peindre dans la vue 2D</h3>"
+        "<p>Le clic gauche glissé peint aussi dans la <b>vue 2D</b>, directement sur les UV, avec un curseur "
+        "rond ; la molette et le clic milieu gardent le zoom et le panoramique. La symétrie ne s'y applique "
+        "pas (elle est définie dans l'espace de l'objet).</p>"
+        + figure("m9_uv", VIEWPORT, "view", "Un trait peint dans la vue 2D de la valise.")
+        + test(["Vue 2D : peindre sur un îlot, puis revenir à la vue 3D ; peindre au stylet dans la vue 2D."],
+               "Le trait suit le curseur dans la vue 2D, et apparaît au même endroit sur le mesh.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>11.6 Matériau procédural et relief</h3>"
+        "<p>Section <b>Matériau</b> : « Procédural » remplace les valeurs par un matériau de la bibliothèque "
+        "(un bruit ou un motif pour un masque), avec ses paramètres et sa projection. Peindre le canal "
+        "<b>Hauteur</b> creuse ou bombe la surface en direct : la vue 3D combine la normale et le relief de la "
+        "hauteur. Le réglage <b>Force du relief</b> (panneau Texture sets) l'accentue.</p>"
+        + '<div class="grid c2">'
+        + figure("m9_material", SUITCASE_CROP, "view", "Cuivre procédural peint au pinceau.")
+        + figure("m9_height", SUITCASE_CROP, "view", "Hauteur peinte, force du relief 3.")
+        + "</div>"
+        + figure("m9_height", TEXTURE_SETS, "panel", "Le réglage Force du relief.", "60%")
+        + test(["Matériau procédural Cuivre, puis Bois : peindre ; changer un paramètre avant le trait suivant.",
+                "Ne cocher que Hauteur (1) ; peindre ; régler la force du relief de 0 à 4."],
+               "Le matériau apparaît sous la brosse ; le relief apparaît en direct et suit la force.")
+        + "<h3>11.7 Mesure</h3>"
+        + code("cargo run --release -p patine_cli -- bench paint [--symmetry N] [--mirror] [--preset NOM]")
+        + "<p>La scène du M8 (20 calques, 4096², brosse de 80 px), avec des copies de symétrie. RTX 3080 Ti :</p>"
+        + table(["Copies", "Moyenne", "95e centile", "Pire dab"],
+                [["1", "2,4 ms", "3,6 ms", "4,0 ms"],
+                 ["8 (radial 8)", "6,9 ms", "8,5 ms", "9,2 ms"],
+                 ["16 (miroir X × radial 8)", "7,9 ms", "9,7 ms", "10,3 ms"]])
+        + "<p>Budget : un dab en moins de 8 ms (16 ms sur la RTX A2000, <b>à mesurer</b>).</p>"
+        + "</section>")
+
+    # 12. Checklist.
+    add("<section><h2>12. Checklist complète des tests manuels</h2>"
         "<h3>M0 — Fondations</h3>"
         + checklist(["<code>cargo run -p patine_app</code> ouvre une fenêtre sans erreur dans le terminal.",
                      "Les 9 panneaux sont présents ; on peut les détacher, les déplacer et les réancrer.",
@@ -1052,10 +1174,24 @@ def body():
                      "Ctrl+Z et Ctrl+Y sur plusieurs traits : immédiats et exacts ; enregistrer, rouvrir : identique.",
                      "Masque noir sur un fill, Ajouter de la peinture, peindre en blanc : le fill apparaît sous le trait.",
                      "<code>patine_cli bench paint</code> sur la RTX A2000 : moins de 16 ms par dab."])
+        + "<h3>M9 — Peinture v2</h3>"
+        + checklist(["Wacom sous Windows : la pression module la taille, puis le flux et l'opacité selon les "
+                     "courbes ; l'inclinaison oriente un alpha allongé ; aucun double trait.",
+                     "Presets : chacun donne son trait ; enregistrer, relancer, retrouver, supprimer.",
+                     "Jitters, dispersion, suivi de trajectoire : Ctrl+Z puis Ctrl+Y redonne le même trait.",
+                     "Symétrie X sur le casque (L) et radiale 6 sur la lanterne : copies en direct, au bon endroit.",
+                     "Maj + clic : ligne droite depuis la fin du trait précédent.",
+                     "Pipette (I) : la brosse prend les valeurs, puis l'outil précédent revient.",
+                     "Vue 2D : peindre à la souris et au stylet ; le trait apparaît dans la vue 3D.",
+                     "Matériau procédural peint (cuivre, bois).",
+                     "Hauteur peinte : relief en direct ; Force du relief le règle.",
+                     "Enregistrer, rouvrir : identique ; un projet du M8 s'ouvre avec ses traits.",
+                     "<code>patine_cli bench paint --symmetry 8 --mirror</code> sur la RTX A2000 : moins de 16 ms "
+                     "par dab."])
         + "</section>")
 
     # Appendix.
-    add("<section><h2>12. Annexe</h2>"
+    add("<section><h2>13. Annexe</h2>"
         "<h3>Options de lancement de patine_app</h3>"
         "<p>Ces options servent aux captures et aux tests ; <code>patine_app --help</code> les liste.</p>"
         + table(["Option", "Effet"], OPTIONS)
@@ -1066,7 +1202,7 @@ def body():
         + code("cargo build --release -p patine_app -p patine_cli\n"
                "python scripts/manual_tests/capture_tutorial.py\n"
                "python scripts/manual_tests/build_tutorial.py")
-        + "<p>Le premier script produit les 85 captures dans <code>manual_tests/captures/</code> (et le projet "
+        + "<p>Le premier script produit les 97 captures dans <code>manual_tests/captures/</code> (et le projet "
         "<code>manual_tests/casque.patine</code>) ; le second les "
         "recadre et imprime ce PDF avec Microsoft Edge (ou Chrome) sans interface.</p>"
         "<h3>Crédits</h3>"
@@ -1151,7 +1287,7 @@ def main():
     os.makedirs(IMAGES)
     document = (
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
-        f"<title>Patine — tutoriel M0 à M8</title><style>{STYLE}</style></head>"
+        f"<title>Patine — tutoriel M0 à M9</title><style>{STYLE}</style></head>"
         f"<body>{body()}</body></html>"
     )
     page = os.path.join(OUT, "index.html")

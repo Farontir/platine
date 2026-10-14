@@ -67,7 +67,7 @@ Tout est en Rust avec wgpu : une seule base de code pour Vulkan, DirectX 12, Met
 | Import FBX et OBJ | ufbx (bindings Rust) | Parser open source sous licence MIT, sans SDK Autodesk ; triangule les n-gones concaves et lit les .mtl (remplace tobj, décidé au M1) |
 | Tangentes | bevy\_mikktspace | Normal maps identiques à Blender, Unity et Unreal ; mikktspace en Rust sûr |
 | Images | image, exr | PNG, TGA, TIFF, JPEG, HDR et OpenEXR |
-| Tablette graphique | octotablet (à valider au M9) | Pression et inclinaison du stylet |
+| Tablette graphique | octotablet (validé au M9 : compile avec winit 0.30, backend Windows Ink) | Pression et inclinaison du stylet |
 | Parallélisme CPU | rayon | Baker CPU, encodage d'export |
 | BVH | Implémentation maison (SAH) | Même disposition mémoire côté CPU et GPU |
 | Sérialisation | serde, RON, postcard, zstd, zip | Manifeste lisible, données binaires compressées (bincode abandonné : la 3.0 est un tombstone) |
@@ -608,11 +608,11 @@ Critères d'acceptation : un trait qui traverse une couture UV ne laisse aucun t
 
 Objectif : le confort de peinture d'un outil professionnel.
 
-- [ ] Pression et inclinaison du stylet (octotablet), courbes de pression
-- [ ] Jitters, scatter, suivi de trajectoire, presets de brosses
-- [ ] Symétrie miroir et radiale
-- [ ] Ligne droite, pipette, peinture dans la vue 2D
-- [ ] Canal height peint et converti en normale en temps réel
+- [x] Pression et inclinaison du stylet (octotablet), courbes de pression
+- [x] Jitters, scatter, suivi de trajectoire, presets de brosses
+- [x] Symétrie miroir et radiale
+- [x] Ligne droite, pipette, peinture dans la vue 2D
+- [x] Canal height peint et converti en normale en temps réel
 
 Critères d'acceptation : une tablette Wacom fonctionne sous Windows (test manuel) ; la symétrie est exacte sur la sphère ; le rejeu avec jitter est déterministe.
 

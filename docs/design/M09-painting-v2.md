@@ -120,4 +120,97 @@ Le M8 a reporté au M9 la peinture d'un matériau procédural (PLAN, « Paramèt
 8. Matériau procédural (cuivre, bois) peint au pinceau.
 9. Peindre le canal height : le relief apparaît en direct dans la vue 3D ; « Force du relief » le règle.
 10. Enregistrer puis rouvrir : identique. Un projet M8 (format v1) s'ouvre, et ses traits sont identiques.
-11. `patine_cli bench paint --symmetry 8` sur la RTX A2000 : moins de 16 ms par dab.
+11. `patine_cli bench paint --symmetry 8` et `--symmetry 8 --mirror` sur la RTX A2000 : moins de 16 ms par dab.
+12. Vue 2D au stylet : la pression module le trait, et le stylet ne peint pas deux fois (souris émulée ignorée).
+
+## Mesures (14/10/2026, RTX 3080 Ti, build release)
+
+`cargo run --release -p patine_cli -- bench paint [--symmetry N] [--mirror] [--preset NAME] [--size PX]`. La scène est celle du M8 :
+- un calque de peinture au milieu de 20 calques, sur une sphère, en 4096² avec 5 canaux ;
+- le trait suit un cercle de 200 dabs, à raison d'un dab par image ;
+- chaque dab est chronométré jusqu'à la fin du travail du GPU ;
+- la ligne `cpu` du bench donne le temps de préparation côté CPU.
+
+| Brosse | Copies | Moyenne | 95e centile | Pire dab | CPU |
+| --- | --- | --- | --- | --- | --- |
+| 80 px | 1 | 2,4 ms | 3,6 ms | 4,0 ms | 1,0 ms |
+| 80 px | 2 (radial 2) | 3,6 ms | 5,0 ms | 5,7 ms | 1,5 ms |
+| 80 px | 8 (radial 8) | 6,9 ms | 8,5 ms | 9,2 ms | 2,5 ms |
+| 80 px | 16 (miroir X × radial 8) | 7,9 ms | 9,7 ms | 10,3 ms | 3,4 ms |
+| 80 px, Craie | 1 | 2,4 ms | 4,3 ms | 4,7 ms | 1,1 ms |
+| 80 px, Éclaboussures | 1 | 2,0 ms | 3,2 ms | 4,9 ms | 1,0 ms |
+| 80 px, Éclaboussures | 16 | 6,5 ms | 10,4 ms | 12,8 ms | 2,7 ms |
+| 200 px | 8 | 11,8 ms | 13,5 ms | 15,1 ms | 4,8 ms |
+
+**Budget de 8 ms par dab tenu en moyenne jusqu'à 16 copies** avec une brosse de 80 px. Le 95e centile le dépasse à partir de 8 copies, et une brosse de 200 px avec 8 copies le dépasse aussi. Le coût suit le nombre de tuiles touchées, multiplié par le nombre de copies : chaque copie peint sa propre région.
+
+**Optimisation mesurée avant et après** (commit `perf(paint)`) :
+
+| Cas (80 px) | Avant | Après |
+| --- | --- | --- |
+| 1 copie | 3,7 ms | 2,4 ms |
+| 8 copies | 9,8 ms | 6,9 ms |
+| 16 copies | 11,0 ms | 7,9 ms |
+
+- **Première hypothèse, fausse** : le shader des dabs serait coûteux, puisque chaque texel projette les 16 copies. L'éviction des copies hors du cadre des dabs n'a fait gagner que 2 %. Elle est gardée, car elle est exacte.
+- **Mesure** : le temps suivait le nombre de tuiles touchées. Un dab de 80 px sans symétrie en touchait 105, parce que les faces vues de dos, qui se projettent au même endroit, étaient comptées. Les exclure de façon exacte a ramené le dab à 2,4 ms.
+
+**Autres temps** :
+- début du trait : 2 ms sans symétrie, 9 ms avec 16 copies (une image de profondeur par copie) ;
+- rejeu complet du trait dans un nouveau document : 90 ms sans symétrie, 370 ms avec 16 copies.
+
+## Écarts constatés pendant l'implémentation
+
+- **Tuiles touchées** : les triangles dont aucun texel ne fait face à la caméra sont exclus.
+  - Le test est exact : la face d'un texel est une combinaison positive des termes nᵢ·t(pⱼ), entre les normales des sommets et les directions vers la caméra aux coins.
+  - Les deux tests de tuiles comptaient comme peint un texel tourné vers l'arrière, que le shader ne peint pas (angle 0, comme `reference::texel_view`). Ils comptent désormais seulement les texels tournés vers la caméra, comme le shader.
+  - La garantie ne change pas : tout texel qui reçoit de la peinture est dans une tuile touchée.
+  - Un proptest et une vérification sur une grille de points du cube couvrent l'exclusion.
+- **Shader des dabs** : une copie dont le pixel tombe hors du cadre des dabs du lot est ignorée avant son test de profondeur. Aucun dab n'y couvre rien (proptest), donc le résultat ne change pas.
+- **Presets livrés** :
+  - ils sont dans `patine_paint::presets`, pour que le bench puisse les utiliser ;
+  - l'application garde les presets de l'utilisateur, en RON dans `%APPDATA%\Patine\presets` (ou `PATINE_PRESETS_DIR`) ;
+  - un preset livré garde le matériau en cours, un preset de l'utilisateur l'enregistre.
+- **Tablette** :
+  - `emulate_tool_from_mouse(false)` : la souris passe par egui, pas par un outil émulé ;
+  - les événements du stylet vont aux deux vues, et chacune n'accepte un appui que dans son cadre ;
+  - un trait se termine sur l'appareil qui l'a commencé ;
+  - l'inclinaison est interpolée le long du trait, comme la pression ;
+  - backend obtenu au lancement : `WindowsInkRealTimeStylus`.
+- **Graine des traits** : SplitMix64 du nombre de traits commencés. Elle change à chaque trait, mais elle suit la même suite à chaque session, donc les captures sont reproductibles.
+- **Pipette** :
+  - elle lit la valeur finale (composée) des canaux du texture set du triangle visé, un seul texel par canal (`readback::read_texel`) ;
+  - pour un effet de peinture, elle lit le gris du masque du calque (`GpuDocument::mask_texture`) ;
+  - dans la vue 2D, elle lit sous l'UV pointé du texture set courant.
+- **Ligne droite** : elle part du dernier dab du trait précédent, seulement s'il a été peint avec la même caméra, ou le même cadrage de la vue 2D. Sinon, le clic commence un trait ordinaire.
+- **Ligne de commande** :
+  - `--stroke` prend une pression par point (`X,Y,P`) et les préfixes combinables `eraser:`, `uv:` (vue 2D) et `line:` (Maj + clic), au lieu de l'option `--stroke-uv` prévue ;
+  - le bench prend `--symmetry N` (copies radiales) et `--mirror` (miroir X).
+- **Éditeur de courbes** : double-clic pour ajouter un point, clic droit pour le retirer. Les extrémités restent en 0 et en 1. Les boutons « Linéaire » et « Désactivée » réinitialisent la courbe.
+- **Hors du M9**, comme prévu :
+  - l'extrémité gomme du stylet ne passe pas automatiquement à la gomme ;
+  - pas d'isolation des dossiers ;
+  - pas de déchargement CPU (M10).
+
+## État à la clôture (14/10/2026)
+
+- **Critère 1 (Wacom sous Windows)** : à vérifier à la main.
+  - octotablet compile avec winit 0.30, et le service se connecte au lancement (`WindowsInkRealTimeStylus`).
+  - La chaîne stylet → `PaintEvent` → dabs est testée par ses fonctions pures : suivi des trames, pression, inclinaison, coordonnées, choix entre stylet et souris, ligne droite.
+  - Aucun stylet n'a été utilisé pendant le développement : la checklist (points 1 et 12) reste à faire.
+- **Critère 2 (symétrie exacte sur la sphère)** : vérifié texel par texel.
+  - Radial 3 sur la sphère : exact.
+  - Miroir X sur le cylindre : exact (médiane < 1e-5, 99,5e centile < 1e-3).
+  - Miroir X sur la sphère : médiane < 0,01 et 99e centile < 0,05. L'écart vient des diagonales des quads de la sphère UV, qui ne sont pas symétriques en X.
+  - Un témoin sans symétrie échoue.
+  - Le test passe sur WARP et sur la RTX 3080 Ti.
+- **Critère 3 (rejeu déterministe avec jitter)** : vérifié à l'octet près.
+  - Un trait peint en direct par lots aléatoires donne le contenu de son rejeu, avec jitters, scatter, suivi de trajectoire, pression et symétrie.
+  - Deux rejeux sont identiques.
+- **Format v2** : migration des manifestes et des strokes v1. Les fixtures v1 et v2 sont relues.
+- **Références GPU = CPU** :
+  - copies de symétrie, mode UV, plafond d'opacité et valeurs texturées ;
+  - matériau procédural peint ;
+  - normale d'ombrage, y compris sa mise à jour régionale.
+- **Tests** : 326 passent sur WARP. Ceux de `patine_paint` et de `patine_compositor` passent aussi sur la RTX 3080 Ti.
+- **À vérifier à la main** : la checklist ci-dessus, la tablette en premier, et le bench sur la RTX A2000.
