@@ -35,9 +35,9 @@ impl SamplerSettings {
 #[derive(Clone, Debug)]
 pub struct StrokeSampler {
     settings: SamplerSettings,
-    /// Position of the brush, pressure and time of the last event; `None` before the
-    /// first event.
-    brush: Option<(Vec2, f32, f32)>,
+    /// Position of the brush, pressure, tilt and time of the last event; `None` before
+    /// the first event.
+    brush: Option<(Vec2, f32, Vec2, f32)>,
     /// Distance travelled since the last dab.
     travelled: f32,
 }
@@ -53,19 +53,32 @@ impl StrokeSampler {
     }
 
     /// Adds a pointer event at `position` (pixels), with `pressure` (1 for a mouse) at
-    /// `time` seconds since the start of the stroke. Returns the new dabs, in order: the
-    /// first event places a dab under the pointer.
+    /// `time` seconds since the start of the stroke, without tilt. Returns the new dabs,
+    /// in order: the first event places a dab under the pointer.
     pub fn push(&mut self, position: [f32; 2], pressure: f32, time: f32) -> Vec<Dab> {
+        self.push_pen(position, pressure, [0.0, 0.0], time)
+    }
+
+    /// Like [`StrokeSampler::push`], with the pen `tilt` (X and Y, radians),
+    /// interpolated along the path like the pressure.
+    pub fn push_pen(
+        &mut self,
+        position: [f32; 2],
+        pressure: f32,
+        tilt: [f32; 2],
+        time: f32,
+    ) -> Vec<Dab> {
         let pointer = Vec2::from(position);
-        let dab = |p: Vec2, pressure: f32, time: f32| Dab {
+        let tilt = Vec2::from(tilt);
+        let dab = |p: Vec2, pressure: f32, tilt: Vec2, time: f32| Dab {
             position: p.to_array(),
             pressure,
-            tilt: [0.0, 0.0],
+            tilt: tilt.to_array(),
             time,
         };
-        let Some((from, from_pressure, from_time)) = self.brush else {
-            self.brush = Some((pointer, pressure, time));
-            return vec![dab(pointer, pressure, time)];
+        let Some((from, from_pressure, from_tilt, from_time)) = self.brush else {
+            self.brush = Some((pointer, pressure, tilt, time));
+            return vec![dab(pointer, pressure, tilt, time)];
         };
         // The brush follows the pointer at the end of the string.
         let offset = pointer - from;
@@ -74,7 +87,7 @@ impl StrokeSampler {
             return Vec::new();
         }
         let to = from + offset * ((distance - self.settings.smoothing) / distance);
-        self.brush = Some((to, pressure, time));
+        self.brush = Some((to, pressure, tilt, time));
 
         let step = self.settings.step();
         let length = (to - from).length();
@@ -86,6 +99,7 @@ impl StrokeSampler {
             dabs.push(dab(
                 from.lerp(to, t),
                 from_pressure + (pressure - from_pressure) * t,
+                from_tilt.lerp(tilt, t),
                 from_time + (time - from_time) * t,
             ));
             along += step;
@@ -125,6 +139,20 @@ mod tests {
         assert!((dabs[1].pressure - 0.8).abs() < 1e-6);
         assert!((dabs[1].time - 0.4).abs() < 1e-6);
         assert!(positions(&dabs).iter().all(|p| p.y == 0.0));
+    }
+
+    #[test]
+    fn tilt_is_interpolated_like_the_pressure() {
+        let mut sampler = StrokeSampler::new(settings(40.0, 0.25, 0.0));
+        let first = sampler.push_pen([0.0, 0.0], 0.2, [0.4, -0.2], 0.0);
+        assert_eq!(first[0].tilt, [0.4, -0.2]);
+        let dabs = sampler.push_pen([20.0, 0.0], 1.0, [0.0, 0.2], 1.0);
+        // Dabs at 10 and 20 pixels: halfway, then the end.
+        assert_eq!(dabs.len(), 2);
+        assert!((dabs[0].tilt[0] - 0.2).abs() < 1e-6);
+        assert!(dabs[0].tilt[1].abs() < 1e-6);
+        assert!((dabs[0].pressure - 0.6).abs() < 1e-6);
+        assert!((dabs[1].tilt[1] - 0.2).abs() < 1e-6);
     }
 
     #[test]

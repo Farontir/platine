@@ -10,6 +10,7 @@ use patine_render::camera::OrbitCamera;
 use patine_render::settings::ViewSettings;
 
 use crate::display_panel::EnvironmentState;
+use crate::tablet::{PaintSource, PenEvent, paint_source};
 
 /// Radians of orbit per pixel dragged.
 const ORBIT_SPEED: f32 = 0.008;
@@ -20,14 +21,36 @@ const WHEEL_ZOOM_SPEED: f32 = 0.0015;
 /// Radians of environment rotation per pixel dragged.
 const ENVIRONMENT_SPEED: f32 = 0.006;
 
-/// A painting gesture, in viewport pixels.
+/// A point of a painting gesture.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PaintPoint {
+    /// Position in viewport pixels.
+    pub position: [f32; 2],
+    /// Pen pressure, 0 to 1.
+    pub pressure: f32,
+    /// Pen tilt, X and Y, radians.
+    pub tilt: [f32; 2],
+}
+
+impl PaintPoint {
+    /// A mouse point at `position`: full pressure, no tilt.
+    pub fn mouse(position: [f32; 2]) -> Self {
+        Self {
+            position,
+            pressure: 1.0,
+            tilt: [0.0, 0.0],
+        }
+    }
+}
+
+/// A painting gesture.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum PaintEvent {
-    /// The left button went down over the mesh: a stroke starts there.
-    Press([f32; 2]),
+    /// The left button or the pen went down over the mesh: a stroke starts there.
+    Press(PaintPoint),
     /// The pointer moved while painting.
-    Move([f32; 2]),
-    /// The left button was released: the stroke ends.
+    Move(PaintPoint),
+    /// The left button was released or the pen lifted: the stroke ends.
     Release,
 }
 
@@ -36,8 +59,8 @@ pub enum PaintEvent {
 /// Returns whether painting goes on, and the events.
 pub fn paint_events(
     painting: bool,
-    press: Option<[f32; 2]>,
-    moves: &[[f32; 2]],
+    press: Option<PaintPoint>,
+    moves: &[PaintPoint],
     released: bool,
 ) -> (bool, Vec<PaintEvent>) {
     let mut events = Vec::new();
@@ -54,6 +77,50 @@ pub fn paint_events(
         }
     }
     (painting, events)
+}
+
+/// The painting gestures of the pen events of a frame, in order (see [`paint_events`]):
+/// a pen down starts painting where `accept` allows it. `to_pixels` converts physical
+/// window pixels to viewport pixels.
+pub fn pen_paint_events(
+    painting: bool,
+    pen: &[PenEvent],
+    accept: impl Fn([f32; 2]) -> bool,
+    to_pixels: impl Fn([f32; 2]) -> [f32; 2],
+) -> (bool, Vec<PaintEvent>) {
+    let mut painting = painting;
+    let mut events = Vec::new();
+    let point = |sample: &crate::tablet::PenSample| PaintPoint {
+        position: to_pixels(sample.position),
+        pressure: sample.pressure,
+        tilt: sample.tilt,
+    };
+    for event in pen {
+        let (now, mut new) = match event {
+            PenEvent::Down(sample) => {
+                let press = accept(sample.position).then(|| point(sample));
+                paint_events(painting, press, &[], false)
+            }
+            PenEvent::Move(sample) => paint_events(painting, None, &[point(sample)], false),
+            PenEvent::Up => paint_events(painting, None, &[], true),
+        };
+        painting = now;
+        events.append(&mut new);
+    }
+    (painting, events)
+}
+
+/// Physical window pixels to the pixels of a viewport whose top left corner is at
+/// `origin` (egui points).
+pub fn window_to_viewport(
+    position: [f32; 2],
+    origin: egui::Pos2,
+    pixels_per_point: f32,
+) -> [f32; 2] {
+    [
+        position[0] - origin.x * pixels_per_point,
+        position[1] - origin.y * pixels_per_point,
+    ]
 }
 
 /// Seconds a notice stays over the viewport.
@@ -82,8 +149,14 @@ pub struct ViewState {
     pub previous_size: [u32; 2],
     /// Channel shown by the channel display mode.
     pub inspect_channel: Channel,
-    /// Whether the left button paints (pressed over the viewport without Alt).
+    /// Whether the left button or the pen paints (pressed over the viewport without Alt).
     pub painting: bool,
+    /// Device of the stroke in progress.
+    pub paint_source: Option<PaintSource>,
+    /// Whether a pen is in proximity of the window.
+    pub pen_near: bool,
+    /// Pen gestures of this frame, in physical window pixels.
+    pub pen_events: Vec<PenEvent>,
     /// Painting gestures not handled yet by the application.
     pub paint_events: Vec<PaintEvent>,
     /// Point of the mesh under the cursor, from the last finished pick.
@@ -108,6 +181,9 @@ impl Default for ViewState {
             previous_size: [0, 0],
             inspect_channel: Channel::BaseColor,
             painting: false,
+            paint_source: None,
+            pen_near: false,
+            pen_events: Vec::new(),
             paint_events: Vec::new(),
             hovered_point: None,
             cursor: None,
@@ -237,10 +313,11 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, overlay: Option<&str>) -> Viewpor
     }
     output.seal = response.drag_stopped();
 
-    // Painting: the left button without Alt.
+    // Painting: the left button without Alt, or the pen while it is near (the mouse
+    // events it emulates are then ignored).
     let to_pixels = |pos: egui::Pos2| {
         let local = (pos - rect.min) * pixels_per_point;
-        [local.x, local.y]
+        PaintPoint::mouse([local.x, local.y])
     };
     let (pressed, released, moves, origin) = ui.input(|input| {
         let moves: Vec<egui::Pos2> = input
@@ -262,9 +339,23 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, overlay: Option<&str>) -> Viewpor
         .then_some(origin)
         .flatten()
         .map(to_pixels);
-    let moves: Vec<[f32; 2]> = moves.into_iter().map(to_pixels).collect();
-    let (painting, events) = paint_events(view.painting, press, &moves, released);
+    let moves: Vec<PaintPoint> = moves.into_iter().map(to_pixels).collect();
+    let pen = std::mem::take(&mut view.pen_events);
+    let source = paint_source(view.paint_source, view.pen_near);
+    let (painting, events) = match source {
+        PaintSource::Mouse => paint_events(view.painting, press, &moves, released),
+        PaintSource::Pen => pen_paint_events(
+            view.painting,
+            &pen,
+            |position| {
+                let point = egui::pos2(position[0], position[1]) / pixels_per_point;
+                rect.contains(point) && response.hovered() && !modifiers.alt
+            },
+            |position| window_to_viewport(position, rect.min, pixels_per_point),
+        ),
+    };
     view.painting = painting;
+    view.paint_source = painting.then_some(source);
     view.paint_events.extend(events);
 
     // Computed by the application while the viewport is hovered (or a hover is forced).
@@ -358,22 +449,73 @@ mod tests {
     fn presses_start_strokes_and_releases_end_them() {
         // Not painting, no press: moves are ignored.
         assert_eq!(
-            paint_events(false, None, &[[1.0, 1.0]], false),
+            paint_events(false, None, &[PaintPoint::mouse([1.0, 1.0])], false),
             (false, vec![])
         );
-        let (painting, events) = paint_events(false, Some([5.0, 6.0]), &[[7.0, 8.0]], false);
+        let p = PaintPoint::mouse;
+        let (painting, events) = paint_events(false, Some(p([5.0, 6.0])), &[p([7.0, 8.0])], false);
         assert!(painting);
         assert_eq!(
             events,
-            [PaintEvent::Press([5.0, 6.0]), PaintEvent::Move([7.0, 8.0])]
+            [
+                PaintEvent::Press(p([5.0, 6.0])),
+                PaintEvent::Move(p([7.0, 8.0]))
+            ]
         );
-        let (painting, events) = paint_events(true, None, &[[9.0, 9.0]], true);
+        let (painting, events) = paint_events(true, None, &[p([9.0, 9.0])], true);
         assert!(!painting);
-        assert_eq!(events, [PaintEvent::Move([9.0, 9.0]), PaintEvent::Release]);
+        assert_eq!(
+            events,
+            [PaintEvent::Move(p([9.0, 9.0])), PaintEvent::Release]
+        );
         // A click: press and release in the same frame.
-        let (painting, events) = paint_events(false, Some([1.0, 2.0]), &[], true);
+        let (painting, events) = paint_events(false, Some(p([1.0, 2.0])), &[], true);
         assert!(!painting);
-        assert_eq!(events, [PaintEvent::Press([1.0, 2.0]), PaintEvent::Release]);
+        assert_eq!(
+            events,
+            [PaintEvent::Press(p([1.0, 2.0])), PaintEvent::Release]
+        );
+    }
+
+    #[test]
+    fn pen_gestures_carry_pressure_and_tilt_in_viewport_pixels() {
+        use crate::tablet::PenSample;
+        let sample = |x: f32, pressure: f32| PenSample {
+            position: [x, 50.0],
+            pressure,
+            tilt: [0.3, 0.1],
+        };
+        let point = |x: f32, pressure: f32| PaintPoint {
+            position: [x - 20.0, 30.0],
+            pressure,
+            tilt: [0.3, 0.1],
+        };
+        // The viewport starts at (10, 10) points, 2 pixels per point.
+        let to_pixels = |p| window_to_viewport(p, egui::pos2(10.0, 10.0), 2.0);
+        assert_eq!(to_pixels([25.0, 50.0]), [5.0, 30.0]);
+        let pen = [
+            PenEvent::Down(sample(30.0, 0.2)),
+            PenEvent::Move(sample(40.0, 0.6)),
+            PenEvent::Up,
+            // Refused down (outside the viewport): its moves do not paint.
+            PenEvent::Down(sample(-5.0, 1.0)),
+            PenEvent::Move(sample(50.0, 1.0)),
+            PenEvent::Up,
+        ];
+        let (painting, events) = pen_paint_events(false, &pen, |p| p[0] >= 20.0, to_pixels);
+        assert!(!painting);
+        assert_eq!(
+            events,
+            [
+                PaintEvent::Press(point(30.0, 0.2)),
+                PaintEvent::Move(point(40.0, 0.6)),
+                PaintEvent::Release,
+            ]
+        );
+        // A stroke goes on across frames.
+        let (painting, events) = pen_paint_events(false, &pen[..2], |_| true, to_pixels);
+        assert!(painting);
+        assert_eq!(events.len(), 2);
     }
 
     #[test]

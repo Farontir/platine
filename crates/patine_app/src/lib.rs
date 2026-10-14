@@ -21,6 +21,7 @@ pub mod procedural_ui;
 pub mod profiling;
 pub mod project_io;
 pub mod properties_panel;
+pub mod tablet;
 pub mod texture_sets_panel;
 pub mod ui;
 pub mod view_2d;

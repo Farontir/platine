@@ -34,6 +34,7 @@ egui-winit.workspace = true
 egui-wgpu.workspace = true
 egui_dock.workspace = true
 egui-phosphor.workspace = true
+octotablet.workspace = true
 winit.workspace = true
 pollster.workspace = true
 rfd.workspace = true

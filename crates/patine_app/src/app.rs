@@ -40,8 +40,9 @@ use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, NewProjectDialog};
 use crate::profiling::Profiler;
 use crate::project_io::{self, FileJobs, JobResult};
+use crate::tablet::Tablet;
 use crate::ui::{self, FrameInfo, UiState, UnsavedChoice};
-use crate::viewport_panel::PaintEvent;
+use crate::viewport_panel::{PaintEvent, PaintPoint};
 
 /// Everything that only exists while the window is open.
 struct Graphics {
@@ -52,6 +53,8 @@ struct Graphics {
     gpu_name: String,
     gpu_backend: String,
     egui_state: egui_winit::State,
+    /// Pen tablets: pressure and tilt.
+    tablet: Tablet,
     renderer: egui_wgpu::Renderer,
     viewport: Viewport,
     /// GPU copy of the project mesh.
@@ -972,7 +975,10 @@ impl App {
             .as_ref()
             .and_then(|document| upload_mesh(&gpu, &viewport, &document.project.mesh));
 
+        let tablet = Tablet::new(&window);
+
         Ok(Graphics {
+            tablet,
             window,
             surface,
             config,
@@ -1768,12 +1774,11 @@ impl App {
             } else if self.startup.eraser != Some(true) {
                 self.ui.tool.tool = crate::paint_tool::Tool::Brush;
             }
-            let mut points = stroke.points.iter();
+            let mut points = stroke.points.iter().map(|p| PaintPoint::mouse(*p));
             if let Some(first) = points.next() {
-                view.paint_events.push(PaintEvent::Press(*first));
+                view.paint_events.push(PaintEvent::Press(first));
             }
-            view.paint_events
-                .extend(points.map(|p| PaintEvent::Move(*p)));
+            view.paint_events.extend(points.map(PaintEvent::Move));
             view.paint_events.push(PaintEvent::Release);
             gfx.window.request_redraw();
         }
@@ -1783,7 +1788,7 @@ impl App {
             let project = &document.project;
             for event in std::mem::take(&mut view.paint_events) {
                 match event {
-                    PaintEvent::Press(position) => {
+                    PaintEvent::Press(point) => {
                         let Some(set) = project.texture_set(self.ui.texture_sets.selected) else {
                             continue;
                         };
@@ -1828,7 +1833,12 @@ impl App {
                                 let mut sampler = patine_paint::sampler::StrokeSampler::new(
                                     self.ui.tool.sampler(),
                                 );
-                                let dabs = sampler.push(position, 1.0, 0.0);
+                                let dabs = sampler.push_pen(
+                                    point.position,
+                                    point.pressure,
+                                    point.tilt,
+                                    0.0,
+                                );
                                 gfx.gpu_document.paint(
                                     &gfx.gpu,
                                     &mut gfx.pool,
@@ -1864,10 +1874,15 @@ impl App {
                             }
                         }
                     }
-                    PaintEvent::Move(position) => {
+                    PaintEvent::Move(point) => {
                         if let Some(stroke) = &mut self.stroke {
                             let time = stroke.start.elapsed().as_secs_f32();
-                            let dabs = stroke.sampler.push(position, 1.0, time);
+                            let dabs = stroke.sampler.push_pen(
+                                point.position,
+                                point.pressure,
+                                point.tilt,
+                                time,
+                            );
                             if !dabs.is_empty() {
                                 gfx.gpu_document.paint(
                                     &gfx.gpu,
@@ -2019,6 +2034,8 @@ impl App {
         }
 
         let raw_input = gfx.egui_state.take_egui_input(&gfx.window);
+        self.ui.view.pen_events = gfx.tablet.pump(gfx.window.scale_factor() as f32);
+        self.ui.view.pen_near = gfx.tablet.near();
         let mut triggered = Vec::new();
         let mut outputs = Vec::new();
         let info = FrameInfo {
