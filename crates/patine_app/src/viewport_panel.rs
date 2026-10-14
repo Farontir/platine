@@ -50,8 +50,43 @@ pub enum PaintEvent {
     Press(PaintPoint),
     /// The pointer moved while painting.
     Move(PaintPoint),
+    /// A press with Shift: a straight line from the end of the previous stroke to here,
+    /// then the stroke goes on.
+    LineTo(PaintPoint),
     /// The left button was released or the pen lifted: the stroke ends.
     Release,
+}
+
+/// The gestures of a frame with the press turned into a straight line when Shift is
+/// held.
+pub fn with_line(events: Vec<PaintEvent>, shift: bool) -> Vec<PaintEvent> {
+    if !shift {
+        return events;
+    }
+    events
+        .into_iter()
+        .map(|event| match event {
+            PaintEvent::Press(point) => PaintEvent::LineTo(point),
+            other => other,
+        })
+        .collect()
+}
+
+/// The gestures with each straight line expanded: a press at `from` (the end of the
+/// previous stroke, when it was painted with the current camera) then a move to the
+/// point; without `from`, a plain press.
+pub fn expand_lines(events: Vec<PaintEvent>, from: Option<[f32; 2]>) -> Vec<PaintEvent> {
+    events
+        .into_iter()
+        .flat_map(|event| match (event, from) {
+            (PaintEvent::LineTo(point), Some(position)) => vec![
+                PaintEvent::Press(PaintPoint { position, ..point }),
+                PaintEvent::Move(point),
+            ],
+            (PaintEvent::LineTo(point), None) => vec![PaintEvent::Press(point)],
+            (other, _) => vec![other],
+        })
+        .collect()
 }
 
 /// The painting gestures of a frame: a press starts painting (when `press` is allowed,
@@ -161,6 +196,8 @@ pub struct ViewState {
     pub paint_events: Vec<PaintEvent>,
     /// Point of the mesh under the cursor, from the last finished pick.
     pub hovered_point: Option<crate::paint_tool::SurfacePoint>,
+    /// Material and UV of the point under the cursor.
+    pub hovered_uv: Option<(u32, [f32; 2])>,
     /// Brush cursor in viewport pixels, and whether the selection can be painted.
     pub cursor: Option<(Vec<glam::Vec2>, bool)>,
     /// Message shown over the viewport, and when it was set (egui time, seconds).
@@ -186,6 +223,7 @@ impl Default for ViewState {
             pen_events: Vec::new(),
             paint_events: Vec::new(),
             hovered_point: None,
+            hovered_uv: None,
             cursor: None,
             notice: None,
         }
@@ -356,7 +394,7 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, overlay: Option<&str>) -> Viewpor
     };
     view.painting = painting;
     view.paint_source = painting.then_some(source);
-    view.paint_events.extend(events);
+    view.paint_events.extend(with_line(events, modifiers.shift));
 
     // Computed by the application while the viewport is hovered (or a hover is forced).
     if let Some((outline, paintable)) = &view.cursor {
@@ -474,6 +512,53 @@ mod tests {
         assert_eq!(
             events,
             [PaintEvent::Press(p([1.0, 2.0])), PaintEvent::Release]
+        );
+    }
+
+    #[test]
+    fn shift_presses_draw_lines_from_the_last_stroke() {
+        let p = PaintPoint::mouse;
+        let events = vec![
+            PaintEvent::Press(p([5.0, 6.0])),
+            PaintEvent::Move(p([7.0, 8.0])),
+        ];
+        assert_eq!(with_line(events.clone(), false), events);
+        let lined = with_line(events, true);
+        assert_eq!(
+            lined,
+            [
+                PaintEvent::LineTo(p([5.0, 6.0])),
+                PaintEvent::Move(p([7.0, 8.0]))
+            ]
+        );
+        assert_eq!(
+            expand_lines(lined.clone(), Some([1.0, 1.0])),
+            [
+                PaintEvent::Press(p([1.0, 1.0])),
+                PaintEvent::Move(p([5.0, 6.0])),
+                PaintEvent::Move(p([7.0, 8.0])),
+            ]
+        );
+        // No previous stroke in this view: a plain stroke.
+        assert_eq!(
+            expand_lines(lined, None),
+            [
+                PaintEvent::Press(p([5.0, 6.0])),
+                PaintEvent::Move(p([7.0, 8.0]))
+            ]
+        );
+        // The pen's pressure applies to the whole line.
+        let pen = PaintPoint {
+            position: [3.0, 3.0],
+            pressure: 0.4,
+            tilt: [0.1, 0.0],
+        };
+        assert_eq!(
+            expand_lines(vec![PaintEvent::LineTo(pen)], Some([0.0, 0.0]))[0],
+            PaintEvent::Press(PaintPoint {
+                position: [0.0, 0.0],
+                ..pen
+            })
         );
     }
 

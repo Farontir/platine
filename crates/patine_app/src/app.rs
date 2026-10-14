@@ -42,7 +42,53 @@ use crate::profiling::Profiler;
 use crate::project_io::{self, FileJobs, JobResult};
 use crate::tablet::Tablet;
 use crate::ui::{self, FrameInfo, UiState, UnsavedChoice};
-use crate::viewport_panel::{PaintEvent, PaintPoint};
+use crate::viewport_panel::{PaintEvent, PaintPoint, expand_lines};
+
+/// Radius of the picker's cursor, in pixels.
+const PICKER_RADIUS: f32 = 4.0;
+
+/// The values of `target`'s channels (or its mask's gray under
+/// [`patine_core::mask::MASK_VALUE_CHANNEL`]) at `uv` of texture set `set`, read back
+/// from the final textures. Empty when nothing is evaluated there yet.
+fn picked_values(
+    gpu: &GpuContext,
+    pool: &TexturePool,
+    document: &GpuDocument,
+    set: &patine_core::project::TextureSet,
+    target: patine_core::commands::PaintTarget,
+    uv: [f32; 2],
+) -> Vec<(patine_core::channel::Channel, [f32; 4])> {
+    let read = |id, size| {
+        let texture = pool.peek(id)?;
+        let texel = crate::paint_tool::texel_of(uv, size);
+        match patine_gpu::readback::read_texel(gpu, texture, texel) {
+            Ok(value) => Some(value),
+            Err(error) => {
+                tracing::warn!(%error, "picker readback failed");
+                None
+            }
+        }
+    };
+    match target {
+        patine_core::commands::PaintTarget::Layer(_) => document
+            .texture_set(set.id)
+            .map(|textures| {
+                textures
+                    .channels
+                    .iter()
+                    .filter_map(|channel| {
+                        Some((channel.def.channel, read(channel.texture, channel.size)?))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default(),
+        patine_core::commands::PaintTarget::Mask(layer, _) => document
+            .mask_texture(layer)
+            .and_then(|id| read(id, set.resolution.pixels()))
+            .map(|value| vec![(patine_core::mask::MASK_VALUE_CHANNEL, value)])
+            .unwrap_or_default(),
+    }
+}
 
 /// Everything that only exists while the window is open.
 struct Graphics {
@@ -326,6 +372,8 @@ pub struct App {
     orphans: Vec<Orphan>,
     /// The stroke being painted.
     stroke: Option<StrokeInProgress>,
+    /// Camera and last dab of the previous stroke, where a straight line starts.
+    last_stroke_end: Option<(patine_core::stroke::StrokeCamera, [f32; 2])>,
 }
 
 /// Opens the main window and runs until it is closed.
@@ -363,6 +411,7 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
         document_generation: 0,
         orphans: Vec::new(),
         stroke: None,
+        last_stroke_end: None,
     };
     // Captures show the application as configured, without recovery prompts, unless an
     // autosave folder is given explicitly (to capture the recovery dialog).
@@ -909,6 +958,7 @@ impl App {
             shadows: view.settings.shadows,
             eraser: self.ui.tool.tool == crate::paint_tool::Tool::Eraser,
             mirror_x: self.ui.tool.symmetry.mirror[0],
+            picker: self.ui.tool.tool == crate::paint_tool::Tool::Picker,
         }
     }
 
@@ -1447,6 +1497,7 @@ impl App {
             ActionId::BrushSofter => self.ui.tool.add_hardness(-0.1),
             ActionId::BrushHarder => self.ui.tool.add_hardness(0.1),
             ActionId::SymmetryX => self.ui.tool.toggle_mirror_x(),
+            ActionId::ToolPicker => self.ui.tool.start_picker(),
             ActionId::Undo => {
                 if let Some(document) = &mut self.document {
                     document.undo();
@@ -1790,8 +1841,62 @@ impl App {
         let mut finished = None;
         if let Some(document) = &self.document {
             let project = &document.project;
-            for event in std::mem::take(&mut view.paint_events) {
+            let camera = patine_core::stroke::StrokeCamera {
+                view_proj: view
+                    .camera
+                    .view_projection(view.aspect())
+                    .to_cols_array_2d(),
+                viewport: view.size,
+            };
+            // A straight line starts where the previous stroke ended, in the same view.
+            let line_from = self
+                .last_stroke_end
+                .filter(|(end_camera, _)| *end_camera == camera)
+                .map(|(_, position)| position);
+            let events = expand_lines(std::mem::take(&mut view.paint_events), line_from);
+            for event in events {
                 match event {
+                    PaintEvent::Press(_)
+                        if self.ui.tool.tool == crate::paint_tool::Tool::Picker =>
+                    {
+                        let picked = view.hovered_uv.and_then(|(material, uv)| {
+                            let set = project
+                                .texture_sets
+                                .iter()
+                                .find(|set| set.material_index == material)?;
+                            let target = crate::paint_tool::paint_target(
+                                set,
+                                Some(self.ui.layers.part),
+                                self.ui.layers.selected,
+                            )
+                            .unwrap_or(
+                                patine_core::commands::PaintTarget::Layer(
+                                    patine_core::ids::LayerId(0),
+                                ),
+                            );
+                            let values = picked_values(
+                                &gfx.gpu,
+                                &gfx.pool,
+                                &gfx.gpu_document,
+                                set,
+                                target,
+                                uv,
+                            );
+                            (!values.is_empty()).then_some((set, target, values))
+                        });
+                        match picked {
+                            Some((set, target, values)) => {
+                                self.ui.tool.apply_picked(set, target, &values);
+                            }
+                            None => {
+                                view.notice = Some((
+                                    self.i18n.tr("picker-nothing").into_owned(),
+                                    self.egui_ctx.input(|input| input.time),
+                                ));
+                            }
+                        }
+                    }
+                    PaintEvent::LineTo(_) => {}
                     PaintEvent::Press(point) => {
                         let Some(set) = project.texture_set(self.ui.texture_sets.selected) else {
                             continue;
@@ -1811,13 +1916,7 @@ impl App {
                         let stroke = patine_core::stroke::Stroke {
                             brush,
                             tool,
-                            camera: patine_core::stroke::StrokeCamera {
-                                view_proj: view
-                                    .camera
-                                    .view_projection(view.aspect())
-                                    .to_cols_array_2d(),
-                                viewport: view.size,
-                            },
+                            camera,
                             space: patine_core::stroke::StrokeSpace::View,
                             symmetry: self.ui.tool.symmetry,
                             seed: self.ui.tool.next_seed(),
@@ -1903,6 +2002,10 @@ impl App {
                             && let Some(painted) =
                                 gfx.gpu_document.end_stroke(&mut gfx.pool, &gfx.compositor)
                         {
+                            self.last_stroke_end = painted
+                                .dabs
+                                .last()
+                                .map(|dab| (painted.camera, dab.position));
                             finished = Some(patine_core::commands::PaintStroke::new(
                                 stroke.target,
                                 painted,
@@ -1949,6 +2052,14 @@ impl App {
                 }
                 _ => None,
             };
+            view.hovered_uv = match (result.triangle, result.position, &self.document) {
+                (Some(triangle), Some(position), Some(document)) => crate::paint_tool::surface_uv(
+                    &document.project.mesh,
+                    triangle,
+                    glam::Vec3::new(position.x, position.y, position.z),
+                ),
+                _ => None,
+            };
         }
         // The brush cursor, at the size of the brush, gray when nothing can be painted.
         view.cursor = match (view.hovered_point, &self.document) {
@@ -1970,7 +2081,11 @@ impl App {
                     glam::Mat4::from_cols_array_2d(&view_proj.to_cols_array_2d()),
                     view.size,
                     point,
-                    self.ui.tool.size * 0.5,
+                    if self.ui.tool.tool == crate::paint_tool::Tool::Picker {
+                        PICKER_RADIUS
+                    } else {
+                        self.ui.tool.size * 0.5
+                    },
                     glam::Vec3::new(right.x, right.y, right.z),
                 );
                 Some((outline, paintable))
@@ -1999,6 +2114,7 @@ impl App {
             _ => {
                 view.hovered = None;
                 view.hovered_point = None;
+                view.hovered_uv = None;
                 gfx.last_pick = None;
             }
         }

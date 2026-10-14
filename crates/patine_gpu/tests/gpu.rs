@@ -37,6 +37,53 @@ gpu_test!(
 );
 
 gpu_test!(
+    /// One texel read alone equals the same texel of a full readback.
+    fn a_texel_reads_back_alone(ctx) {
+        let (width, height) = (37, 19);
+        let texels: Vec<[f32; 4]> = (0..width * height)
+            .map(|i| [i as f32 / 1024.0, 0.5, (i % 7) as f32 / 8.0, 1.0])
+            .collect();
+        let bytes: Vec<u8> = texels
+            .iter()
+            .flatten()
+            .flat_map(|v| half::f16::from_f32(*v).to_le_bytes())
+            .collect();
+        let texture = ctx.device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("texels"),
+            size: wgpu::Extent3d {
+                width,
+                height,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba16Float,
+            usage: wgpu::TextureUsages::COPY_DST | wgpu::TextureUsages::COPY_SRC,
+            view_formats: &[],
+        });
+        ctx.queue.write_texture(
+            texture.as_image_copy(),
+            &bytes,
+            wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(width * 8),
+                rows_per_image: Some(height),
+            },
+            texture.size(),
+        );
+        let all = readback::read_rgba16f(&ctx, &texture).unwrap();
+        for [x, y] in [[0, 0], [36, 0], [5, 7], [36, 18]] {
+            let texel = readback::read_texel(&ctx, &texture, [x, y]).unwrap();
+            assert_eq!(texel, all[(y * width + x) as usize], "{x},{y}");
+        }
+        // Outside: clamped to the edge.
+        let edge = readback::read_texel(&ctx, &texture, [100, 100]).unwrap();
+        assert_eq!(edge, all[all.len() - 1]);
+    }
+);
+
+gpu_test!(
     fn fill_matches_golden_image(ctx) {
         let texture = storage_texture(&ctx, 32, 32);
         fill::fill_rgba16f(&ctx, &texture, COLOR).unwrap();

@@ -560,6 +560,11 @@ impl GpuDocument {
         self.masks.get(&id).map(|mask| &mask.view)
     }
 
+    /// The texture of the evaluated mask of layer `id` (`R16Float`, in the pool).
+    pub fn mask_texture(&self, id: LayerId) -> Option<TextureId> {
+        self.masks.get(&id).map(|mask| mask.texture)
+    }
+
     /// Surface map of texture set `set` (an `R32Uint` texture in the pool), built when
     /// the set has procedural content.
     pub fn surface_map(&self, set: TextureSetId) -> Option<TextureId> {

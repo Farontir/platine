@@ -66,6 +66,8 @@ pub enum ActionId {
     BrushHarder,
     /// Switch the mirror symmetry across X on or off.
     SymmetryX,
+    /// Pick the values under the cursor into the brush.
+    ToolPicker,
 }
 
 /// Application state that actions read to decide whether they are enabled or checked.
@@ -99,6 +101,8 @@ pub struct ActionContext {
     pub eraser: bool,
     /// Whether strokes are mirrored across X.
     pub mirror_x: bool,
+    /// Whether the picker is the active tool.
+    pub picker: bool,
 }
 
 /// Declaration of an action.
@@ -327,7 +331,7 @@ impl Default for ActionRegistry {
                     label_key: "action-tool-brush",
                     shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::B)),
                     enabled: always,
-                    checked: Some(|ctx| !ctx.eraser),
+                    checked: Some(|ctx| !ctx.eraser && !ctx.picker),
                     yields_to_text: false,
                 },
                 Action {
@@ -337,6 +341,15 @@ impl Default for ActionRegistry {
                     shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::E)),
                     enabled: always,
                     checked: Some(|ctx| ctx.eraser),
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::ToolPicker,
+                    name: "tool.picker",
+                    label_key: "action-tool-picker",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::I)),
+                    enabled: always,
+                    checked: Some(|ctx| ctx.picker),
                     yields_to_text: false,
                 },
                 // Shifted first: egui matches a shortcut without Shift on a shifted
@@ -514,6 +527,7 @@ mod tests {
             ActionId::BrushSofter,
             ActionId::BrushHarder,
             ActionId::SymmetryX,
+            ActionId::ToolPicker,
         ] {
             assert_eq!(registry.get(id).id, id);
         }
@@ -622,6 +636,10 @@ mod tests {
         assert_eq!(
             press(Key::L, Modifiers::NONE, &context, false),
             [ActionId::SymmetryX]
+        );
+        assert_eq!(
+            press(Key::I, Modifiers::NONE, &context, false),
+            [ActionId::ToolPicker]
         );
         // Typing in a text field keeps the letters.
         assert!(press(Key::B, Modifiers::NONE, &context, true).is_empty());

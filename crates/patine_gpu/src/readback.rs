@@ -89,6 +89,78 @@ pub fn read_texture_level(
     Ok(texels)
 }
 
+/// Reads texel `[x, y]` of mip 0 of an `Rgba16Float` or `R16Float` texture as `f32`
+/// (a gray texel repeats its value). Copies only that texel; blocks until the GPU has
+/// finished all submitted work.
+pub fn read_texel(
+    ctx: &GpuContext,
+    texture: &wgpu::Texture,
+    texel: [u32; 2],
+) -> Result<[f32; 4], GpuError> {
+    let format = texture.format();
+    let texel_size = match format {
+        wgpu::TextureFormat::Rgba16Float => 8,
+        wgpu::TextureFormat::R16Float => 2,
+        _ => return Err(GpuError::UnsupportedReadbackFormat(format)),
+    };
+    let x = texel[0].min(texture.width().saturating_sub(1));
+    let y = texel[1].min(texture.height().saturating_sub(1));
+    let staging = ctx.device.create_buffer(&wgpu::BufferDescriptor {
+        label: Some("texel readback"),
+        size: u64::from(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+        usage: wgpu::BufferUsages::COPY_DST | wgpu::BufferUsages::MAP_READ,
+        mapped_at_creation: false,
+    });
+    let mut encoder = ctx
+        .device
+        .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("texel readback"),
+        });
+    encoder.copy_texture_to_buffer(
+        wgpu::TexelCopyTextureInfo {
+            texture,
+            mip_level: 0,
+            origin: wgpu::Origin3d { x, y, z: 0 },
+            aspect: wgpu::TextureAspect::All,
+        },
+        wgpu::TexelCopyBufferInfo {
+            buffer: &staging,
+            layout: wgpu::TexelCopyBufferLayout {
+                offset: 0,
+                bytes_per_row: Some(wgpu::COPY_BYTES_PER_ROW_ALIGNMENT),
+                rows_per_image: Some(1),
+            },
+        },
+        wgpu::Extent3d {
+            width: 1,
+            height: 1,
+            depth_or_array_layers: 1,
+        },
+    );
+    ctx.queue.submit([encoder.finish()]);
+    let (sender, receiver) = std::sync::mpsc::channel();
+    staging.map_async(wgpu::MapMode::Read, .., move |result| {
+        // The receiver outlives the poll below; a send failure cannot happen.
+        let _ = sender.send(result);
+    });
+    ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
+    receiver
+        .recv()
+        .map_err(|error| GpuError::BufferMap(error.to_string()))?
+        .map_err(|error| GpuError::BufferMap(error.to_string()))?;
+    let bytes = staging
+        .get_mapped_range(..)
+        .map_err(|error| GpuError::BufferMap(error.to_string()))?
+        .to_vec();
+    staging.unmap();
+    let channel = |i: usize| half::f16::from_le_bytes([bytes[2 * i], bytes[2 * i + 1]]).to_f32();
+    Ok(if texel_size == 8 {
+        [channel(0), channel(1), channel(2), channel(3)]
+    } else {
+        [channel(0); 4]
+    })
+}
+
 /// Reads the first `size` bytes of `buffer` (which needs `COPY_SRC` usage). Blocks until
 /// the GPU has finished all submitted work.
 pub fn read_buffer(

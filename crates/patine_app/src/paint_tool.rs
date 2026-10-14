@@ -40,6 +40,8 @@ pub enum Tool {
     Brush,
     /// Removes coverage from the checked channels.
     Eraser,
+    /// Reads the values under the cursor into the brush, then gives the hand back.
+    Picker,
 }
 
 /// Smallest and largest brush sizes, in viewport pixels.
@@ -107,6 +109,8 @@ pub struct ToolState {
     pub preset: Option<PresetChoice>,
     /// Strokes started, for their seeds.
     pub strokes_started: u64,
+    /// The tool the picker gives the hand back to.
+    pub previous_tool: Tool,
 }
 
 impl Default for ToolState {
@@ -137,6 +141,7 @@ impl Default for ToolState {
             presets: PresetLibrary::default(),
             preset: None,
             strokes_started: 0,
+            previous_tool: Tool::Brush,
         };
         state.apply_settings(&BrushSettings::default());
         state
@@ -256,6 +261,45 @@ impl ToolState {
         z ^ (z >> 31)
     }
 
+    /// Takes the picker; the next pick gives the hand back to the current tool.
+    pub fn start_picker(&mut self) {
+        if self.tool != Tool::Picker {
+            self.previous_tool = self.tool;
+            self.tool = Tool::Picker;
+        }
+    }
+
+    /// Gives the brush the values picked for `target` of `set` (by channel; the mask
+    /// value under [`MASK_VALUE_CHANNEL`]): the brush then paints values, not a
+    /// procedural. The picker gives the hand back to the previous tool.
+    pub fn apply_picked(
+        &mut self,
+        set: &TextureSet,
+        target: PaintTarget,
+        values: &[(Channel, [f32; 4])],
+    ) {
+        match target {
+            PaintTarget::Layer(_) => {
+                for (channel, value) in values {
+                    if let Some(def) = set.channels.iter().find(|def| def.channel == *channel) {
+                        let checked = self.channel(def).0;
+                        self.channels.insert(*channel, (checked, *value));
+                    }
+                }
+                self.procedural = None;
+            }
+            PaintTarget::Mask(..) => {
+                if let Some((_, value)) = values.iter().find(|(c, _)| *c == MASK_VALUE_CHANNEL) {
+                    self.mask_value = value[0].clamp(0.0, 1.0);
+                }
+                self.mask_procedural = None;
+            }
+        }
+        if self.tool == Tool::Picker {
+            self.tool = self.previous_tool;
+        }
+    }
+
     /// Switches the mirror symmetry across X on or off.
     pub fn toggle_mirror_x(&mut self) {
         self.symmetry.mirror[0] = !self.symmetry.mirror[0];
@@ -347,7 +391,7 @@ impl ToolState {
             projection: self.projection,
         };
         let tool = match self.tool {
-            Tool::Brush => StrokeTool::Brush,
+            Tool::Brush | Tool::Picker => StrokeTool::Brush,
             Tool::Eraser => StrokeTool::Eraser,
         };
         (brush, tool, alpha)
@@ -408,10 +452,18 @@ pub fn brush_section(
         for (tool, icon, key) in [
             (Tool::Brush, icons::PAINT_BRUSH, "tool-brush"),
             (Tool::Eraser, icons::ERASER, "tool-eraser"),
+            (Tool::Picker, icons::EYEDROPPER, "tool-picker"),
         ] {
-            ui.selectable_value(&mut state.tool, tool, format!("{icon} {}", i18n.tr(key)));
+            let label = format!("{icon} {}", i18n.tr(key));
+            if ui.selectable_label(state.tool == tool, label).clicked() {
+                match tool {
+                    Tool::Picker => state.start_picker(),
+                    _ => state.tool = tool,
+                }
+            }
         }
     });
+    ui.label(RichText::new(i18n.tr("paint-line-hint")).small().weak());
     if let Some(log) = stroke_log(set, target) {
         let mut args = FluentArgs::new();
         args.set("count", log.strokes.len());
@@ -807,6 +859,44 @@ fn procedural_editor(
     ended | edited.ended
 }
 
+/// The material and the UV of point `position` of triangle `triangle` of `mesh`, by
+/// barycentric interpolation (clamped to the triangle). `None` without UVs or for a
+/// degenerate triangle.
+pub fn surface_uv(
+    mesh: &patine_core::mesh::MeshAsset,
+    triangle: u32,
+    position: Vec3,
+) -> Option<(u32, [f32; 2])> {
+    let corners = mesh.triangles.get(triangle as usize)?;
+    let uvs = mesh.uv0.as_ref()?;
+    let [a, b, c] = corners.map(|v| Vec3::from(mesh.positions[v as usize]));
+    let (e0, e1, p) = (b - a, c - a, position - a);
+    let (d00, d01, d11) = (e0.dot(e0), e0.dot(e1), e1.dot(e1));
+    let (d20, d21) = (p.dot(e0), p.dot(e1));
+    let denominator = d00 * d11 - d01 * d01;
+    if denominator.abs() <= f32::EPSILON * d00 * d11 {
+        return None;
+    }
+    let v = ((d11 * d20 - d01 * d21) / denominator).max(0.0);
+    let w = ((d00 * d21 - d01 * d20) / denominator).max(0.0);
+    let u = (1.0 - v - w).max(0.0);
+    let sum = u + v + w;
+    let [ua, ub, uc] = corners.map(|i| Vec2::from(uvs[i as usize]));
+    let uv = (ua * u + ub * v + uc * w) / sum;
+    let material = mesh
+        .submeshes
+        .iter()
+        .find(|submesh| submesh.triangles.contains(&triangle))?
+        .material;
+    Some((material, uv.to_array()))
+}
+
+/// The texel of a `size`² texture under `uv` (clamped to the texture).
+pub fn texel_of(uv: [f32; 2], size: u32) -> [u32; 2] {
+    let last = size.saturating_sub(1) as f32;
+    uv.map(|t| (t * size as f32).floor().clamp(0.0, last) as u32)
+}
+
 /// A point of the mesh under the cursor, for the brush cursor.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SurfacePoint {
@@ -1125,6 +1215,72 @@ mod tests {
         assert_eq!(a.symmetry.mirror, [true, false, false]);
         a.toggle_mirror_x();
         assert_eq!(a.symmetry, Symmetry::default());
+    }
+
+    #[test]
+    fn the_picker_fills_the_brush_and_gives_the_hand_back() {
+        let project = project();
+        let set = &project.texture_sets[0];
+        let mut state = ToolState {
+            tool: Tool::Eraser,
+            procedural: patine_procedural::library::find("material.copper")
+                .map(|def| def.instance()),
+            ..ToolState::default()
+        };
+        state.start_picker();
+        state.start_picker();
+        assert_eq!(state.tool, Tool::Picker);
+        state.apply_picked(
+            set,
+            PaintTarget::Layer(LayerId(1)),
+            &[
+                (Channel::BaseColor, [0.1, 0.2, 0.3, 1.0]),
+                (Channel::Metallic, [0.7; 4]),
+                (Channel::User(9), [0.5; 4]),
+            ],
+        );
+        assert_eq!(state.tool, Tool::Eraser);
+        assert_eq!(state.procedural, None);
+        let def = |channel| {
+            set.channels
+                .iter()
+                .find(|d| d.channel == channel)
+                .expect("a channel of the set")
+        };
+        // Values change; what is painted does not.
+        assert_eq!(
+            state.channel(def(Channel::BaseColor)),
+            (true, [0.1, 0.2, 0.3, 1.0])
+        );
+        assert_eq!(state.channel(def(Channel::Metallic)), (false, [0.7; 4]));
+        state.start_picker();
+        state.apply_picked(
+            set,
+            PaintTarget::Mask(LayerId(2), EffectId(3)),
+            &[(MASK_VALUE_CHANNEL, [1.4; 4])],
+        );
+        assert_eq!(state.mask_value, 1.0);
+    }
+
+    #[test]
+    fn surface_points_give_their_uv_and_texel() {
+        let mesh = patine_mesh::primitives::cube_cross();
+        let uvs = mesh.uv0.as_ref().expect("the cube has UVs");
+        for triangle in [0u32, 5, 11] {
+            let corners = mesh.triangles[triangle as usize];
+            let [a, b, c] = corners.map(|v| Vec3::from(mesh.positions[v as usize]));
+            let [ua, ub, uc] = corners.map(|v| Vec2::from(uvs[v as usize]));
+            let weights = [0.2, 0.5, 0.3];
+            let position = a * weights[0] + b * weights[1] + c * weights[2];
+            let expected = ua * weights[0] + ub * weights[1] + uc * weights[2];
+            let (material, uv) = surface_uv(&mesh, triangle, position).expect("a point");
+            assert_eq!(material, 0);
+            assert!(Vec2::from(uv).distance(expected) < 1e-5, "{triangle}");
+        }
+        assert_eq!(surface_uv(&mesh, 9999, Vec3::ZERO), None);
+        assert_eq!(texel_of([0.0, 0.0], 512), [0, 0]);
+        assert_eq!(texel_of([0.5, 0.999], 512), [256, 511]);
+        assert_eq!(texel_of([1.0, -0.2], 512), [511, 0]);
     }
 
     #[test]

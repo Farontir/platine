@@ -427,6 +427,7 @@ fn menu_bar(ui: &mut Ui, info: &FrameInfo<'_>, triggered: &mut Vec<ActionId>) {
         ui.separator();
         action_item(ui, info, ActionId::ToolBrush, triggered);
         action_item(ui, info, ActionId::ToolEraser, triggered);
+        action_item(ui, info, ActionId::ToolPicker, triggered);
         ui.separator();
         action_item(ui, info, ActionId::BrushSmaller, triggered);
         action_item(ui, info, ActionId::BrushLarger, triggered);
