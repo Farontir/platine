@@ -436,6 +436,7 @@ impl PaintRasters {
                         texture,
                         layout: *layout,
                         value: stroke_value(stroke, target, *channel).unwrap_or_default(),
+                        values: None,
                     })
                     .collect();
                 if save {

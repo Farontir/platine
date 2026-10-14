@@ -1,12 +1,18 @@
 //! The paint passes on the test adapter: depth against ray casting, dabs and composition
 //! against the CPU reference, live painting against replay (M8 criterion 2), and a stroke
-//! across a UV seam of the cube without holes (M8 criterion 1).
+//! across a UV seam of the cube without holes (M8 criterion 1). From M9: dab dynamics,
+//! symmetry copies and UV strokes against the reference, exact replay of jittered strokes
+//! (M9 criterion 3), exact symmetry on the sphere (M9 criterion 2), values read from a
+//! texture.
 
 use glam::{Mat4, Vec2, Vec3, Vec4};
 use patine_core::channel::Channel;
 use patine_core::layer::FillSource;
 use patine_core::mesh::MeshAsset;
-use patine_core::stroke::{BrushSnapshot, Dab, SizeSpace, Stroke, StrokeCamera, Symmetry, Tool};
+use patine_core::stroke::{
+    BrushSnapshot, Curve, Dab, PressureCurves, SizeSpace, Stroke, StrokeCamera, StrokeSpace,
+    Symmetry, Tool,
+};
 use patine_gpu::pool::TexturePool;
 use patine_gpu::{GpuContext, gpu_test, readback, wgpu};
 use patine_mesh::bvh::{Bvh, Ray};
@@ -16,7 +22,7 @@ use patine_paint::dynamics::gpu_dabs;
 use patine_paint::projection::{GpuDab, SetGeometry, StrokeProjection};
 use patine_paint::raster::{Content, LiveStroke, Painter, SetSurface, content_descriptor};
 use patine_paint::reference::{
-    ContentLayout, DepthImage, deposit, erase, stroke_texel, texel_view,
+    ContentLayout, DepthImage, deposit, erase, stroke_texel, texel_view, texel_view_uv,
 };
 use patine_procedural::reference::surface::{Surface, surface_at};
 use patine_procedural::surface::{
@@ -303,7 +309,7 @@ fn rasterize(
     let dabs: Vec<GpuDab> = gpu_dabs(stroke, 0..stroke.dabs.len());
     let tiles = fixture
         .geometry
-        .touched_tiles(&[target.projection], &dabs, fixture.size);
+        .touched_tiles(&target.projections, &dabs, fixture.size);
     painter.rasterize_dabs(ctx, &pool, &mut encoder, &target, &set, &dabs, &tiles);
     ctx.queue.submit([encoder.finish()]);
     let buffer = read_f32(ctx, pool.peek(target.buffer).expect("pinned"));
@@ -408,7 +414,7 @@ gpu_test!(
                     &stroke,
                     &set,
                     None,
-                    &[Content { texture: &texture, layout, value }],
+                    &[Content { texture: &texture, layout, value, values: None }],
                 );
                 ctx.queue.submit([encoder.finish()]);
                 let got = read_content(&ctx, &texture, layout);
@@ -453,8 +459,8 @@ gpu_test!(
             let value = [0.1, 0.7, 0.3, 1.0];
             let live_texture = content(&ctx, ContentLayout::Vector, size, &base);
             let replay_texture = content(&ctx, ContentLayout::Vector, size, &base);
-            let live_content = Content { texture: &live_texture, layout: ContentLayout::Vector, value };
-            let replay_content = Content { texture: &replay_texture, layout: ContentLayout::Vector, value };
+            let live_content = Content { texture: &live_texture, layout: ContentLayout::Vector, value, values: None };
+            let replay_content = Content { texture: &replay_texture, layout: ContentLayout::Vector, value, values: None };
             let mut pool = TexturePool::new(u64::MAX);
 
             // Live, in batches of 1 to 17 dabs, one submit per batch like frames.
@@ -556,6 +562,7 @@ fn seam_coverage(
             texture: &texture,
             layout: ContentLayout::Vector,
             value: [1.0, 0.0, 0.0, 1.0],
+            values: None,
         }],
     );
     ctx.queue.submit([encoder.finish()]);
@@ -641,5 +648,369 @@ gpu_test!(
         );
         let (control, _) = seam_coverage(&ctx, &painter, &fixture, &map);
         assert!(control < 0.9, "without dilation the seam shows ({control})");
+    }
+);
+
+/// A stroke with every dynamic: pressure through curves (size, flow, opacity), jitters,
+/// scatter, path direction, tilt, with `symmetry`.
+fn dynamic_stroke(camera: StrokeCamera, symmetry: Symmetry, seed: u64) -> Stroke {
+    let mut brush = brush(34.0, 0.5, None);
+    brush.size_jitter = 0.4;
+    brush.angle_jitter = 0.8;
+    brush.flow_jitter = 0.3;
+    brush.scatter = 0.6;
+    brush.follow_path = true;
+    brush.tilt_angle = true;
+    brush.pressure = PressureCurves {
+        size: Curve(vec![[0.0, 0.3], [1.0, 1.0]]),
+        flow: Curve::identity(),
+        opacity: Curve(vec![[0.0, 0.4], [1.0, 1.0]]),
+    };
+    let mut stroke = stroke(
+        camera,
+        brush,
+        Tool::Brush,
+        &[[60.0, 150.0], [128.0, 90.0], [200.0, 140.0]],
+    );
+    for (i, dab) in stroke.dabs.iter_mut().enumerate() {
+        dab.pressure = 0.2 + 0.8 * ((i as f32 * 0.37).sin() * 0.5 + 0.5);
+        dab.tilt = [0.3, (i as f32 * 0.2).cos() * 0.4];
+    }
+    stroke.symmetry = symmetry;
+    stroke.seed = seed;
+    stroke
+}
+
+/// Runs `stroke` in one batch; returns the stroke buffer, the depth image of each copy,
+/// the copies' cameras and the tiles.
+fn rasterize_copies(
+    ctx: &GpuContext,
+    painter: &Painter,
+    fixture: &Fixture,
+    view: &wgpu::TextureView,
+    stroke: &Stroke,
+) -> (
+    Vec<f32>,
+    Vec<DepthImage>,
+    Vec<StrokeProjection>,
+    Vec<[u32; 2]>,
+) {
+    let mut pool = TexturePool::new(u64::MAX);
+    let set = fixture.surface(view);
+    let mut encoder = ctx.device.create_command_encoder(&Default::default());
+    let target = painter.begin_stroke(ctx, &mut pool, &mut encoder, stroke, &set, None);
+    let dabs = gpu_dabs(stroke, 0..stroke.dabs.len());
+    let tiles = fixture.geometry.stroke_tiles(stroke, &dabs, fixture.size);
+    painter.rasterize_dabs(ctx, &pool, &mut encoder, &target, &set, &dabs, &tiles);
+    ctx.queue.submit([encoder.finish()]);
+    let buffer = read_f32(ctx, pool.peek(target.buffer).expect("pinned"));
+    let texture = target.depth_texture();
+    let depths = (0..texture.depth_or_array_layers())
+        .map(|layer| DepthImage {
+            width: texture.width(),
+            height: texture.height(),
+            values: bytemuck::cast_slice(
+                &readback::read_texture_level(ctx, texture, 0, layer).expect("readback"),
+            )
+            .to_vec(),
+        })
+        .collect();
+    let projections = target.projections.clone();
+    painter.end_stroke(&mut pool, target);
+    (buffer, depths, projections, tiles)
+}
+
+/// The stroke buffer against the CPU reference over `tiles`: worst error away from steps,
+/// texels on a step (occlusion edge), texels painted.
+#[allow(clippy::too_many_arguments)]
+fn compare(
+    fixture: &Fixture,
+    stroke: &Stroke,
+    gpu: &[f32],
+    depths: &[DepthImage],
+    projections: &[StrokeProjection],
+    tiles: &[[u32; 2]],
+) -> (f32, usize, usize) {
+    let dabs = gpu_dabs(stroke, 0..stroke.dabs.len());
+    let (mut worst, mut flipped, mut painted) = (0.0f32, 0, 0);
+    for tile in tiles {
+        for y in tile[1] * 128..((tile[1] + 1) * 128).min(fixture.size) {
+            for x in tile[0] * 128..((tile[0] + 1) * 128).min(fixture.size) {
+                let surface = fixture.surface_at([x, y]);
+                let views: Vec<_> = match stroke.space {
+                    StrokeSpace::View => projections
+                        .iter()
+                        .zip(depths)
+                        .map(|(projection, depth)| {
+                            texel_view(
+                                projection,
+                                depth,
+                                fixture.buffers.extent,
+                                &surface,
+                                [x, y],
+                                fixture.size,
+                            )
+                        })
+                        .collect(),
+                    StrokeSpace::Uv => vec![texel_view_uv(
+                        &projections[0],
+                        &surface,
+                        [x, y],
+                        fixture.size,
+                    )],
+                };
+                let expected = stroke_texel(0.0, &views, &dabs, None);
+                let error = (gpu[(y * fixture.size + x) as usize] - expected).abs();
+                if error > 1e-3 {
+                    flipped += 1;
+                } else {
+                    worst = worst.max(error);
+                }
+                painted += usize::from(expected > 0.01);
+            }
+        }
+    }
+    (worst, flipped, painted)
+}
+
+gpu_test!(
+    /// Strokes with pressure curves, jitters, scatter, path direction and tilt, through
+    /// mirror and radial copies, match the CPU reference texel by texel; so does a
+    /// stroke painted in UV space.
+    fn dynamic_and_symmetric_strokes_match_the_reference(ctx) {
+        let fixture = Fixture::new(&ctx, primitives::uv_sphere(48, 24), 256);
+        let painter = Painter::new(&ctx).expect("shaders compile");
+        let view = fixture.map.create_view(&Default::default());
+        let camera = camera(Vec3::new(0.8, 1.0, 3.0));
+        for symmetry in [
+            Symmetry::default(),
+            Symmetry { mirror: [true, false, false], radial: 0 },
+            Symmetry { mirror: [true, false, false], radial: 3 },
+        ] {
+            let stroke = dynamic_stroke(camera, symmetry, 99);
+            let (gpu, depths, projections, tiles) = rasterize_copies(&ctx, &painter, &fixture, &view, &stroke);
+            assert_eq!(projections.len(), depths.len());
+            let (worst, flipped, painted) = compare(&fixture, &stroke, &gpu, &depths, &projections, &tiles);
+            assert!(painted > 300, "{symmetry:?}: the stroke paints ({painted} texels)");
+            assert!(worst < 1e-4, "{symmetry:?}: worst error {worst}");
+            assert!(flipped * 1000 < painted, "{symmetry:?}: {flipped} texels differ out of {painted}");
+        }
+
+        // UV space: the camera maps the UV square to the 256 × 256 view.
+        let uv_camera = StrokeCamera {
+            view_proj: Mat4::from_cols(
+                Vec4::new(2.0, 0.0, 0.0, 0.0),
+                Vec4::new(0.0, -2.0, 0.0, 0.0),
+                Vec4::new(0.0, 0.0, 1.0, 0.0),
+                Vec4::new(-1.0, 1.0, 0.0, 1.0),
+            )
+            .to_cols_array_2d(),
+            viewport: VIEWPORT,
+        };
+        let mut stroke = dynamic_stroke(uv_camera, Symmetry::default(), 5);
+        stroke.space = StrokeSpace::Uv;
+        let (gpu, depths, projections, tiles) = rasterize_copies(&ctx, &painter, &fixture, &view, &stroke);
+        let (worst, flipped, painted) = compare(&fixture, &stroke, &gpu, &depths, &projections, &tiles);
+        assert!(painted > 300, "UV: {painted} texels");
+        assert!(worst < 1e-4 && flipped * 1000 < painted, "UV: {worst}, {flipped} differ");
+    }
+);
+
+gpu_test!(
+    /// M9 criterion 3: a stroke with jitters, scatter, path direction, pressure and
+    /// symmetry, painted live in batches of random sizes, gives exactly the content its
+    /// replay gives, and two replays give the same content.
+    fn jittered_strokes_replay_exactly(ctx) {
+        let fixture = Fixture::new(&ctx, primitives::uv_sphere(48, 24), 512);
+        let painter = Painter::new(&ctx).expect("shaders compile");
+        let view = fixture.map.create_view(&Default::default());
+        let set = fixture.surface(&view);
+        let size = fixture.size;
+        let camera = camera(Vec3::new(-0.4, 1.0, 3.0));
+        let stroke = dynamic_stroke(camera, Symmetry { mirror: [true, false, false], radial: 2 }, 4242);
+        let empty = vec![[0.0f32; 4]; (size * size) as usize];
+        let value = [0.2, 0.6, 0.9, 1.0];
+        let replay = || {
+            let texture = content(&ctx, ContentLayout::Vector, size, &empty);
+            let mut pool = TexturePool::new(u64::MAX);
+            let mut encoder = ctx.device.create_command_encoder(&Default::default());
+            painter.replay_stroke(&ctx, &mut pool, &mut encoder, &stroke, &set, None, &[Content {
+                texture: &texture,
+                layout: ContentLayout::Vector,
+                value,
+                values: None,
+            }]);
+            ctx.queue.submit([encoder.finish()]);
+            readback::read_texture(&ctx, &texture).expect("readback")
+        };
+        let first = replay();
+        assert!(first == replay(), "two replays differ");
+
+        let texture = content(&ctx, ContentLayout::Vector, size, &empty);
+        let live_content = Content { texture: &texture, layout: ContentLayout::Vector, value, values: None };
+        let mut pool = TexturePool::new(u64::MAX);
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        let mut live = LiveStroke::begin(&painter, &ctx, &mut pool, &mut encoder, stroke.clone(), &set, None, &[ContentLayout::Vector]);
+        let (mut start, mut batch) = (0, 3);
+        while start < stroke.dabs.len() {
+            let end = (start + batch).min(stroke.dabs.len());
+            live.add(&painter, &ctx, &mut pool, &mut encoder, &set, &[live_content], &stroke.dabs[start..end]);
+            ctx.queue.submit([std::mem::replace(&mut encoder, ctx.device.create_command_encoder(&Default::default())).finish()]);
+            pool.flush();
+            start = end;
+            batch = batch * 5 % 13 + 1;
+        }
+        let finished = live.finish(&painter, &mut pool);
+        assert_eq!(finished.stroke, stroke);
+        ctx.queue.submit([encoder.finish()]);
+        let live_texels = readback::read_texture(&ctx, &texture).expect("readback");
+        assert!(live_texels == first, "live and replay differ");
+        assert!(first != readback::read_texture(&ctx, &content(&ctx, ContentLayout::Vector, size, &empty)).expect("readback"));
+
+        // Another seed paints something else.
+        let mut other = stroke.clone();
+        other.seed = 4243;
+        let (a, _, _, _) = rasterize_copies(&ctx, &painter, &fixture, &view, &stroke);
+        let (b, _, _, _) = rasterize_copies(&ctx, &painter, &fixture, &view, &other);
+        assert_ne!(a, b);
+    }
+);
+
+/// The differences between the paint at every painted texel of `rows` and the paint at
+/// the texel of the transformed point, given by `column` (the UV layouts of the sphere
+/// and the cylinder map mirrors and turns of their segments to whole columns), sorted.
+fn asymmetry(
+    buffer: &[f32],
+    size: u32,
+    rows: std::ops::Range<u32>,
+    column: impl Fn(u32) -> u32,
+) -> Vec<f32> {
+    let mut differences = Vec::new();
+    for y in rows {
+        for x in 0..size {
+            let here = buffer[(y * size + x) as usize];
+            let there = buffer[(y * size + column(x)) as usize];
+            if here > 0.01 || there > 0.01 {
+                differences.push((here - there).abs());
+            }
+        }
+    }
+    differences.sort_by(f32::total_cmp);
+    differences
+}
+
+/// The difference below which `fraction` of `differences` lie.
+fn quantile(differences: &[f32], fraction: f64) -> f32 {
+    differences[((differences.len() as f64 * fraction) as usize).min(differences.len() - 1)]
+}
+
+/// The stroke buffer of a soft stroke through viewport points, with `symmetry`.
+fn symmetric_buffer(
+    ctx: &GpuContext,
+    painter: &Painter,
+    fixture: &Fixture,
+    eye: Vec3,
+    points: &[[f32; 2]],
+    symmetry: Symmetry,
+) -> Vec<f32> {
+    let view = fixture.map.create_view(&Default::default());
+    let mut brush = brush(40.0, 0.2, None);
+    brush.flow = 1.0;
+    let mut stroke = stroke(camera(eye), brush, Tool::Brush, points);
+    stroke.symmetry = symmetry;
+    rasterize_copies(ctx, painter, fixture, &view, &stroke).0
+}
+
+gpu_test!(
+    /// M9 criterion 2, texel for texel (the UV layouts map these transforms to whole
+    /// columns):
+    /// - on the sphere, a radial stroke paints the same at every third of a turn, and on
+    ///   the cylinder, whose sides are flat rectangles, an X mirror paints at the mirror
+    ///   image of every point what it paints at the point. Exact to the precision of the
+    ///   surface points: 99.5 % of the texels agree within 1e-3 (a quarter of an 8-bit
+    ///   level) and the median difference is below 1e-5. The rest lies on occlusion
+    ///   edges (each copy's depth is rasterized on its own), and the f32 barycentrics of
+    ///   the cylinder's thin triangles move surface points by up to about 2e-5;
+    /// - on the sphere, the X mirror agrees within the asymmetry of the test sphere
+    ///   itself: its quads are not flat, and a mirror maps the diagonal splitting a quad
+    ///   onto the other diagonal of the opposite quad, so the two surfaces differ by up to
+    ///   about 0.2 % of the radius between vertices;
+    /// - the same stroke without symmetry fails, so the comparison sees asymmetries.
+    fn symmetry_is_exact_on_the_sphere(ctx) {
+        let size = 384;
+        let painter = Painter::new(&ctx).expect("shaders compile");
+        let sphere = Fixture::new(&ctx, primitives::uv_sphere(48, 24), size);
+        let cylinder = Fixture::new(&ctx, primitives::cylinder(48), size);
+        let (sphere_eye, sphere_points) = (Vec3::new(1.4, 0.6, 2.6), [[100.0, 110.0], [150.0, 140.0], [170.0, 100.0]]);
+        let (cylinder_eye, cylinder_points) = (Vec3::new(1.6, 0.3, 2.4), [[90.0, 120.0], [140.0, 140.0], [175.0, 115.0]]);
+        // u → 1/2 − u: column x → size/2 − 1 − x; u → u + 1/3 for a third of a turn. The
+        // sides of the cylinder are the lower half of its UV square.
+        let mirror = |x: u32| (size / 2 + size - 1 - x) % size;
+        let turn = |x: u32| (x + size / 3) % size;
+        let side = 0..size / 2 - 4;
+        let exact = |name: &str, differences: &[f32]| {
+            assert!(differences.len() > 500, "{name}: {} painted texels compared", differences.len());
+            let (median, p995) = (quantile(differences, 0.5), quantile(differences, 0.995));
+            assert!(median < 1e-5 && p995 < 1e-3, "{name}: median {median}, 99.5th percentile {p995}");
+        };
+
+        let radial = symmetric_buffer(&ctx, &painter, &sphere, sphere_eye, &sphere_points, Symmetry { mirror: [false; 3], radial: 3 });
+        exact("radial 3 on the sphere", &asymmetry(&radial, size, 0..size, turn));
+        let mirrored = symmetric_buffer(&ctx, &painter, &cylinder, cylinder_eye, &cylinder_points, Symmetry { mirror: [true, false, false], radial: 0 });
+        exact("mirror X on the cylinder", &asymmetry(&mirrored, size, side.clone(), mirror));
+
+        let mirrored = symmetric_buffer(&ctx, &painter, &sphere, sphere_eye, &sphere_points, Symmetry { mirror: [true, false, false], radial: 0 });
+        let differences = asymmetry(&mirrored, size, 0..size, mirror);
+        let (median, p99) = (quantile(&differences, 0.5), quantile(&differences, 0.99));
+        assert!(differences.len() > 500);
+        assert!(median < 0.01 && p99 < 0.05, "mirror X on the sphere: median {median}, 99th percentile {p99}");
+
+        // The control: without symmetry, the mirror image is unpainted.
+        let plain = symmetric_buffer(&ctx, &painter, &cylinder, cylinder_eye, &cylinder_points, Symmetry::default());
+        let differences = asymmetry(&plain, size, side, mirror);
+        assert!(quantile(&differences, 0.5) > 0.1, "without symmetry the comparison fails");
+    }
+);
+
+gpu_test!(
+    /// A content composed from a texture of values (a procedural material) deposits the
+    /// value of each texel.
+    fn values_come_from_a_texture(ctx) {
+        let fixture = Fixture::new(&ctx, primitives::uv_sphere(32, 16), 256);
+        let painter = Painter::new(&ctx).expect("shaders compile");
+        let view = fixture.map.create_view(&Default::default());
+        let set = fixture.surface(&view);
+        let size = fixture.size;
+        let stroke = stroke(camera(Vec3::new(0.3, 0.8, 3.0)), brush(60.0, 0.4, None), Tool::Brush, &[[60.0, 128.0], [200.0, 128.0]]);
+        let values: Vec<[f32; 4]> = (0..size * size)
+            .map(|i| [f16((i % size) as f32 / size as f32), f16((i / size) as f32 / size as f32), 0.5, 1.0])
+            .collect();
+        let value_texture = content(&ctx, ContentLayout::Vector, size, &values);
+        let value_view = value_texture.create_view(&Default::default());
+        for layout in [ContentLayout::Vector, ContentLayout::Scalar] {
+            let initial = vec![[0.0f32; 4]; (size * size) as usize];
+            let texture = content(&ctx, layout, size, &initial);
+            let mut pool = TexturePool::new(u64::MAX);
+            let mut encoder = ctx.device.create_command_encoder(&Default::default());
+            painter.replay_stroke(&ctx, &mut pool, &mut encoder, &stroke, &set, None, &[Content {
+                texture: &texture,
+                layout,
+                value: [9.0; 4],
+                values: Some(&value_view),
+            }]);
+            ctx.queue.submit([encoder.finish()]);
+            let got = read_content(&ctx, &texture, layout);
+            let (buffer, _, _) = rasterize(&ctx, &painter, &fixture, &view, &stroke, None);
+            let mut painted = 0;
+            for i in 0..(size * size) as usize {
+                let a = buffer[i] * stroke.brush.opacity;
+                let expected = deposit(layout, initial[i], values[i], a);
+                for c in 0..4 {
+                    assert!((got[i][c] - expected[c]).abs() <= 1.0 / 512.0, "{layout:?} texel {i}: {:?} against {expected:?}", got[i]);
+                }
+                painted += usize::from(a > 0.1);
+            }
+            assert!(painted > 500);
+        }
     }
 );

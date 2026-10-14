@@ -1183,6 +1183,7 @@ impl GpuDocument {
                 texture,
                 layout: layout_of(*channel),
                 value: stroke_value(live.stroke.stroke(), target, *channel).unwrap_or_default(),
+                values: None,
             })
             .collect();
         let tiles = live.stroke.add(

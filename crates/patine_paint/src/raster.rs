@@ -19,7 +19,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use bytemuck::{Pod, Zeroable};
-use patine_core::stroke::{Dab, Stroke, Tool};
+use patine_core::stroke::{Dab, Stroke, StrokeSpace, Tool};
 use patine_gpu::pool::{Residency, TextureId, TexturePool};
 use patine_gpu::{GpuContext, GpuError, wgpu};
 use patine_procedural::surface::MeshBuffers;
@@ -27,7 +27,7 @@ use wgpu::util::DeviceExt as _;
 
 use crate::alphas::AlphaImage;
 use crate::dynamics::gpu_dabs;
-use crate::projection::{GpuDab, SetGeometry, StrokeProjection, TILE};
+use crate::projection::{GpuDab, SetGeometry, StrokeProjection, TILE, stroke_projections};
 use crate::reference::ContentLayout;
 use crate::{DEPTH_BIAS, DILATION, GRAZING};
 
@@ -52,18 +52,25 @@ struct DepthUniforms {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
 struct DabUniforms {
-    view_proj: [[f32; 4]; 4],
-    depth_axis: [f32; 4],
-    forward: [f32; 4],
     viewport: [f32; 2],
     size: u32,
     dab_count: u32,
+    copy_count: u32,
     extent: f32,
     has_alpha: u32,
     dilation: f32,
     depth_bias: f32,
+    uv: u32,
     grazing: [f32; 2],
-    padding: [f32; 2],
+}
+
+/// The camera of one symmetry copy. Must match `Copy` in `shaders/paint/dabs.wgsl`.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, Pod, Zeroable)]
+struct GpuCopy {
+    view_proj: [[f32; 4]; 4],
+    depth_axis: [f32; 4],
+    forward: [f32; 4],
 }
 
 /// Uniforms of `shaders/paint/stroke_composite.wgsl`.
@@ -74,7 +81,7 @@ struct CompositeUniforms {
     opacity: f32,
     eraser: u32,
     scalar: u32,
-    padding: f32,
+    textured: u32,
 }
 
 /// Format of a paint content texture of `layout`.
@@ -147,14 +154,20 @@ pub struct Content<'a> {
     pub layout: ContentLayout,
     /// Value deposited (ignored by the eraser): rgb or xyz, or the scalar first.
     pub value: [f32; 4],
+    /// Values deposited texel by texel instead of `value` (a procedural material
+    /// evaluated on the set, at the content's size): rgb or xyz, or the scalar in red.
+    pub values: Option<&'a wgpu::TextureView>,
 }
 
 /// The GPU state of one stroke being rasterized: its camera's depth image, its alpha and
 /// its stroke buffer (pinned in the pool until [`Painter::end_stroke`]).
 #[derive(Debug)]
 pub struct StrokeTarget {
-    /// The stroke's camera.
-    pub projection: StrokeProjection,
+    /// The stroke's cameras: one per symmetry copy, the stroke's own first (one camera
+    /// for a stroke painted in UV space).
+    pub projections: Vec<StrokeProjection>,
+    /// Where the stroke was painted.
+    pub space: StrokeSpace,
     /// Opacity of the stroke.
     pub opacity: f32,
     /// Whether the stroke erases.
@@ -167,7 +180,8 @@ pub struct StrokeTarget {
 }
 
 impl StrokeTarget {
-    /// The depth image of the stroke's camera ([`DEPTH_IMAGE_FORMAT`]).
+    /// The depth images of the stroke's cameras ([`DEPTH_IMAGE_FORMAT`]), one array
+    /// layer per copy (a 1×1 layer for a stroke painted in UV space).
     pub fn depth_texture(&self) -> &wgpu::Texture {
         &self.depth
     }
@@ -187,6 +201,8 @@ pub struct Painter {
     composite_layout: wgpu::BindGroupLayout,
     /// 1×1 alpha bound when a stroke has none.
     no_alpha: wgpu::TextureView,
+    /// 1×1 values bound when a content takes a constant.
+    no_values: wgpu::TextureView,
     passes: AtomicU64,
 }
 
@@ -380,7 +396,16 @@ impl Painter {
                 uniform_entry(0, compute),
                 storage_entry(1, compute),
                 storage_entry(2, compute),
-                texture_entry(3, compute, unfilterable),
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: compute,
+                    ty: wgpu::BindingType::Texture {
+                        sample_type: unfilterable,
+                        view_dimension: wgpu::TextureViewDimension::D2Array,
+                        multisampled: false,
+                    },
+                    count: None,
+                },
                 texture_entry(4, compute, unfilterable),
                 wgpu::BindGroupLayoutEntry {
                     binding: 5,
@@ -392,6 +417,7 @@ impl Painter {
                     },
                     count: None,
                 },
+                storage_entry(6, compute),
             ],
         });
         let surface_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -422,6 +448,7 @@ impl Painter {
             entries: &[
                 uniform_entry(0, fragment),
                 texture_entry(1, fragment, unfilterable),
+                texture_entry(2, fragment, unfilterable),
             ],
         });
         let module = ctx.create_shader_module("paint/stroke_composite")?;
@@ -479,6 +506,14 @@ impl Painter {
                 wgpu::TextureUsages::TEXTURE_BINDING,
             ))
             .create_view(&Default::default());
+        let no_values = device
+            .create_texture(&square(
+                Some("no values"),
+                1,
+                wgpu::TextureFormat::Rgba16Float,
+                wgpu::TextureUsages::TEXTURE_BINDING,
+            ))
+            .create_view(&Default::default());
         Ok(Self {
             depth,
             depth_layout,
@@ -489,6 +524,7 @@ impl Painter {
             erase,
             composite_layout,
             no_alpha,
+            no_values,
             passes: AtomicU64::new(0),
         })
     }
@@ -500,7 +536,7 @@ impl Painter {
     }
 
     /// Starts rasterizing `stroke` into the texture set `set`: renders the depth seen by
-    /// its camera, uploads its alpha and clears a stroke buffer.
+    /// the camera of each symmetry copy, uploads its alpha and clears a stroke buffer.
     pub fn begin_stroke(
         &self,
         ctx: &GpuContext,
@@ -511,13 +547,20 @@ impl Painter {
         alpha: Option<&AlphaImage>,
     ) -> StrokeTarget {
         let device = &ctx.device;
-        let projection = StrokeProjection::new(&stroke.camera);
-        let [width, height] = stroke.camera.viewport.map(|v| v.max(1));
-        let size2 = |format, usage| wgpu::TextureDescriptor {
+        let projections = stroke_projections(stroke);
+        // A stroke painted in UV space sees no depth: one 1×1 layer.
+        let (width, height, layers) = match stroke.space {
+            StrokeSpace::View => {
+                let [w, h] = stroke.camera.viewport.map(|v| v.max(1));
+                (w, h, projections.len() as u32)
+            }
+            StrokeSpace::Uv => (1, 1, 1),
+        };
+        let size2 = |format, usage, layers| wgpu::TextureDescriptor {
             size: wgpu::Extent3d {
                 width,
                 height,
-                depth_or_array_layers: 1,
+                depth_or_array_layers: layers,
             },
             ..square(Some("stroke depth"), 1, format, usage)
         };
@@ -526,23 +569,43 @@ impl Painter {
             wgpu::TextureUsages::RENDER_ATTACHMENT
                 | wgpu::TextureUsages::TEXTURE_BINDING
                 | wgpu::TextureUsages::COPY_SRC,
+            layers,
         ));
         let depth_test = device.create_texture(&size2(
             wgpu::TextureFormat::Depth32Float,
             wgpu::TextureUsages::RENDER_ATTACHMENT,
+            1,
         ));
-        let uniforms = DepthUniforms {
-            view_proj: projection.view_proj.to_cols_array_2d(),
-            depth_axis: projection.depth_axis.to_array(),
+        let rendered = match stroke.space {
+            StrokeSpace::View => projections.as_slice(),
+            StrokeSpace::Uv => &[],
         };
-        let uniforms = buffer(
-            ctx,
-            "paint depth",
-            bytemuck::bytes_of(&uniforms),
-            wgpu::BufferUsages::UNIFORM,
-        );
-        {
-            let view = depth.create_view(&Default::default());
+        if rendered.is_empty() {
+            // Cleared to "nothing hides anything".
+            let view = depth.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
+            clear(encoder, &view, f64::from(f32::MAX));
+        }
+        for (layer, projection) in rendered.iter().enumerate() {
+            let uniforms = DepthUniforms {
+                view_proj: projection.view_proj.to_cols_array_2d(),
+                depth_axis: projection.depth_axis.to_array(),
+            };
+            let uniforms = buffer(
+                ctx,
+                "paint depth",
+                bytemuck::bytes_of(&uniforms),
+                wgpu::BufferUsages::UNIFORM,
+            );
+            let view = depth.create_view(&wgpu::TextureViewDescriptor {
+                dimension: Some(wgpu::TextureViewDimension::D2),
+                base_array_layer: layer as u32,
+                array_layer_count: Some(1),
+                ..Default::default()
+            });
             let test_view = depth_test.create_view(&Default::default());
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("paint depth"),
@@ -643,7 +706,8 @@ impl Painter {
             .create_view(&Default::default());
         clear(encoder, &view, 0.0);
         StrokeTarget {
-            projection,
+            projections,
+            space: stroke.space,
             opacity: stroke.brush.opacity.clamp(0.0, 1.0),
             eraser: stroke.tool == Tool::Eraser,
             buffer,
@@ -677,20 +741,26 @@ impl Painter {
             return;
         };
         let device = &ctx.device;
-        let projection = &target.projection;
+        let copies: Vec<GpuCopy> = target
+            .projections
+            .iter()
+            .map(|projection| GpuCopy {
+                view_proj: projection.view_proj.to_cols_array_2d(),
+                depth_axis: projection.depth_axis.to_array(),
+                forward: projection.forward.extend(0.0).to_array(),
+            })
+            .collect();
         let uniforms = DabUniforms {
-            view_proj: projection.view_proj.to_cols_array_2d(),
-            depth_axis: projection.depth_axis.to_array(),
-            forward: projection.forward.extend(0.0).to_array(),
-            viewport: projection.viewport.to_array(),
+            viewport: target.projections[0].viewport.to_array(),
             size: target.size,
             dab_count: dabs.len() as u32,
+            copy_count: copies.len() as u32,
             extent: set.mesh.extent,
             has_alpha: u32::from(target.alpha.is_some()),
             dilation: DILATION,
             depth_bias: DEPTH_BIAS,
+            uv: u32::from(target.space == StrokeSpace::Uv),
             grazing: GRAZING,
-            padding: [0.0; 2],
         };
         let storage = wgpu::BufferUsages::STORAGE;
         let uniforms = buffer(
@@ -701,7 +771,11 @@ impl Painter {
         );
         let dab_buffer = buffer(ctx, "paint dabs", bytemuck::cast_slice(dabs), storage);
         let tile_buffer = buffer(ctx, "paint tiles", bytemuck::cast_slice(tiles), storage);
-        let depth = target.depth.create_view(&Default::default());
+        let copy_buffer = buffer(ctx, "paint copies", bytemuck::cast_slice(&copies), storage);
+        let depth = target.depth.create_view(&wgpu::TextureViewDescriptor {
+            dimension: Some(wgpu::TextureViewDimension::D2Array),
+            ..Default::default()
+        });
         let alpha = target
             .alpha
             .as_ref()
@@ -736,6 +810,10 @@ impl Painter {
                 wgpu::BindGroupEntry {
                     binding: 5,
                     resource: wgpu::BindingResource::TextureView(&stroke),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: copy_buffer.as_entire_binding(),
                 },
             ],
         });
@@ -792,7 +870,7 @@ impl Painter {
             opacity: target.opacity,
             eraser: u32::from(target.eraser),
             scalar: u32::from(content.layout == ContentLayout::Scalar),
-            padding: 0.0,
+            textured: u32::from(content.values.is_some()),
         };
         let uniforms = buffer(
             ctx,
@@ -812,6 +890,12 @@ impl Painter {
                 wgpu::BindGroupEntry {
                     binding: 1,
                     resource: wgpu::BindingResource::TextureView(&stroke),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::TextureView(
+                        content.values.unwrap_or(&self.no_values),
+                    ),
                 },
             ],
         });
