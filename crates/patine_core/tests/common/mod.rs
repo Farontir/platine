@@ -5,7 +5,7 @@
 pub mod ops;
 mod rich;
 
-pub use rich::rich_project;
+pub use rich::{rich_project, rich_project_v2};
 
 use patine_core::channel::Channel;
 use patine_core::ids::{IdSequence, LayerId};
@@ -86,7 +86,8 @@ pub fn ids(project: &Project) -> IdSequence {
 /// them), its values drawn from `seed`.
 pub fn stroke(seed: u64, eraser: bool, dabs: usize) -> std::sync::Arc<patine_core::stroke::Stroke> {
     use patine_core::stroke::{
-        BrushSnapshot, Dab, SizeSpace, Stroke, StrokeCamera, Symmetry, Tool,
+        BrushSnapshot, Dab, PressureCurves, SizeSpace, Stroke, StrokeCamera, StrokeSpace, Symmetry,
+        Tool,
     };
     let value = (seed % 97) as f32 / 97.0;
     std::sync::Arc::new(Stroke {
@@ -111,11 +112,19 @@ pub fn stroke(seed: u64, eraser: bool, dabs: usize) -> std::sync::Arc<patine_cor
                 ]
                 .into(),
             ),
+            pressure: PressureCurves::default(),
+            tilt_angle: seed.is_multiple_of(3),
+            projection: BrushSnapshot::default_projection(),
         },
         tool: if eraser { Tool::Eraser } else { Tool::Brush },
         camera: StrokeCamera {
             view_proj: identity(),
             viewport: [640, 480],
+        },
+        space: if seed.is_multiple_of(5) {
+            StrokeSpace::Uv
+        } else {
+            StrokeSpace::View
         },
         symmetry: Symmetry::default(),
         seed,

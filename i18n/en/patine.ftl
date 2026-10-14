@@ -416,3 +416,4 @@ action-brush-softer = Softer brush
 action-brush-harder = Harder brush
 action-layer-new-paint = New paint layer
 menu-paint = Paint
+command-height-force = Height force

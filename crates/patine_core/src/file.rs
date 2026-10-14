@@ -38,8 +38,14 @@ use crate::mesh::MeshAsset;
 use crate::project::{Project, ValidationError};
 use crate::stroke::StrokeLog;
 
+mod v1;
+
 /// Version of the format written by this build.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// - 1 (M3): the first format.
+/// - 2 (M9): pressure curves, tilt and projection in brushes, strokes painted in UV
+///   space, height force of texture sets.
+pub const FORMAT_VERSION: u32 = 2;
 
 /// File extension of projects, without the dot.
 pub const EXTENSION: &str = "patine";
@@ -275,18 +281,21 @@ fn read_entry<R: Read + Seek>(zip: &mut ZipArchive<R>, name: &str) -> Result<Vec
     Ok(bytes)
 }
 
-/// Parses a manifest of any supported version into the current document.
-fn parse_manifest(text: &str) -> Result<Project, FileError> {
+/// Parses a manifest of any supported version into the current document; also returns
+/// the version, which the other entries follow.
+fn parse_manifest(text: &str) -> Result<(Project, u32), FileError> {
     let manifest_error = |error: ron::error::SpannedError| FileError::Manifest(error.to_string());
     let header: Header = ron::from_str(text).map_err(manifest_error)?;
     match header.format_version {
         FORMAT_VERSION => {
             let manifest: Manifest = ron::from_str(text).map_err(manifest_error)?;
             debug_assert_eq!(manifest.format_version, FORMAT_VERSION);
-            Ok(manifest.project)
+            Ok((manifest.project, FORMAT_VERSION))
         }
-        // Older versions go here, e.g. `1 => Ok(v1::parse(text)?.upgrade()),` once the
-        // format changes.
+        1 => {
+            let manifest: v1::Manifest = ron::from_str(text).map_err(manifest_error)?;
+            Ok((manifest.upgrade(), 1))
+        }
         found if found > FORMAT_VERSION => Err(FileError::NewerVersion {
             found,
             supported: FORMAT_VERSION,
@@ -304,13 +313,17 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Project, FileError> {
     };
     let text = String::from_utf8(manifest)
         .map_err(|_| FileError::Manifest("not valid UTF-8".to_owned()))?;
-    let mut project = parse_manifest(&text)?;
+    let (mut project, version) = parse_manifest(&text)?;
 
     let mesh: MeshAsset = decode(&read_entry(&mut zip, MESH)?, MESH)?;
     project.mesh = Arc::new(mesh);
     attach_strokes(&mut project, &mut |id, slot| {
         let entry = stroke_entry(id);
-        let log: StrokeLog = decode(&read_entry(&mut zip, &entry)?, &entry)?;
+        let bytes = read_entry(&mut zip, &entry)?;
+        let log: StrokeLog = match version {
+            1 => decode::<v1::StrokeLog>(&bytes, &entry)?.upgrade(),
+            _ => decode(&bytes, &entry)?,
+        };
         *slot = Arc::new(log);
         Ok(())
     })?;

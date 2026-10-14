@@ -169,6 +169,9 @@ impl ToolState {
             follow_path: false,
             alpha: alpha.as_ref().map(|(hash, _)| *hash),
             material: FillSource::Uniform(material),
+            pressure: patine_core::stroke::PressureCurves::default(),
+            tilt_angle: false,
+            projection: BrushSnapshot::default_projection(),
         };
         let tool = match self.tool {
             Tool::Brush => StrokeTool::Brush,

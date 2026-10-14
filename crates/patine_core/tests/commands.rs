@@ -11,8 +11,8 @@ use patine_core::command::{Command, CommandError};
 use patine_core::commands::{
     InsertLayer, InsertMaskEffect, MoveLayer, MoveMaskEffect, PaintStroke, PaintTarget,
     RemoveLayer, RemoveMaskEffect, RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef,
-    SetEnvironment, SetFillSource, SetFillValue, SetLayerVisible, SetMask, SetMaskEffect,
-    SetProjection, SetTextureSetResolution,
+    SetEnvironment, SetFillSource, SetFillValue, SetHeightForce, SetLayerVisible, SetMask,
+    SetMaskEffect, SetProjection, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::history::History;
@@ -1069,4 +1069,37 @@ fn stroke_logs_compare_by_pointer_then_by_value() {
         vec![Channel::BaseColor, Channel::Roughness],
         "the channels of its material"
     );
+}
+
+#[test]
+fn height_force_is_set_and_merged() {
+    let project = project();
+    let after = round_trip(&project, Box::new(SetHeightForce::new(SET, 2.5)));
+    assert_eq!(after.texture_sets[0].height_force, 2.5);
+    // Negative or invalid forces become 0.
+    let after = round_trip(&project, Box::new(SetHeightForce::new(SET, -1.0)));
+    assert_eq!(after.texture_sets[0].height_force, 0.0);
+    let after = round_trip(&project, Box::new(SetHeightForce::new(SET, f32::NAN)));
+    assert_eq!(after.texture_sets[0].height_force, 0.0);
+    assert!(
+        SetHeightForce::new(TextureSetId(9), 1.0)
+            .apply(&mut project.clone())
+            .is_err()
+    );
+
+    // A slider drag is one history entry.
+    let mut project = project;
+    let mut history = History::default();
+    for step in 1..5 {
+        history
+            .push(
+                &mut project,
+                Box::new(SetHeightForce::new(SET, step as f32)),
+            )
+            .unwrap();
+    }
+    assert_eq!(history.applied(), 1);
+    assert_eq!(project.texture_sets[0].height_force, 4.0);
+    history.undo(&mut project).unwrap();
+    assert_eq!(project.texture_sets[0].height_force, 1.0);
 }

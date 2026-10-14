@@ -65,9 +65,13 @@ fn stroke(tool: Tool, values: &[(Channel, [f32; 4])], from: [f32; 2], to: [f32; 
             follow_path: false,
             alpha: None,
             material: FillSource::Uniform(values.iter().copied().collect()),
+            pressure: patine_core::stroke::PressureCurves::none(),
+            tilt_angle: false,
+            projection: BrushSnapshot::default_projection(),
         },
         tool,
         camera: camera(),
+        space: patine_core::stroke::StrokeSpace::View,
         symmetry: Symmetry::default(),
         seed: 0,
         dabs: (0..=steps)

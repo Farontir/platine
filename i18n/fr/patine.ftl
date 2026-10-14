@@ -416,3 +416,4 @@ action-brush-softer = Brosse plus douce
 action-brush-harder = Brosse plus dure
 action-layer-new-paint = Nouveau calque de peinture
 menu-paint = Peinture
+command-height-force = Force du relief

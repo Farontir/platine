@@ -13,7 +13,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 
 use crate::channel::Channel;
-use crate::layer::FillSource;
+use crate::layer::{FillSource, Projection, ProjectionKind};
 use crate::resource::ResourceHash;
 
 /// Every stroke of a paint layer or a paint mask effect, oldest first.
@@ -67,6 +67,89 @@ pub enum SizeSpace {
     Object,
 }
 
+/// A response curve: control points `[input, output]` sorted by input, linear between
+/// them, constant beyond the first and the last.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Curve(pub Vec<[f32; 2]>);
+
+impl Curve {
+    /// Output equals input.
+    pub fn identity() -> Self {
+        Self(vec![[0.0, 0.0], [1.0, 1.0]])
+    }
+
+    /// Output `value` whatever the input.
+    pub fn constant(value: f32) -> Self {
+        Self(vec![[0.0, value], [1.0, value]])
+    }
+
+    /// The output at `x` (1 for a curve without points).
+    pub fn evaluate(&self, x: f32) -> f32 {
+        let points = &self.0;
+        let (Some(first), Some(last)) = (points.first(), points.last()) else {
+            return 1.0;
+        };
+        if x <= first[0] {
+            return first[1];
+        }
+        if x >= last[0] {
+            return last[1];
+        }
+        for pair in points.windows(2) {
+            let ([x0, y0], [x1, y1]) = (pair[0], pair[1]);
+            if x <= x1 {
+                let t = if x1 > x0 { (x - x0) / (x1 - x0) } else { 1.0 };
+                return y0 + (y1 - y0) * t;
+            }
+        }
+        last[1]
+    }
+}
+
+/// What the pen pressure changes: factors of the size, the flow and the opacity of each
+/// dab, by pressure (0 to 1).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PressureCurves {
+    /// Factor of the size.
+    pub size: Curve,
+    /// Factor of the flow.
+    pub flow: Curve,
+    /// Factor of the opacity.
+    pub opacity: Curve,
+}
+
+impl Default for PressureCurves {
+    /// The pressure sets the size; flow and opacity stay full.
+    fn default() -> Self {
+        Self {
+            size: Curve::identity(),
+            flow: Curve::constant(1.0),
+            opacity: Curve::constant(1.0),
+        }
+    }
+}
+
+impl PressureCurves {
+    /// The pressure changes nothing.
+    pub fn none() -> Self {
+        Self {
+            size: Curve::constant(1.0),
+            flow: Curve::constant(1.0),
+            opacity: Curve::constant(1.0),
+        }
+    }
+}
+
+/// Where a stroke was painted.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum StrokeSpace {
+    /// In the 3D view: dabs are viewport pixels of the stroke's camera.
+    #[default]
+    View,
+    /// In the 2D view: the stroke's camera maps UVs `(u, v, 0, 1)` to the view's pixels.
+    Uv,
+}
+
 /// Brush settings at the time of the stroke.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BrushSnapshot {
@@ -98,6 +181,23 @@ pub struct BrushSnapshot {
     pub alpha: Option<ResourceHash>,
     /// Painted material: one value per channel, or a procedural material.
     pub material: FillSource,
+    /// What the pen pressure changes.
+    pub pressure: PressureCurves,
+    /// The pen tilt sets the dab angle (added to `angle`).
+    pub tilt_angle: bool,
+    /// Projection of a procedural material.
+    pub projection: Projection,
+}
+
+impl BrushSnapshot {
+    /// Projection of a procedural material by default: triplanar, which needs no UVs and
+    /// shows no seams.
+    pub fn default_projection() -> Projection {
+        Projection {
+            kind: ProjectionKind::Triplanar { blend: 0.5 },
+            ..Projection::default()
+        }
+    }
 }
 
 /// Camera of the viewport when the stroke was painted.
@@ -140,6 +240,8 @@ pub struct Stroke {
     pub tool: Tool,
     /// Camera used.
     pub camera: StrokeCamera,
+    /// Where the stroke was painted (what its camera projects).
+    pub space: StrokeSpace,
     /// Symmetry used.
     pub symmetry: Symmetry,
     /// Seed of the jitters, so that replay is deterministic.
@@ -161,5 +263,31 @@ impl Stroke {
             FillSource::Uniform(values) => values.keys().copied().collect(),
             _ => Vec::new(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn curves_interpolate_and_clamp() {
+        let curve = Curve(vec![[0.2, 0.0], [0.6, 1.0], [1.0, 0.5]]);
+        assert_eq!(curve.evaluate(0.0), 0.0);
+        assert!((curve.evaluate(0.4) - 0.5).abs() < 1e-6);
+        assert!((curve.evaluate(0.8) - 0.75).abs() < 1e-6);
+        assert_eq!(curve.evaluate(2.0), 0.5);
+        assert_eq!(Curve::identity().evaluate(0.3), 0.3);
+        assert_eq!(Curve::constant(0.7).evaluate(0.1), 0.7);
+        assert_eq!(Curve(Vec::new()).evaluate(0.5), 1.0);
+        // A vertical step takes the upper point.
+        assert_eq!(Curve(vec![[0.5, 0.0], [0.5, 1.0]]).evaluate(0.5), 0.0);
+        let none = PressureCurves::none();
+        for pressure in [0.0, 0.5, 1.0] {
+            assert_eq!(none.size.evaluate(pressure), 1.0);
+            assert_eq!(none.flow.evaluate(pressure), 1.0);
+            assert_eq!(none.opacity.evaluate(pressure), 1.0);
+        }
+        assert_eq!(PressureCurves::default().size.evaluate(0.25), 0.25);
     }
 }

@@ -1805,6 +1805,7 @@ impl App {
                                     .to_cols_array_2d(),
                                 viewport: view.size,
                             },
+                            space: patine_core::stroke::StrokeSpace::View,
                             symmetry: patine_core::stroke::Symmetry::default(),
                             seed: 0,
                             dabs: Vec::new(),

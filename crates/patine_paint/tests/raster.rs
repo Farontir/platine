@@ -82,6 +82,9 @@ fn brush(
             ]
             .into(),
         ),
+        pressure: patine_core::stroke::PressureCurves::none(),
+        tilt_angle: false,
+        projection: BrushSnapshot::default_projection(),
     }
 }
 
@@ -105,6 +108,7 @@ fn stroke(camera: StrokeCamera, brush: BrushSnapshot, tool: Tool, points: &[[f32
         brush,
         tool,
         camera,
+        space: patine_core::stroke::StrokeSpace::View,
         symmetry: Symmetry::default(),
         seed: 1,
         dabs,

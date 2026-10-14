@@ -6,8 +6,8 @@ use patine_core::command::Command;
 use patine_core::commands::{
     InsertLayer, InsertMaskEffect, MoveLayer, MoveMaskEffect, PaintStroke, PaintTarget,
     RemoveLayer, RemoveMaskEffect, RenameLayer, RenameTextureSet, SetChannelBlend, SetChannelDef,
-    SetEnvironment, SetFillSource, SetFillValue, SetLayerVisible, SetMask, SetMaskEffect,
-    SetProjection, SetTextureSetResolution,
+    SetEnvironment, SetFillSource, SetFillValue, SetHeightForce, SetLayerVisible, SetMask,
+    SetMaskEffect, SetProjection, SetTextureSetResolution,
 };
 use patine_core::environment::EnvironmentSource;
 use patine_core::ids::LayerId;
@@ -118,6 +118,10 @@ pub enum Op {
         eraser: bool,
         alpha: bool,
     },
+    HeightForce {
+        set: u8,
+        force: f32,
+    },
     Rotation(f32),
     Exposure(f32),
     Source(u8),
@@ -161,6 +165,7 @@ pub fn op() -> impl Strategy<Value = Op> {
             .prop_map(|(layer, triplanar, scale)| Op::Projection { layer, triplanar, scale }),
         3 => (any::<u8>(), any::<u64>(), any::<bool>(), any::<bool>())
             .prop_map(|(target, seed, eraser, alpha)| Op::Stroke { target, seed, eraser, alpha }),
+        1 => (any::<u8>(), -1.0f32..4.0).prop_map(|(set, force)| Op::HeightForce { set, force }),
         2 => (-10.0f32..10.0).prop_map(Op::Rotation),
         2 => (-6.0f32..6.0).prop_map(Op::Exposure),
         1 => any::<u8>().prop_map(Op::Source),
@@ -475,6 +480,10 @@ pub fn command(project: &Project, op: &Op) -> Option<Box<dyn Command>> {
                 name,
             ))
         }
+        Op::HeightForce { set, force } => Box::new(SetHeightForce::new(
+            TextureSetId(u32::from(set % sets)),
+            *force,
+        )),
         Op::Rotation(radians) => Box::new(SetEnvironment::rotation(env, *radians)),
         Op::Exposure(ev) => Box::new(SetEnvironment::exposure(env, *ev)),
         Op::Source(index) => {

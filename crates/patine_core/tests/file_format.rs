@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use common::ops::{command, op};
-use common::rich_project;
+use common::{rich_project, rich_project_v2};
 use patine_core::file::{self, FORMAT_VERSION, FileError};
 use patine_core::layer::{FillSource, LayerKind};
 use patine_core::project::{Project, ValidationError};
@@ -114,19 +114,31 @@ fn the_manifest_is_readable_text_and_holds_no_pixels() {
     );
 }
 
-/// Fixture of format version 1, kept forever: newer builds must keep reading it.
-/// `PATINE_UPDATE_FIXTURES=1` writes it again (only while version 1 is current).
+/// Fixture of format version 1 (written by M3 to M8), kept forever: newer builds must
+/// keep reading it, and its strokes and texture sets come out migrated to the current
+/// types exactly as [`rich_project`] builds them.
 #[test]
 fn version_1_fixture_still_loads() {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../../tests/fixtures/projects/v1_rich.patine");
-    if std::env::var_os("PATINE_UPDATE_FIXTURES").is_some() {
-        assert_eq!(FORMAT_VERSION, 1, "old fixtures are never rewritten");
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        file::save(&rich_project(), &path, None).unwrap();
-    }
     let read = file::load(&path).expect("the v1 fixture loads");
     assert_eq!(read, rich_project());
+}
+
+/// Fixture of format version 2. `PATINE_UPDATE_FIXTURES=1` writes it again, only while
+/// version 2 is current.
+#[test]
+fn version_2_fixture_still_loads() {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../tests/fixtures/projects/v2_rich.patine");
+    if std::env::var_os("PATINE_UPDATE_FIXTURES").is_some() {
+        assert_eq!(FORMAT_VERSION, 2, "old fixtures are never rewritten");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        file::save(&rich_project_v2(), &path, None).unwrap();
+    }
+    let read = file::load(&path).expect("the v2 fixture loads");
+    assert_eq!(read, rich_project_v2());
+    assert_ne!(read, rich_project(), "version 2 adds to the rich project");
 }
 
 #[test]

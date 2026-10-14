@@ -20,7 +20,8 @@ use patine_core::mask::{
 use patine_core::project::{NormalConvention, Project, Resolution, TextureSetId};
 use patine_core::resource::{Resource, ResourceHash, ResourceKind};
 use patine_core::stroke::{
-    BrushSnapshot, Dab, SizeSpace, Stroke, StrokeCamera, StrokeLog, Symmetry, Tool,
+    BrushSnapshot, Curve, Dab, PressureCurves, SizeSpace, Stroke, StrokeCamera, StrokeLog,
+    StrokeSpace, Symmetry, Tool,
 };
 
 use super::{folder, project};
@@ -43,6 +44,10 @@ fn strokes(seed: u64, alpha: ResourceHash) -> Arc<StrokeLog> {
                 follow_path: true,
                 alpha: Some(alpha),
                 material: FillSource::Uniform([(Channel::Roughness, [0.9, 0.0, 0.0, 0.0])].into()),
+                // What a version 1 stroke becomes.
+                pressure: PressureCurves::none(),
+                tilt_angle: false,
+                projection: BrushSnapshot::default_projection(),
             },
             tool: Tool::Eraser,
             camera: StrokeCamera {
@@ -54,6 +59,7 @@ fn strokes(seed: u64, alpha: ResourceHash) -> Arc<StrokeLog> {
                 ],
                 viewport: [1920, 1080],
             },
+            space: StrokeSpace::View,
             symmetry: Symmetry {
                 mirror: [true, false, false],
                 radial: 0,
@@ -316,5 +322,42 @@ pub fn rich_project() -> Project {
     }];
     project.next_id = 16;
     project.validate().expect("the rich project is valid");
+    project
+}
+
+/// [`rich_project`] with what version 2 of the format added: a texture set's height
+/// force, and a stroke painted in UV space with pressure curves, tilt and a procedural
+/// material.
+pub fn rich_project_v2() -> Project {
+    let mut project = rich_project();
+    project.texture_sets[0].height_force = 0.37;
+    let mut found = false;
+    project.texture_sets[0].stack.visit_mut(&mut |layer| {
+        if let LayerKind::Paint { strokes } = &mut layer.kind {
+            let mut stroke = (*strokes.strokes[0]).clone();
+            stroke.space = StrokeSpace::Uv;
+            stroke.seed = 1234;
+            stroke.brush.pressure = PressureCurves {
+                size: Curve(vec![[0.0, 0.2], [0.6, 0.9], [1.0, 1.0]]),
+                flow: Curve::identity(),
+                opacity: Curve::constant(0.75),
+            };
+            stroke.brush.tilt_angle = true;
+            stroke.brush.material = FillSource::Procedural(ProceduralRef {
+                id: "material.copper".into(),
+                version: 1,
+                params: [("oxidation".to_owned(), ParamValue::Float(0.4))].into(),
+            });
+            stroke.brush.projection = Projection {
+                kind: ProjectionKind::Spherical,
+                scale: [3.0, 1.5],
+                rotation: 0.2,
+                offset: [0.1, 0.0],
+            };
+            Arc::make_mut(strokes).strokes.push(Arc::new(stroke));
+            found = true;
+        }
+    });
+    assert!(found, "the rich project has a paint layer");
     project
 }

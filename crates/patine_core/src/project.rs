@@ -90,6 +90,9 @@ pub enum NormalConvention {
     DirectX,
 }
 
+/// Height force of new texture sets.
+pub const DEFAULT_HEIGHT_FORCE: f32 = 1.0;
+
 /// Textures painted for one material of the mesh.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TextureSet {
@@ -103,6 +106,9 @@ pub struct TextureSet {
     pub resolution: Resolution,
     /// Active channels.
     pub channels: Vec<ChannelDef>,
+    /// Strength of the relief the height channel adds to the shading normal (see
+    /// [`DEFAULT_HEIGHT_FORCE`]).
+    pub height_force: f32,
     /// Maps baked from the high-poly mesh.
     pub baked_maps: BakedMaps,
     /// Layers.
@@ -167,6 +173,9 @@ pub enum ValidationError {
     /// A channel is listed twice in a texture set.
     #[error("texture set {0} lists a channel twice")]
     DuplicateChannel(u32),
+    /// A texture set's height force is negative or not finite.
+    #[error("texture set {0} has an invalid height force")]
+    HeightForce(u32),
     /// Two nodes share an identifier.
     #[error("identifier {0} is used twice")]
     DuplicateId(u64),
@@ -208,6 +217,7 @@ impl Project {
                     material_index: index,
                     resolution: settings.resolution,
                     channels: default_channels(),
+                    height_force: DEFAULT_HEIGHT_FORCE,
                     baked_maps: BakedMaps::default(),
                     stack: LayerStack::default(),
                 }
@@ -329,6 +339,9 @@ impl Project {
             let channels: HashSet<_> = set.channels.iter().map(|def| def.channel).collect();
             if channels.len() != set.channels.len() {
                 return Err(ValidationError::DuplicateChannel(set.id.0));
+            }
+            if !(set.height_force.is_finite() && set.height_force >= 0.0) {
+                return Err(ValidationError::HeightForce(set.id.0));
             }
         }
 

@@ -113,6 +113,63 @@ impl Command for SetTextureSetResolution {
     }
 }
 
+/// Changes the height force of a texture set. Successive changes of the same texture set
+/// merge (a slider drag).
+#[derive(Debug)]
+pub struct SetHeightForce {
+    id: TextureSetId,
+    /// New force before `apply`, old one after.
+    force: f32,
+    applied: Applied,
+}
+
+impl SetHeightForce {
+    /// Sets the height force of the texture set `id` (negative values become 0).
+    pub fn new(id: TextureSetId, force: f32) -> Self {
+        Self {
+            id,
+            force: if force.is_finite() {
+                force.max(0.0)
+            } else {
+                0.0
+            },
+            applied: Applied::default(),
+        }
+    }
+
+    fn swap(&mut self, project: &mut Project, applied: bool) -> Result<(), CommandError> {
+        let set = texture_set(project, self.id)?;
+        self.applied.set(applied)?;
+        std::mem::swap(&mut set.height_force, &mut self.force);
+        Ok(())
+    }
+}
+
+impl Command for SetHeightForce {
+    fn apply(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        self.swap(project, true)
+    }
+
+    fn revert(&mut self, project: &mut Project) -> Result<(), CommandError> {
+        self.swap(project, false)
+    }
+
+    fn label(&self) -> Label {
+        Label::new("command-height-force")
+    }
+
+    fn merge(&mut self, next: &dyn Command) -> bool {
+        // `self` holds the force from before the gesture.
+        next.as_any()
+            .downcast_ref::<SetHeightForce>()
+            .is_some_and(|next| next.id == self.id)
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 /// What a [`SetChannelDef`] did, known once applied.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ChannelChange {

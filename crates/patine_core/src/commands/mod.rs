@@ -18,7 +18,7 @@ pub use layers::{
 };
 pub use masks::{InsertMaskEffect, MoveMaskEffect, RemoveMaskEffect, SetMask, SetMaskEffect};
 pub use paint::{PaintStroke, PaintTarget};
-pub use texture_set::{RenameTextureSet, SetChannelDef, SetTextureSetResolution};
+pub use texture_set::{RenameTextureSet, SetChannelDef, SetHeightForce, SetTextureSetResolution};
 
 use crate::command::CommandError;
 
