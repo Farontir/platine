@@ -256,6 +256,10 @@ fn paint_live(
     target: PaintTarget,
     stroke: &Stroke,
     batch: usize,
+    alpha: Option<(
+        patine_core::resource::ResourceHash,
+        patine_core::resource::Resource,
+    )>,
 ) {
     document
         .begin_stroke(
@@ -268,6 +272,7 @@ fn paint_live(
                 dabs: Vec::new(),
                 ..stroke.clone()
             },
+            alpha.as_ref().map(|(_, resource)| resource),
         )
         .expect("a paint target");
     for dabs in stroke.dabs.chunks(batch) {
@@ -281,7 +286,7 @@ fn paint_live(
         .history
         .push(
             &mut scene.project,
-            Box::new(PaintStroke::new(target, painted, None, "paint")),
+            Box::new(PaintStroke::new(target, painted, alpha, "paint")),
         )
         .expect("the stroke goes into the log");
     document.sync(ctx, pool, compositor, &scene.project);
@@ -310,7 +315,7 @@ gpu_test!(
             ),
         ];
         for (target, stroke) in &strokes {
-            paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, *target, stroke, 5);
+            paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, *target, stroke, 5, None);
         }
         let set = &scene.project.texture_sets[0];
         let size = set.resolution.pixels() as usize;
@@ -391,8 +396,15 @@ gpu_test!(
                 stroke(Tool::Brush, &[(MASK_VALUE_CHANNEL, [0.8; 4])], [50.0, 200.0], [210.0, 50.0]),
             ),
         ] {
-            paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, target, &stroke, batch);
+            paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, target, &stroke, batch, None);
         }
+        // A stroke with an alpha, which only reaches the project with its command.
+        let (hash, resource) = patine_paint::alphas::find("alpha.splatter").expect("shipped").resource();
+        let mut splatter = stroke(Tool::Brush, &red(), [60.0, 120.0], [200.0, 120.0]);
+        splatter.brush.alpha = Some(hash);
+        splatter.brush.size = 50.0;
+        let target = PaintTarget::Layer(scene.paint);
+        paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, target, &splatter, 3, Some((hash, resource)));
         let live = finals(&ctx, &pool, &document);
 
         let path = std::env::temp_dir().join(format!("patine-paint-{}.patine", std::process::id()));
@@ -423,7 +435,7 @@ gpu_test!(
         document.sync(&ctx, &mut pool, &compositor, &scene.project);
         let before = finals(&ctx, &pool, &document);
         let target = PaintTarget::Layer(scene.paint);
-        paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, target, &stroke(Tool::Brush, &red(), [40.0, 90.0], [210.0, 140.0]), 4);
+        paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, target, &stroke(Tool::Brush, &red(), [40.0, 90.0], [210.0, 140.0]), 4, None);
         let after = finals(&ctx, &pool, &document);
         assert_ne!(before, after);
         assert_eq!(document.paints().replays(), 0, "the live stroke is adopted, not replayed");
@@ -446,16 +458,16 @@ gpu_test!(
         let fill = scene.project.texture_sets[0].stack.layers[0].id;
         let any = stroke(Tool::Brush, &red(), [0.0, 0.0], [1.0, 1.0]);
         assert_eq!(
-            document.begin_stroke(&ctx, &mut pool, &compositor, &scene.project, PaintTarget::Layer(fill), any.clone()),
+            document.begin_stroke(&ctx, &mut pool, &compositor, &scene.project, PaintTarget::Layer(fill), any.clone(), None),
             Err(PaintError::NotPaintable)
         );
         let metal = stroke(Tool::Brush, &[(Channel::Metallic, [1.0; 4])], [0.0, 0.0], [1.0, 1.0]);
         assert_eq!(
-            document.begin_stroke(&ctx, &mut pool, &compositor, &scene.project, target, metal),
+            document.begin_stroke(&ctx, &mut pool, &compositor, &scene.project, target, metal, None),
             Err(PaintError::NoChannel)
         );
         // A cancelled stroke leaves nothing.
-        document.begin_stroke(&ctx, &mut pool, &compositor, &scene.project, target, any).expect("paintable");
+        document.begin_stroke(&ctx, &mut pool, &compositor, &scene.project, target, any, None).expect("paintable");
         assert_eq!(document.painting(), Some(target));
         let dabs = stroke(Tool::Brush, &red(), [40.0, 90.0], [210.0, 140.0]).dabs;
         assert!(document.paint(&ctx, &mut pool, &compositor, &scene.project, &dabs));
@@ -476,9 +488,9 @@ gpu_test!(
         let mut scene = scene();
         document.sync(&ctx, &mut pool, &compositor, &scene.project);
         let target = PaintTarget::Layer(scene.paint);
-        paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, target, &stroke(Tool::Brush, &red(), [40.0, 90.0], [210.0, 140.0]), 8);
+        paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, target, &stroke(Tool::Brush, &red(), [40.0, 90.0], [210.0, 140.0]), 8, None);
         let first = finals(&ctx, &pool, &document);
-        paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, target, &stroke(Tool::Brush, &red(), [60.0, 200.0], [200.0, 60.0]), 8);
+        paint_live(&ctx, &mut pool, &compositor, &mut document, &mut scene, target, &stroke(Tool::Brush, &red(), [60.0, 200.0], [200.0, 60.0]), 8, None);
         assert!(pool.evicted() > 0);
         scene.history.undo(&mut scene.project).expect("undo");
         document.sync(&ctx, &mut pool, &compositor, &scene.project);

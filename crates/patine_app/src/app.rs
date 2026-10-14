@@ -41,6 +41,7 @@ use crate::new_project::{CreatedProject, NewProjectDialog};
 use crate::profiling::Profiler;
 use crate::project_io::{self, FileJobs, JobResult};
 use crate::ui::{self, FrameInfo, UiState, UnsavedChoice};
+use crate::viewport_panel::PaintEvent;
 
 /// Everything that only exists while the window is open.
 struct Graphics {
@@ -268,6 +269,16 @@ enum PendingAction {
     Quit,
 }
 
+/// A stroke being painted: its sampler, when it started, where it goes, the image of
+/// its alpha and the name of its layer (for the history).
+struct StrokeInProgress {
+    sampler: patine_paint::sampler::StrokeSampler,
+    start: Instant,
+    target: patine_core::commands::PaintTarget,
+    alpha: Option<(ResourceHash, patine_core::resource::Resource)>,
+    name: String,
+}
+
 /// Application state.
 pub struct App {
     logs: LogBuffer,
@@ -306,6 +317,8 @@ pub struct App {
     document_generation: u64,
     /// Projects left by crashed sessions, still to propose for recovery.
     orphans: Vec<Orphan>,
+    /// The stroke being painted.
+    stroke: Option<StrokeInProgress>,
 }
 
 /// Opens the main window and runs until it is closed.
@@ -342,6 +355,7 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
         autosaver: None,
         document_generation: 0,
         orphans: Vec::new(),
+        stroke: None,
     };
     // Captures show the application as configured, without recovery prompts, unless an
     // autosave folder is given explicitly (to capture the recovery dialog).
@@ -642,6 +656,46 @@ impl App {
                             layer.name.clone(),
                         ))
                     }
+                    StartupEdit::PaintLayer => {
+                        let Some(set) = document.project.texture_set(self.ui.texture_sets.selected)
+                        else {
+                            continue;
+                        };
+                        let insert = crate::layers_panel::new_paint(
+                            &self.i18n,
+                            &document.project,
+                            set,
+                            self.ui.layers.selected,
+                        );
+                        self.ui.layers.selected = Some(LayerId(document.project.next_id));
+                        self.ui.layers.part = crate::masks::LayerPart::Content;
+                        Box::new(insert)
+                    }
+                    StartupEdit::MaskPaint => {
+                        let Some(layer) = self.ui.layers.selected.and_then(|id| {
+                            document
+                                .project
+                                .texture_sets
+                                .iter()
+                                .find_map(|set| set.stack.find(id))
+                        }) else {
+                            continue;
+                        };
+                        let Some(insert) = crate::masks::insert_effect(
+                            &document.project,
+                            layer,
+                            patine_core::mask::MaskEffect::paint(),
+                            patine_core::layer::BlendMode::Normal,
+                            1.0,
+                            None,
+                        ) else {
+                            continue;
+                        };
+                        self.ui.layers.part = crate::masks::LayerPart::MaskEffect(
+                            patine_core::ids::EffectId(document.project.next_id),
+                        );
+                        Box::new(insert)
+                    }
                     StartupEdit::Mask(white) => {
                         let Some(layer) = self.ui.layers.selected.and_then(|id| {
                             document
@@ -734,6 +788,46 @@ impl App {
                 document.history.seal();
             }
         }
+        if let Some(eraser) = options.eraser {
+            self.ui.tool.tool = if eraser {
+                crate::paint_tool::Tool::Eraser
+            } else {
+                crate::paint_tool::Tool::Brush
+            };
+        }
+        for option in &options.brush {
+            use crate::cli::BrushOption;
+            let tool = &mut self.ui.tool;
+            match option {
+                BrushOption::Size(v) => tool.size = *v,
+                BrushOption::Flow(v) => tool.flow = *v,
+                BrushOption::Opacity(v) => tool.opacity = *v,
+                BrushOption::Hardness(v) => tool.hardness = *v,
+                BrushOption::Spacing(v) => tool.spacing = *v,
+                BrushOption::Angle(v) => tool.angle = v.to_radians(),
+                BrushOption::Smoothing(v) => tool.smoothing = *v,
+                BrushOption::MaskValue(v) => tool.mask_value = *v,
+                BrushOption::Alpha(id) => {
+                    tool.alpha = match id {
+                        None => None,
+                        Some(id) => match patine_paint::alphas::find(id) {
+                            Some(alpha) => Some(alpha.id),
+                            None => anyhow::bail!("unknown alpha {id}"),
+                        },
+                    };
+                }
+                BrushOption::Color([r, g, b]) => tool.set_channel(
+                    &ChannelDef::standard(Channel::BaseColor),
+                    Some([*r, *g, *b, 1.0]),
+                ),
+                BrushOption::Scalar(channel, v) => {
+                    tool.set_channel(&ChannelDef::standard(*channel), Some([*v; 4]));
+                }
+                BrushOption::Off(channel) => {
+                    tool.set_channel(&ChannelDef::standard(*channel), None);
+                }
+            }
+        }
         for panel in &options.tabs {
             if let Some(path) = self.ui.dock.find_tab(panel) {
                 // The path was just found in the same dock state.
@@ -804,6 +898,7 @@ impl App {
             orthographic: view.camera.projection == Projection::Orthographic,
             wireframe: view.settings.wireframe,
             shadows: view.settings.shadows,
+            eraser: self.ui.tool.tool == crate::paint_tool::Tool::Eraser,
         }
     }
 
@@ -1075,6 +1170,10 @@ impl App {
             gfx.materials.clear();
         }
         self.ui.view.hovered = None;
+        self.ui.view.hovered_point = None;
+        self.ui.view.painting = false;
+        self.ui.view.paint_events.clear();
+        self.stroke = None;
         // Framed at the next render, when the panel size is known.
         self.ui.view.frame_pending = true;
         self.ui.texture_sets = Default::default();
@@ -1309,6 +1408,31 @@ impl App {
                     view.settings.display = DisplayMode::Channel;
                 }
             }
+            ActionId::NewPaintLayer => {
+                let Some(document) = &mut self.document else {
+                    return;
+                };
+                let Some(set) = document.project.texture_set(self.ui.texture_sets.selected) else {
+                    return;
+                };
+                let insert = crate::layers_panel::new_paint(
+                    &self.i18n,
+                    &document.project,
+                    set,
+                    self.ui.layers.selected,
+                );
+                self.ui.layers.selected = Some(LayerId(document.project.next_id));
+                self.ui.layers.part = crate::masks::LayerPart::Content;
+                document.history.seal();
+                document.execute(Box::new(insert));
+                document.history.seal();
+            }
+            ActionId::ToolBrush => self.ui.tool.tool = crate::paint_tool::Tool::Brush,
+            ActionId::ToolEraser => self.ui.tool.tool = crate::paint_tool::Tool::Eraser,
+            ActionId::BrushSmaller => self.ui.tool.scale_size(1.0 / 1.25),
+            ActionId::BrushLarger => self.ui.tool.scale_size(1.25),
+            ActionId::BrushSofter => self.ui.tool.add_hardness(-0.1),
+            ActionId::BrushHarder => self.ui.tool.add_hardness(0.1),
             ActionId::Undo => {
                 if let Some(document) = &mut self.document {
                     document.undo();
@@ -1630,6 +1754,144 @@ impl App {
             }
             None => {}
         }
+
+        // Strokes given on the command line, once the view has settled.
+        if !view.frame_pending && view.texture.is_some() && !self.startup.strokes.is_empty() {
+            for points in std::mem::take(&mut self.startup.strokes) {
+                let mut events = points.iter().map(|p| PaintEvent::Move(*p));
+                if let Some(first) = points.first() {
+                    view.paint_events.push(PaintEvent::Press(*first));
+                    events.next();
+                }
+                view.paint_events.extend(events);
+                view.paint_events.push(PaintEvent::Release);
+            }
+            gfx.window.request_redraw();
+        }
+        // Painting gestures of this frame, on the synced document.
+        let mut finished = None;
+        if let Some(document) = &self.document {
+            let project = &document.project;
+            for event in std::mem::take(&mut view.paint_events) {
+                match event {
+                    PaintEvent::Press(position) => {
+                        let Some(set) = project.texture_set(self.ui.texture_sets.selected) else {
+                            continue;
+                        };
+                        let Some(target) = crate::paint_tool::paint_target(
+                            set,
+                            Some(self.ui.layers.part),
+                            self.ui.layers.selected,
+                        ) else {
+                            view.notice = Some((
+                                self.i18n.tr("paint-not-paintable").into_owned(),
+                                self.egui_ctx.input(|input| input.time),
+                            ));
+                            continue;
+                        };
+                        let (brush, tool, alpha) = self.ui.tool.snapshot(set, target);
+                        let stroke = patine_core::stroke::Stroke {
+                            brush,
+                            tool,
+                            camera: patine_core::stroke::StrokeCamera {
+                                view_proj: view
+                                    .camera
+                                    .view_projection(view.aspect())
+                                    .to_cols_array_2d(),
+                                viewport: view.size,
+                            },
+                            symmetry: patine_core::stroke::Symmetry::default(),
+                            seed: 0,
+                            dabs: Vec::new(),
+                        };
+                        let started = gfx.gpu_document.begin_stroke(
+                            &gfx.gpu,
+                            &mut gfx.pool,
+                            &gfx.compositor,
+                            project,
+                            target,
+                            stroke,
+                            alpha.as_ref().map(|(_, resource)| resource),
+                        );
+                        match started {
+                            Ok(()) => {
+                                let mut sampler = patine_paint::sampler::StrokeSampler::new(
+                                    self.ui.tool.sampler(),
+                                );
+                                let dabs = sampler.push(position, 1.0, 0.0);
+                                gfx.gpu_document.paint(
+                                    &gfx.gpu,
+                                    &mut gfx.pool,
+                                    &gfx.compositor,
+                                    project,
+                                    &dabs,
+                                );
+                                let name = set
+                                    .stack
+                                    .find(target.layer())
+                                    .map(|layer| layer.name.clone())
+                                    .unwrap_or_default();
+                                self.stroke = Some(StrokeInProgress {
+                                    sampler,
+                                    start: Instant::now(),
+                                    target,
+                                    alpha,
+                                    name,
+                                });
+                            }
+                            Err(error) => {
+                                let key = match error {
+                                    patine_compositor::gpu_document::PaintError::NoChannel => {
+                                        "paint-no-channel"
+                                    }
+                                    _ => "paint-not-paintable",
+                                };
+                                tracing::debug!(%error, "stroke refused");
+                                view.notice = Some((
+                                    self.i18n.tr(key).into_owned(),
+                                    self.egui_ctx.input(|input| input.time),
+                                ));
+                            }
+                        }
+                    }
+                    PaintEvent::Move(position) => {
+                        if let Some(stroke) = &mut self.stroke {
+                            let time = stroke.start.elapsed().as_secs_f32();
+                            let dabs = stroke.sampler.push(position, 1.0, time);
+                            if !dabs.is_empty() {
+                                gfx.gpu_document.paint(
+                                    &gfx.gpu,
+                                    &mut gfx.pool,
+                                    &gfx.compositor,
+                                    project,
+                                    &dabs,
+                                );
+                            }
+                        }
+                    }
+                    PaintEvent::Release => {
+                        if let Some(stroke) = self.stroke.take()
+                            && let Some(painted) =
+                                gfx.gpu_document.end_stroke(&mut gfx.pool, &gfx.compositor)
+                        {
+                            finished = Some(patine_core::commands::PaintStroke::new(
+                                stroke.target,
+                                painted,
+                                stroke.alpha,
+                                stroke.name,
+                            ));
+                        }
+                    }
+                }
+            }
+        } else {
+            view.paint_events.clear();
+        }
+        if let (Some(command), Some(document)) = (finished, self.document.as_mut()) {
+            document.history.seal();
+            document.execute(Box::new(command));
+            document.history.seal();
+        }
         let scene = Scene {
             mesh: gfx.gpu_mesh.as_ref(),
             materials: (!gfx.materials.is_empty()).then_some(gfx.materials.as_slice()),
@@ -1644,7 +1906,48 @@ impl App {
         // new one is sent for the current cursor position.
         if let Some(result) = gfx.viewport.poll_pick(&gfx.gpu) {
             view.hovered = result.triangle;
+            view.hovered_point = match (result.triangle, result.position, &self.document) {
+                (Some(triangle), Some(position), Some(document)) => {
+                    let mesh = &document.project.mesh;
+                    mesh.triangles.get(triangle as usize).map(|corners| {
+                        let [a, b, c] =
+                            corners.map(|v| glam::Vec3::from(mesh.positions[v as usize]));
+                        crate::paint_tool::SurfacePoint {
+                            position: glam::Vec3::new(position.x, position.y, position.z),
+                            normal: (b - a).cross(c - a).normalize_or(glam::Vec3::Y),
+                        }
+                    })
+                }
+                _ => None,
+            };
         }
+        // The brush cursor, at the size of the brush, gray when nothing can be painted.
+        view.cursor = match (view.hovered_point, &self.document) {
+            (Some(point), Some(document)) if view.hover_pixel.is_some() => {
+                let paintable = document
+                    .project
+                    .texture_set(self.ui.texture_sets.selected)
+                    .and_then(|set| {
+                        crate::paint_tool::paint_target(
+                            set,
+                            Some(self.ui.layers.part),
+                            self.ui.layers.selected,
+                        )
+                    })
+                    .is_some();
+                let view_proj = view.camera.view_projection(view.aspect());
+                let right = view.camera.view().row(0).truncate();
+                let outline = crate::paint_tool::cursor_outline(
+                    glam::Mat4::from_cols_array_2d(&view_proj.to_cols_array_2d()),
+                    view.size,
+                    point,
+                    self.ui.tool.size * 0.5,
+                    glam::Vec3::new(right.x, right.y, right.z),
+                );
+                Some((outline, paintable))
+            }
+            _ => None,
+        };
         match view.hover_pixel {
             Some(pixel) if scene.mesh.is_some() => {
                 let key = (pixel, view.size, view.camera);
@@ -1666,6 +1969,7 @@ impl App {
             }
             _ => {
                 view.hovered = None;
+                view.hovered_point = None;
                 gfx.last_pick = None;
             }
         }

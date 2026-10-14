@@ -376,3 +376,43 @@ option-y = Y
 command-paint-stroke = Trait sur « { $name } »
 command-paint-mask-stroke = Trait sur le masque de « { $name } »
 command-erase-stroke = Gomme sur « { $name } »
+
+## Painting in the interface
+paint-heading = Brosse
+tool-brush = Brosse
+tool-eraser = Gomme
+brush-strokes = { $count ->
+        [0] Aucun trait
+        [one] Un trait
+       *[other] { $count } traits
+    }
+brush-size = Taille (px)
+brush-flow = Flux
+brush-opacity = Opacité
+brush-hardness = Dureté
+brush-spacing = Espacement
+brush-angle = Angle (°)
+brush-smoothing = Lissage (px)
+brush-alpha = Alpha
+alpha-round = Rond
+alpha-square = Carré
+alpha-splatter = Éclaboussure
+alpha-grain = Grain
+alpha-chisel = Biseau
+brush-mask-value = Valeur peinte dans le masque
+brush-channels = Canaux peints
+brush-normal-flat = normale à plat
+paint-not-paintable = Sélectionnez un calque de peinture, ou un effet de peinture d'un masque.
+paint-no-channel = La brosse ne peint aucun canal de ce calque.
+layers-new-paint = Peinture
+layers-new-paint-name = Calque de peinture { $number }
+mask-add-paint = Ajouter de la peinture
+mask-effect-paint = Peinture
+action-tool-brush = Brosse
+action-tool-eraser = Gomme
+action-brush-smaller = Brosse plus petite
+action-brush-larger = Brosse plus grande
+action-brush-softer = Brosse plus douce
+action-brush-harder = Brosse plus dure
+action-layer-new-paint = Nouveau calque de peinture
+menu-paint = Peinture

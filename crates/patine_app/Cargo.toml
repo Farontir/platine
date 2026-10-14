@@ -23,6 +23,7 @@ patine_bake.workspace = true
 patine_export.workspace = true
 patine_assets.workspace = true
 anyhow.workspace = true
+glam.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

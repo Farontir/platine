@@ -1043,7 +1043,9 @@ impl GpuDocument {
 
     /// Starts painting `stroke` (its dabs are ignored: they come with
     /// [`GpuDocument::paint`]) into `target`, a paint layer or a paint mask effect of
-    /// `project`, which must have been synced.
+    /// `project`, which must have been synced. `alpha` is the image of the stroke's
+    /// alpha when the project does not hold it yet (its command will add it).
+    #[allow(clippy::too_many_arguments)]
     pub fn begin_stroke(
         &mut self,
         ctx: &GpuContext,
@@ -1052,6 +1054,7 @@ impl GpuDocument {
         project: &Project,
         target: PaintTarget,
         stroke: Stroke,
+        alpha: Option<&patine_core::resource::Resource>,
     ) -> Result<(), PaintError> {
         if self.live.is_some() {
             return Err(PaintError::AlreadyPainting);
@@ -1091,6 +1094,9 @@ impl GpuDocument {
         }
         let size = set.resolution.pixels();
         let geometry = self.paints.geometry(&project.mesh, set);
+        if let (Some(hash), Some(resource)) = (stroke.brush.alpha, alpha) {
+            self.paints.provide_alpha(hash, resource);
+        }
         let alpha = self.paints.alpha(project, &stroke);
         let mut encoder = ctx.device.create_command_encoder(&Default::default());
         self.refresh_set(ctx, pool, compositor, &mut encoder, project, set);

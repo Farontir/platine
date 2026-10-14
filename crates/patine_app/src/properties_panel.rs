@@ -1,7 +1,8 @@
 //! Properties panel: the selected layer. For a uniform fill, each channel of the texture
 //! set with its activation, its value, its blend mode and its opacity; for a folder, the
 //! blend of each channel. When its mask or a mask effect is selected, their editors
-//! (see [`crate::masks`]).
+//! (see [`crate::masks`]). When the selection can be painted (a paint layer or a paint
+//! mask effect), the brush comes first (see [`crate::paint_tool`]).
 //!
 //! The panel never writes into the project: it returns commands.
 
@@ -19,6 +20,7 @@ use crate::document::channel_name;
 use crate::i18n::I18n;
 use crate::layers_panel::{LayersOutput, blend_editor};
 use crate::masks::{self, LayerPart};
+use crate::paint_tool::{ToolState, brush_section, paint_target};
 use crate::procedural_ui::{params_editor, projection_editor};
 
 /// Editor of a fill value: a color, a slider, or the tilt of a normal.
@@ -126,7 +128,9 @@ fn procedural_section(
     ui.separator();
 }
 
-/// Draws the panel for the layer `selected` of texture set `set`.
+/// Draws the panel for the layer `selected` of texture set `set`, with the brush `tool`
+/// when the selection can be painted.
+#[allow(clippy::too_many_arguments)]
 pub fn show(
     ui: &mut Ui,
     i18n: &I18n,
@@ -134,6 +138,7 @@ pub fn show(
     set: TextureSetId,
     selected: Option<LayerId>,
     part: LayerPart,
+    tool: &mut ToolState,
 ) -> LayersOutput {
     let mut output = LayersOutput::default();
     let found = project.and_then(|p| p.texture_set(set)).and_then(|set| {
@@ -147,6 +152,16 @@ pub fn show(
         });
         return output;
     };
+    if let Some(target) = paint_target(set, Some(part), selected) {
+        ui.heading(format!(
+            "{} {}",
+            egui_phosphor::regular::PAINT_BRUSH,
+            i18n.tr("paint-heading")
+        ));
+        output.seal |= brush_section(ui, i18n, tool, set, target);
+        ui.add_space(6.0);
+        ui.separator();
+    }
     match part {
         LayerPart::Mask => {
             ui.label(RichText::new(&layer.name).weak());

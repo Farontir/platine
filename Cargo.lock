@@ -2352,6 +2352,7 @@ dependencies = [
  "egui_dock",
  "fluent-bundle",
  "fluent-syntax",
+ "glam",
  "image",
  "patine_assets",
  "patine_bake",

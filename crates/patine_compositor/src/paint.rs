@@ -21,7 +21,7 @@ use patine_core::layer::{FillSource, Layer, LayerKind};
 use patine_core::mask::{MASK_VALUE_CHANNEL, MaskEffect};
 use patine_core::mesh::MeshAsset;
 use patine_core::project::{Project, TextureSet, TextureSetId};
-use patine_core::resource::ResourceHash;
+use patine_core::resource::{Resource, ResourceHash};
 use patine_core::stroke::{Stroke, StrokeLog};
 use patine_gpu::pool::{Residency, TextureId, TexturePool, texture_bytes};
 use patine_gpu::{GpuContext, wgpu};
@@ -242,29 +242,38 @@ impl PaintRasters {
         self.geometry[&set.id].2.clone()
     }
 
-    /// The decoded alpha of `stroke`, from the project's resources; `None` for a round
-    /// dab, or (with a warning, once) for an alpha that is missing or unreadable.
-    pub(crate) fn alpha(&mut self, project: &Project, stroke: &Stroke) -> Option<AlphaImage> {
-        let hash = stroke.brush.alpha?;
+    /// Decodes and keeps `resource` as the alpha `hash` (an alpha a stroke uses before
+    /// its command brings it into the project).
+    pub(crate) fn provide_alpha(&mut self, hash: ResourceHash, resource: &Resource) {
         self.alphas
             .entry(hash)
-            .or_insert_with(|| {
-                let decoded = project
-                    .resources
-                    .get(&hash)
-                    .ok_or_else(|| "missing from the project".to_owned())
-                    .and_then(|resource| {
-                        alphas::decode(&resource.bytes).map_err(|error| error.to_string())
-                    });
-                match decoded {
-                    Ok(image) => Some(image),
-                    Err(error) => {
-                        tracing::warn!(%hash, %error, "brush alpha unusable: round dabs instead");
-                        None
-                    }
-                }
-            })
-            .clone()
+            .or_insert_with(|| Self::decode(hash, resource));
+    }
+
+    fn decode(hash: ResourceHash, resource: &Resource) -> Option<AlphaImage> {
+        match alphas::decode(&resource.bytes) {
+            Ok(image) => Some(image),
+            Err(error) => {
+                tracing::warn!(%hash, %error, "brush alpha unreadable: round dabs instead");
+                None
+            }
+        }
+    }
+
+    /// The decoded alpha of `stroke`, from the project's resources (or provided); `None`
+    /// for a round dab, or for an alpha that is missing (with a warning) or unreadable.
+    pub(crate) fn alpha(&mut self, project: &Project, stroke: &Stroke) -> Option<AlphaImage> {
+        let hash = stroke.brush.alpha?;
+        if let Some(decoded) = self.alphas.get(&hash) {
+            return decoded.clone();
+        }
+        let Some(resource) = project.resources.get(&hash) else {
+            tracing::warn!(%hash, "brush alpha missing from the project: round dabs instead");
+            return None;
+        };
+        let decoded = Self::decode(hash, resource);
+        self.alphas.insert(hash, decoded.clone());
+        decoded
     }
 
     /// Makes sure `target` has a content for each of `channels` (allocated empty).

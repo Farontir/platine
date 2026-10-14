@@ -376,3 +376,43 @@ option-y = Y
 command-paint-stroke = Stroke on “{ $name }”
 command-paint-mask-stroke = Stroke on the mask of “{ $name }”
 command-erase-stroke = Erase on “{ $name }”
+
+## Painting in the interface
+paint-heading = Brush
+tool-brush = Brush
+tool-eraser = Eraser
+brush-strokes = { $count ->
+        [0] No stroke
+        [one] One stroke
+       *[other] { $count } strokes
+    }
+brush-size = Size (px)
+brush-flow = Flow
+brush-opacity = Opacity
+brush-hardness = Hardness
+brush-spacing = Spacing
+brush-angle = Angle (°)
+brush-smoothing = Smoothing (px)
+brush-alpha = Alpha
+alpha-round = Round
+alpha-square = Square
+alpha-splatter = Splatter
+alpha-grain = Grain
+alpha-chisel = Chisel
+brush-mask-value = Value painted into the mask
+brush-channels = Painted channels
+brush-normal-flat = flat normal
+paint-not-paintable = Select a paint layer, or a paint effect of a mask.
+paint-no-channel = The brush paints no channel of this layer.
+layers-new-paint = Paint
+layers-new-paint-name = Paint layer { $number }
+mask-add-paint = Add paint
+mask-effect-paint = Paint
+action-tool-brush = Brush
+action-tool-eraser = Eraser
+action-brush-smaller = Smaller brush
+action-brush-larger = Larger brush
+action-brush-softer = Softer brush
+action-brush-harder = Harder brush
+action-layer-new-paint = New paint layer
+menu-paint = Paint

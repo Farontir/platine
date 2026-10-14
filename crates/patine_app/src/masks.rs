@@ -51,17 +51,25 @@ pub enum NewEffect {
     Levels,
     /// Inversion.
     Invert,
+    /// Paint (no stroke yet).
+    Paint,
 }
 
 impl NewEffect {
     /// Every effect, in menu order.
-    pub const ALL: [NewEffect; 3] = [NewEffect::Fill, NewEffect::Levels, NewEffect::Invert];
+    pub const ALL: [NewEffect; 4] = [
+        NewEffect::Paint,
+        NewEffect::Fill,
+        NewEffect::Levels,
+        NewEffect::Invert,
+    ];
 
     fn effect(self) -> MaskEffect {
         match self {
             NewEffect::Fill => MaskEffect::uniform(1.0),
             NewEffect::Levels => MaskEffect::Levels(LevelsParams::default()),
             NewEffect::Invert => MaskEffect::invert(),
+            NewEffect::Paint => MaskEffect::paint(),
         }
     }
 
@@ -70,6 +78,7 @@ impl NewEffect {
             NewEffect::Fill => "mask-add-fill",
             NewEffect::Levels => "mask-add-levels",
             NewEffect::Invert => "mask-add-invert",
+            NewEffect::Paint => "mask-add-paint",
         }
     }
 }
@@ -96,6 +105,7 @@ fn effect_label_key(effect: &MaskEffect) -> (&'static str, &str) {
             icons::CLOUD,
             library::find(&procedural.id).map_or("mask-effect-fill", |def| def.name_key.as_str()),
         ),
+        MaskEffect::Paint { .. } => (icons::PAINT_BRUSH, "mask-effect-paint"),
         MaskEffect::Fill { .. } => (icons::PAINT_BUCKET, "mask-effect-fill"),
         MaskEffect::Levels(_) => (icons::SLIDERS_HORIZONTAL, "mask-effect-levels"),
         MaskEffect::Filter {
@@ -591,7 +601,9 @@ pub fn effect_properties(
 }
 
 /// Every translation key of the masks, for tests.
-pub const TRANSLATION_KEYS: [&str; 32] = [
+pub const TRANSLATION_KEYS: [&str; 34] = [
+    "mask-add-paint",
+    "mask-effect-paint",
     "mask-add-procedural",
     "procedural-unknown",
     "display-mask-no-layer",

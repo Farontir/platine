@@ -50,6 +50,20 @@ pub enum ActionId {
     DeleteLayer,
     /// Put the selected layer into a new folder.
     GroupLayer,
+    /// Add a paint layer above the selection.
+    NewPaintLayer,
+    /// Paint with the brush.
+    ToolBrush,
+    /// Paint with the eraser.
+    ToolEraser,
+    /// Make the brush smaller.
+    BrushSmaller,
+    /// Make the brush larger.
+    BrushLarger,
+    /// Make the brush softer.
+    BrushSofter,
+    /// Make the brush harder.
+    BrushHarder,
 }
 
 /// Application state that actions read to decide whether they are enabled or checked.
@@ -79,6 +93,8 @@ pub struct ActionContext {
     pub mask_view: bool,
     /// Whether a layer is selected in the Layers panel.
     pub layer_selected: bool,
+    /// Whether the eraser is the active tool (else the brush).
+    pub eraser: bool,
 }
 
 /// Declaration of an action.
@@ -293,6 +309,71 @@ impl Default for ActionRegistry {
                     yields_to_text: false,
                 },
                 Action {
+                    id: ActionId::NewPaintLayer,
+                    name: "layer.new_paint",
+                    label_key: "action-layer-new-paint",
+                    shortcut: None,
+                    enabled: |ctx| ctx.has_project,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::ToolBrush,
+                    name: "tool.brush",
+                    label_key: "action-tool-brush",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::B)),
+                    enabled: always,
+                    checked: Some(|ctx| !ctx.eraser),
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::ToolEraser,
+                    name: "tool.eraser",
+                    label_key: "action-tool-eraser",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::E)),
+                    enabled: always,
+                    checked: Some(|ctx| ctx.eraser),
+                    yields_to_text: false,
+                },
+                // Shifted first: egui matches a shortcut without Shift on a shifted
+                // punctuation key, so the shifted variant must consume the key before.
+                Action {
+                    id: ActionId::BrushSofter,
+                    name: "brush.softer",
+                    label_key: "action-brush-softer",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::SHIFT, Key::OpenBracket)),
+                    enabled: always,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::BrushHarder,
+                    name: "brush.harder",
+                    label_key: "action-brush-harder",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::SHIFT, Key::CloseBracket)),
+                    enabled: always,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::BrushSmaller,
+                    name: "brush.smaller",
+                    label_key: "action-brush-smaller",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::OpenBracket)),
+                    enabled: always,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::BrushLarger,
+                    name: "brush.larger",
+                    label_key: "action-brush-larger",
+                    shortcut: Some(KeyboardShortcut::new(Modifiers::NONE, Key::CloseBracket)),
+                    enabled: always,
+                    checked: None,
+                    yields_to_text: false,
+                },
+                Action {
                     id: ActionId::Undo,
                     name: "edit.undo",
                     label_key: "action-edit-undo",
@@ -412,6 +493,13 @@ mod tests {
             ActionId::ToggleMaskView,
             ActionId::DeleteLayer,
             ActionId::GroupLayer,
+            ActionId::NewPaintLayer,
+            ActionId::ToolBrush,
+            ActionId::ToolEraser,
+            ActionId::BrushSmaller,
+            ActionId::BrushLarger,
+            ActionId::BrushSofter,
+            ActionId::BrushHarder,
         ] {
             assert_eq!(registry.get(id).id, id);
         }
@@ -496,5 +584,28 @@ mod tests {
         );
         assert!(press(Key::Z, Modifiers::COMMAND, &context, true).is_empty());
         assert!(press(Key::Y, Modifiers::COMMAND, &context, true).is_empty());
+    }
+
+    #[test]
+    fn brush_keys_pick_tools_and_sizes() {
+        let context = ActionContext::default();
+        assert_eq!(
+            press(Key::B, Modifiers::NONE, &context, false),
+            [ActionId::ToolBrush]
+        );
+        assert_eq!(
+            press(Key::E, Modifiers::NONE, &context, false),
+            [ActionId::ToolEraser]
+        );
+        assert_eq!(
+            press(Key::OpenBracket, Modifiers::NONE, &context, false),
+            [ActionId::BrushSmaller]
+        );
+        assert_eq!(
+            press(Key::CloseBracket, Modifiers::SHIFT, &context, false),
+            [ActionId::BrushHarder]
+        );
+        // Typing in a text field keeps the letters.
+        assert!(press(Key::B, Modifiers::NONE, &context, true).is_empty());
     }
 }

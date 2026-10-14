@@ -135,6 +135,8 @@ pub struct UiState {
     pub layers: LayersState,
     /// Library panel: thumbnails.
     pub library: LibraryState,
+    /// Painting tool and brush settings.
+    pub tool: crate::paint_tool::ToolState,
     /// Name of the document whose unsaved changes the user must decide about.
     pub unsaved_prompt: Option<String>,
     /// Error shown in a dialog until dismissed.
@@ -166,6 +168,7 @@ impl Default for UiState {
             view_2d: View2dState::default(),
             layers: LayersState::default(),
             library: LibraryState::default(),
+            tool: crate::paint_tool::ToolState::default(),
             unsaved_prompt: None,
             error_message: None,
             recovery_prompt: None,
@@ -293,6 +296,7 @@ pub fn show(ui: &mut Ui, state: &mut UiState, info: &FrameInfo<'_>) -> UiOutput 
             view_2d: &mut state.view_2d,
             layers: &mut state.layers,
             library: &mut state.library,
+            tool: &mut state.tool,
             output: &mut output,
         };
         DockArea::new(&mut state.dock)
@@ -418,6 +422,17 @@ fn menu_bar(ui: &mut Ui, info: &FrameInfo<'_>, triggered: &mut Vec<ActionId>) {
         action_item(ui, info, ActionId::DeleteLayer, triggered);
         action_item(ui, info, ActionId::GroupLayer, triggered);
     });
+    ui.menu_button(i18n.tr("menu-paint"), |ui| {
+        action_item(ui, info, ActionId::NewPaintLayer, triggered);
+        ui.separator();
+        action_item(ui, info, ActionId::ToolBrush, triggered);
+        action_item(ui, info, ActionId::ToolEraser, triggered);
+        ui.separator();
+        action_item(ui, info, ActionId::BrushSmaller, triggered);
+        action_item(ui, info, ActionId::BrushLarger, triggered);
+        action_item(ui, info, ActionId::BrushSofter, triggered);
+        action_item(ui, info, ActionId::BrushHarder, triggered);
+    });
     ui.menu_button(i18n.tr("menu-view"), |ui| {
         action_item(ui, info, ActionId::FrameMesh, triggered);
         action_item(ui, info, ActionId::ToggleProjection, triggered);
@@ -482,6 +497,7 @@ struct PanelViewer<'a, 'b> {
     view_2d: &'a mut View2dState,
     layers: &'a mut LayersState,
     library: &'a mut LibraryState,
+    tool: &'a mut crate::paint_tool::ToolState,
     output: &'a mut UiOutput,
 }
 
@@ -566,6 +582,7 @@ impl TabViewer for PanelViewer<'_, '_> {
                     self.texture_sets.selected,
                     self.layers.selected,
                     self.layers.part,
+                    self.tool,
                 );
                 self.output.commands.extend(panel.commands);
                 self.output.seal |= panel.seal;

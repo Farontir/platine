@@ -1,7 +1,8 @@
 //! The 3D viewport panel: shows the image rendered by `patine_render` and turns mouse
-//! input into camera moves. The camera and display settings are view state, not
-//! document data; rotating the environment changes the document, so it is returned to
-//! the application as a change.
+//! input into camera moves and painting gestures. The camera and display settings are
+//! view state, not document data; rotating the environment changes the document, so it
+//! is returned to the application as a change. Painting gestures are queued for the
+//! application, which paints them after syncing the document.
 
 use egui::{PointerButton, Sense, Ui};
 use patine_core::channel::Channel;
@@ -18,6 +19,45 @@ const DRAG_ZOOM_SPEED: f32 = 0.006;
 const WHEEL_ZOOM_SPEED: f32 = 0.0015;
 /// Radians of environment rotation per pixel dragged.
 const ENVIRONMENT_SPEED: f32 = 0.006;
+
+/// A painting gesture, in viewport pixels.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PaintEvent {
+    /// The left button went down over the mesh: a stroke starts there.
+    Press([f32; 2]),
+    /// The pointer moved while painting.
+    Move([f32; 2]),
+    /// The left button was released: the stroke ends.
+    Release,
+}
+
+/// The painting gestures of a frame: a press starts painting (when `press` is allowed,
+/// i.e. over the viewport without Alt), moves follow while painting, a release ends it.
+/// Returns whether painting goes on, and the events.
+pub fn paint_events(
+    painting: bool,
+    press: Option<[f32; 2]>,
+    moves: &[[f32; 2]],
+    released: bool,
+) -> (bool, Vec<PaintEvent>) {
+    let mut events = Vec::new();
+    let mut painting = painting;
+    if !painting && let Some(position) = press {
+        painting = true;
+        events.push(PaintEvent::Press(position));
+    }
+    if painting {
+        events.extend(moves.iter().map(|p| PaintEvent::Move(*p)));
+        if released {
+            events.push(PaintEvent::Release);
+            painting = false;
+        }
+    }
+    (painting, events)
+}
+
+/// Seconds a notice stays over the viewport.
+const NOTICE_SECONDS: f64 = 3.0;
 
 /// State of the 3D view.
 #[derive(Debug)]
@@ -42,6 +82,16 @@ pub struct ViewState {
     pub previous_size: [u32; 2],
     /// Channel shown by the channel display mode.
     pub inspect_channel: Channel,
+    /// Whether the left button paints (pressed over the viewport without Alt).
+    pub painting: bool,
+    /// Painting gestures not handled yet by the application.
+    pub paint_events: Vec<PaintEvent>,
+    /// Point of the mesh under the cursor, from the last finished pick.
+    pub hovered_point: Option<crate::paint_tool::SurfacePoint>,
+    /// Brush cursor in viewport pixels, and whether the selection can be painted.
+    pub cursor: Option<(Vec<glam::Vec2>, bool)>,
+    /// Message shown over the viewport, and when it was set (egui time, seconds).
+    pub notice: Option<(String, f64)>,
 }
 
 impl Default for ViewState {
@@ -57,6 +107,11 @@ impl Default for ViewState {
             frame_pending: false,
             previous_size: [0, 0],
             inspect_channel: Channel::BaseColor,
+            painting: false,
+            paint_events: Vec::new(),
+            hovered_point: None,
+            cursor: None,
+            notice: None,
         }
     }
 }
@@ -181,6 +236,61 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, overlay: Option<&str>) -> Viewpor
         }
     }
     output.seal = response.drag_stopped();
+
+    // Painting: the left button without Alt.
+    let to_pixels = |pos: egui::Pos2| {
+        let local = (pos - rect.min) * pixels_per_point;
+        [local.x, local.y]
+    };
+    let (pressed, released, moves, origin) = ui.input(|input| {
+        let moves: Vec<egui::Pos2> = input
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::PointerMoved(pos) => Some(*pos),
+                _ => None,
+            })
+            .collect();
+        (
+            input.pointer.primary_pressed(),
+            input.pointer.primary_released(),
+            moves,
+            input.pointer.press_origin(),
+        )
+    });
+    let press = (pressed && response.hovered() && !modifiers.alt)
+        .then_some(origin)
+        .flatten()
+        .map(to_pixels);
+    let moves: Vec<[f32; 2]> = moves.into_iter().map(to_pixels).collect();
+    let (painting, events) = paint_events(view.painting, press, &moves, released);
+    view.painting = painting;
+    view.paint_events.extend(events);
+
+    if response.hovered()
+        && let Some((outline, paintable)) = &view.cursor
+    {
+        crate::paint_tool::draw_cursor(ui.painter(), rect, pixels_per_point, outline, *paintable);
+    }
+    let now = ui.input(|input| input.time);
+    if let Some((text, since)) = &view.notice {
+        if now - since < NOTICE_SECONDS {
+            let font = egui::FontId::proportional(14.0);
+            let galley = ui
+                .painter()
+                .layout_no_wrap(text.clone(), font, egui::Color32::WHITE);
+            let position = egui::pos2(rect.center().x - galley.size().x / 2.0, rect.max.y - 40.0);
+            let background = egui::Rect::from_min_size(position, galley.size()).expand(6.0);
+            ui.painter()
+                .rect_filled(background, 4.0, egui::Color32::from_black_alpha(190));
+            ui.painter().galley(position, galley, egui::Color32::WHITE);
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(250));
+        } else {
+            view.notice = None;
+        }
+    }
+
     if response.hovered() {
         let scroll = ui.input(|input| input.smooth_scroll_delta.y);
         if scroll != 0.0 {
@@ -243,6 +353,28 @@ mod tests {
         );
         assert_eq!(view.apply(gesture.unwrap(), 1.0), None);
         assert!(view.camera.distance > start);
+    }
+
+    #[test]
+    fn presses_start_strokes_and_releases_end_them() {
+        // Not painting, no press: moves are ignored.
+        assert_eq!(
+            paint_events(false, None, &[[1.0, 1.0]], false),
+            (false, vec![])
+        );
+        let (painting, events) = paint_events(false, Some([5.0, 6.0]), &[[7.0, 8.0]], false);
+        assert!(painting);
+        assert_eq!(
+            events,
+            [PaintEvent::Press([5.0, 6.0]), PaintEvent::Move([7.0, 8.0])]
+        );
+        let (painting, events) = paint_events(true, None, &[[9.0, 9.0]], true);
+        assert!(!painting);
+        assert_eq!(events, [PaintEvent::Move([9.0, 9.0]), PaintEvent::Release]);
+        // A click: press and release in the same frame.
+        let (painting, events) = paint_events(false, Some([1.0, 2.0]), &[], true);
+        assert!(!painting);
+        assert_eq!(events, [PaintEvent::Press([1.0, 2.0]), PaintEvent::Release]);
     }
 
     #[test]

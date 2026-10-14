@@ -46,7 +46,15 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
                                 mask=black|white, mask-fill=VALUE,MODE,OPACITY,
                                 mask-levels=IN_LOW,IN_HIGH,GAMMA,OUT_LOW,OUT_HIGH,
                                 mask-invert=, material=ID, mask-procedural=ID,
-                                param=NAME:VALUE, projection=KIND,SCALE
+                                param=NAME:VALUE, projection=KIND,SCALE, paint-layer=,
+                                mask-paint=
+  --tool brush|eraser           painting tool
+  --brush KEY=VALUE             brush setting (repeatable): size=PX, flow=V, opacity=V,
+                                hardness=V, spacing=V, angle=DEG, smoothing=PX,
+                                alpha=ID|round, color=R,G,B, roughness=V, metallic=V,
+                                height=V, mask=V, off=CHANNEL
+  --stroke X,Y;X,Y;...          paint a stroke through these viewport pixels, as with
+                                the mouse (repeatable)
 
   A project file (.patine) can be given instead of a mesh.";
 
@@ -85,6 +93,82 @@ pub enum StartupEdit {
     Param(String, String),
     /// Set the projection of the selected procedural fill: kind and uniform scale.
     Projection(String, f32),
+    /// Add a paint layer above the selection and select it.
+    PaintLayer,
+    /// Add a paint effect to the selected layer's mask and select it.
+    MaskPaint,
+}
+
+/// A brush setting given on the command line.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BrushOption {
+    /// Diameter in pixels.
+    Size(f32),
+    /// Flow.
+    Flow(f32),
+    /// Opacity.
+    Opacity(f32),
+    /// Hardness.
+    Hardness(f32),
+    /// Spacing, as a fraction of the size.
+    Spacing(f32),
+    /// Rotation, degrees.
+    Angle(f32),
+    /// Lazy mouse string, pixels.
+    Smoothing(f32),
+    /// Shipped alpha, or `None` for round dabs.
+    Alpha(Option<String>),
+    /// Paint this base color.
+    Color([f32; 3]),
+    /// Paint this value on a scalar channel.
+    Scalar(Channel, f32),
+    /// Do not paint this channel.
+    Off(Channel),
+    /// Gray painted into masks.
+    MaskValue(f32),
+}
+
+impl BrushOption {
+    fn parse(text: &str) -> Option<Self> {
+        let (key, value) = text.split_once('=')?;
+        let number = || value.parse::<f32>().ok();
+        Some(match key {
+            "size" => BrushOption::Size(number()?),
+            "flow" => BrushOption::Flow(number()?),
+            "opacity" => BrushOption::Opacity(number()?),
+            "hardness" => BrushOption::Hardness(number()?),
+            "spacing" => BrushOption::Spacing(number()?),
+            "angle" => BrushOption::Angle(number()?),
+            "smoothing" => BrushOption::Smoothing(number()?),
+            "alpha" if value == "round" => BrushOption::Alpha(None),
+            "alpha" => BrushOption::Alpha(Some(value.to_owned())),
+            "color" => {
+                let rgb: Vec<f32> = value
+                    .split(',')
+                    .map(|v| v.parse().ok())
+                    .collect::<Option<_>>()?;
+                BrushOption::Color(rgb.try_into().ok()?)
+            }
+            "roughness" => BrushOption::Scalar(Channel::Roughness, number()?),
+            "metallic" => BrushOption::Scalar(Channel::Metallic, number()?),
+            "height" => BrushOption::Scalar(Channel::Height, number()?),
+            "mask" => BrushOption::MaskValue(number()?),
+            "off" => BrushOption::Off(Channel::from_id(value)?),
+            _ => return None,
+        })
+    }
+}
+
+/// The viewport pixels of a `--stroke` value: `X,Y;X,Y;...`.
+fn stroke_points(value: &str) -> Option<Vec<[f32; 2]>> {
+    let points: Vec<[f32; 2]> = value
+        .split(';')
+        .map(|point| {
+            let (x, y) = point.split_once(',')?;
+            Some([x.trim().parse().ok()?, y.trim().parse().ok()?])
+        })
+        .collect::<Option<_>>()?;
+    (!points.is_empty()).then_some(points)
 }
 
 impl StartupEdit {
@@ -145,6 +229,8 @@ impl StartupEdit {
                 let (kind, scale) = value.split_once(',')?;
                 StartupEdit::Projection(kind.to_owned(), scale.parse().ok()?)
             }
+            "paint-layer" => StartupEdit::PaintLayer,
+            "mask-paint" => StartupEdit::MaskPaint,
             _ => return None,
         })
     }
@@ -214,6 +300,12 @@ pub struct StartupOptions {
     pub display: Option<(DisplayMode, Option<Channel>)>,
     /// Current texture set.
     pub texture_set: Option<u32>,
+    /// Painting tool: `true` for the eraser.
+    pub eraser: Option<bool>,
+    /// Brush settings, in order.
+    pub brush: Vec<BrushOption>,
+    /// Strokes to paint once the view has settled, in viewport pixels.
+    pub strokes: Vec<Vec<[f32; 2]>>,
 }
 
 /// Invalid command line.
@@ -374,6 +466,26 @@ impl StartupOptions {
                     options
                         .edits
                         .push(StartupEdit::parse(&v).ok_or_else(|| invalid(&v))?);
+                }
+                "--tool" => {
+                    let v = value()?;
+                    options.eraser = Some(match v.as_str() {
+                        "brush" => false,
+                        "eraser" => true,
+                        _ => return Err(invalid(&v)),
+                    });
+                }
+                "--brush" => {
+                    let v = value()?;
+                    options
+                        .brush
+                        .push(BrushOption::parse(&v).ok_or_else(|| invalid(&v))?);
+                }
+                "--stroke" => {
+                    let v = value()?;
+                    options
+                        .strokes
+                        .push(stroke_points(&v).ok_or_else(|| invalid(&v))?);
                 }
                 "--capture" => options.capture = Some(PathBuf::from(value()?)),
                 "--capture-frames" => {
@@ -540,6 +652,48 @@ mod tests {
         );
         assert!(parse(&["--display", "channel:albedo"]).is_err());
         assert!(parse(&["--edit", "rename=x"]).is_err());
+    }
+
+    #[test]
+    fn painting_options() {
+        let options = parse(&[
+            "--edit",
+            "paint-layer=",
+            "--edit",
+            "mask-paint=",
+            "--tool",
+            "eraser",
+            "--brush",
+            "size=60",
+            "--brush",
+            "color=0.8,0.1,0.1",
+            "--brush",
+            "alpha=alpha.splatter",
+            "--brush",
+            "off=roughness",
+            "--stroke",
+            "10,20;30.5,40",
+        ])
+        .unwrap();
+        assert_eq!(
+            options.edits,
+            [StartupEdit::PaintLayer, StartupEdit::MaskPaint]
+        );
+        assert_eq!(options.eraser, Some(true));
+        assert_eq!(
+            options.brush,
+            [
+                BrushOption::Size(60.0),
+                BrushOption::Color([0.8, 0.1, 0.1]),
+                BrushOption::Alpha(Some("alpha.splatter".into())),
+                BrushOption::Off(Channel::Roughness),
+            ]
+        );
+        assert_eq!(options.strokes, [vec![[10.0, 20.0], [30.5, 40.0]]]);
+        assert!(parse(&["--brush", "color=1,0"]).is_err());
+        assert!(parse(&["--brush", "girth=3"]).is_err());
+        assert!(parse(&["--stroke", "10;20"]).is_err());
+        assert!(parse(&["--tool", "pencil"]).is_err());
     }
 
     #[test]

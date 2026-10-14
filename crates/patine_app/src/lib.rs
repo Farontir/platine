@@ -16,6 +16,7 @@ pub mod library_panel;
 pub mod logging;
 pub mod masks;
 pub mod new_project;
+pub mod paint_tool;
 pub mod procedural_ui;
 pub mod profiling;
 pub mod project_io;

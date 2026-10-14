@@ -598,9 +598,9 @@ Objectif : peindre un matériau directement sur le mesh.
 
 - [x] Échantillonneur de stroke (espacement, lissage) et `StrokeLog`
 - [x] `rasterize_dabs` : projection écran vers UV, occlusion, atténuation selon l'angle, buffer de stroke
-- [ ] Brosse et gomme, peinture multi-canaux, alphas
+- [x] Brosse et gomme, peinture multi-canaux, alphas
 - [x] Undo par tuiles, dilatation à la composition
-- [ ] Curseur de brosse dans le viewport
+- [x] Curseur de brosse dans le viewport
 
 Critères d'acceptation : un trait qui traverse une couture UV ne laisse aucun trou sur le cube de test ; rejouer le `StrokeLog` reproduit l'état peint en direct à la tolérance près ; le budget de latence est tenu.
 

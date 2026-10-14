@@ -247,6 +247,25 @@ pub fn new_fill(
     InsertLayer::new(set.id, insertion(set, selected), layer)
 }
 
+/// A new empty paint layer above the selection, affecting every channel of the set.
+pub fn new_paint(
+    i18n: &I18n,
+    project: &Project,
+    set: &TextureSet,
+    selected: Option<LayerId>,
+) -> InsertLayer {
+    let mut ids = IdSequence::starting_at(project.next_id);
+    let mut args = FluentArgs::new();
+    args.set("number", next_number(set));
+    let channels: Vec<Channel> = set.channels.iter().map(|def| def.channel).collect();
+    let layer = Layer::paint(
+        ids.layer(),
+        i18n.tr_args("layers-new-paint-name", &args),
+        &channels,
+    );
+    InsertLayer::new(set.id, insertion(set, selected), layer)
+}
+
 fn folder_layer(i18n: &I18n, project: &Project, set: &TextureSet) -> Layer {
     let mut ids = IdSequence::starting_at(project.next_id);
     let mut args = FluentArgs::new();
@@ -397,6 +416,22 @@ pub fn show(
         if ui
             .button(format!(
                 "{} {}",
+                icons::PAINT_BRUSH,
+                i18n.tr("layers-new-paint")
+            ))
+            .on_hover_text(i18n.tr("action-layer-new-paint"))
+            .clicked()
+        {
+            output
+                .commands
+                .push(Box::new(new_paint(i18n, project, set, state.selected)));
+            state.selected = Some(patine_core::ids::LayerId(project.next_id));
+            state.part = LayerPart::Content;
+            output.seal = true;
+        }
+        if ui
+            .button(format!(
+                "{} {}",
                 icons::PAINT_BUCKET,
                 i18n.tr("layers-new-fill")
             ))
@@ -486,6 +521,7 @@ pub fn show(
                         }
                         let kind = match &layer.kind {
                             LayerKind::Folder { .. } => icons::FOLDER,
+                            LayerKind::Paint { .. } => icons::PAINT_BRUSH,
                             LayerKind::Fill {
                                 source: patine_core::layer::FillSource::Procedural(_),
                                 ..
@@ -580,7 +616,9 @@ pub fn show(
 }
 
 /// Every translation key of the panel, for tests.
-pub const TRANSLATION_KEYS: [&str; 9] = [
+pub const TRANSLATION_KEYS: [&str; 11] = [
+    "layers-new-paint",
+    "layers-new-paint-name",
     "layers-empty",
     "layers-no-layer",
     "layers-new-fill",
