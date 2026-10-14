@@ -123,6 +123,25 @@ pub struct GpuDab {
     pub opacity: f32,
 }
 
+/// The pixels beyond which none of `dabs` covers anything (`[min x, min y, max x, max
+/// y]`): a round dab reaches its radius, an alpha dab the corners of its square (radius ×
+/// √2), plus a pixel of margin. Empty (min above max) without dabs.
+pub fn dab_bounds(dabs: &[GpuDab]) -> [f32; 4] {
+    dabs.iter().fold(
+        [f32::MAX, f32::MAX, f32::MIN, f32::MIN],
+        |[x0, y0, x1, y1], dab| {
+            let reach = dab.radius * std::f32::consts::SQRT_2 + 1.0;
+            let [x, y] = dab.center;
+            [
+                x0.min(x - reach),
+                y0.min(y - reach),
+                x1.max(x + reach),
+                y1.max(y + reach),
+            ]
+        },
+    )
+}
+
 /// The projections of `stroke`: in the 3D view, one per symmetry copy (the stroke's
 /// camera first); in UV space, the camera alone.
 pub fn stroke_projections(stroke: &Stroke) -> Vec<StrokeProjection> {
@@ -209,6 +228,7 @@ pub fn touched_tiles_uv(
 #[derive(Clone, Debug)]
 pub struct SetGeometry {
     positions: Vec<[f32; 3]>,
+    normals: Vec<[f32; 3]>,
     uvs: Vec<[f32; 2]>,
     triangles: Vec<[u32; 3]>,
     bvh: Bvh,
@@ -223,8 +243,14 @@ impl SetGeometry {
             .clone()
             .unwrap_or_else(|| vec![[0.0, 0.0]; mesh.positions.len()]);
         let bvh = Bvh::build(&mesh.positions, &triangles);
+        let normals = if mesh.normals.len() == mesh.positions.len() {
+            mesh.normals.clone()
+        } else {
+            Vec::new()
+        };
         Self {
             positions: mesh.positions.clone(),
+            normals,
             uvs,
             triangles,
             bvh,
@@ -257,6 +283,31 @@ impl SetGeometry {
             self.touched_by(projection, &rects, size, &mut tiles);
         }
         tiles.into_iter().map(|[y, x]| [x, y]).collect()
+    }
+
+    /// Whether no texel of `triangle` takes paint from `projection` because it faces
+    /// away. A texel's facing is its interpolated normal `Σ wᵢ nᵢ` against the direction
+    /// toward the camera, a positive combination of the directions `t(pⱼ)` at the corners
+    /// (perspective or orthographic); so `Σᵢⱼ wᵢ wⱼ nᵢ·t(pⱼ)` has the sign of the facing,
+    /// and when every `nᵢ·t(pⱼ)` is at most 0 the facing stays under
+    /// [`crate::GRAZING`]. Normals more than 90° apart could cancel (the shader then
+    /// falls back to +Z): no culling for them, nor behind the camera.
+    fn faces_away(&self, projection: &StrokeProjection, triangle: [u32; 3]) -> bool {
+        if self.normals.is_empty() {
+            return false;
+        }
+        let n = triangle.map(|v| Vec3::from(self.normals[v as usize]));
+        if n[0].dot(n[1]) <= 0.0 || n[1].dot(n[2]) <= 0.0 || n[0].dot(n[2]) <= 0.0 {
+            return false;
+        }
+        triangle.iter().all(|&v| {
+            let clip = projection.clip(Vec3::from(self.positions[v as usize]));
+            if clip.w <= W_MIN {
+                return false;
+            }
+            let toward = projection.toward_camera(clip);
+            n.iter().all(|normal| normal.dot(toward) <= 0.0)
+        })
     }
 
     fn touched_by(
@@ -292,6 +343,9 @@ impl SetGeometry {
         self.bvh
             .query_bounds(&self.positions, &self.triangles, meets, &mut found);
         for triangle in found {
+            if self.faces_away(projection, self.triangles[triangle as usize]) {
+                continue;
+            }
             let corners =
                 self.triangles[triangle as usize].map(|v| Vec2::from(self.uvs[v as usize]));
             let lo = corners[0].min(corners[1]).min(corners[2]) * size as f32 - 0.5;
@@ -303,6 +357,48 @@ impl SetGeometry {
 
 #[cfg(test)]
 mod tests {
+    proptest::proptest! {
+        /// Beyond the bounds, every dab covers nothing, round or with an alpha.
+        #[test]
+        fn nothing_is_covered_beyond_the_dab_bounds(
+            dabs in proptest::collection::vec(
+                (0.0f32..500.0, 0.0f32..500.0, 0.3f32..80.0, 0.0f32..6.3, 0.0f32..1.0),
+                1..6,
+            ),
+            far in 0.0f32..300.0,
+            side in 0usize..4,
+            along in 0.0f32..1.0,
+        ) {
+            let dabs: Vec<GpuDab> = dabs
+                .iter()
+                .map(|(x, y, radius, angle, hardness)| GpuDab {
+                    center: [*x, *y],
+                    radius: *radius,
+                    flow: 1.0,
+                    rotation: [angle.cos(), angle.sin()],
+                    hardness: *hardness,
+                    opacity: 1.0,
+                })
+                .collect();
+            let [x0, y0, x1, y1] = dab_bounds(&dabs);
+            let t = |a: f32, b: f32| a + (b - a) * along;
+            let pixel = match side {
+                0 => Vec2::new(x0 - 0.01 - far, t(y0, y1)),
+                1 => Vec2::new(x1 + 0.01 + far, t(y0, y1)),
+                2 => Vec2::new(t(x0, x1), y0 - 0.01 - far),
+                _ => Vec2::new(t(x0, x1), y1 + 0.01 + far),
+            };
+            let alpha = crate::alphas::ALPHAS[1].image();
+            for dab in &dabs {
+                proptest::prop_assert_eq!(crate::reference::dab_coverage(dab, pixel, None), 0.0);
+                proptest::prop_assert_eq!(
+                    crate::reference::dab_coverage(dab, pixel, Some(&alpha)),
+                    0.0
+                );
+            }
+        }
+    }
+
     use super::*;
 
     fn camera(view_proj: Mat4) -> StrokeCamera {
@@ -368,8 +464,18 @@ mod tests {
         assert!((toward - Vec3::Z).length() < 1e-5, "{toward}");
     }
 
+    /// Whether the camera of `projection` paints the surface point at `clip` with normal
+    /// `normal`: the angle the shaders and the reference give (`smoothstep` of the
+    /// facing between the [`crate::GRAZING`] bounds) is above 0. Occlusion only paints
+    /// less, so it is left out.
+    fn faces(projection: &StrokeProjection, clip: Vec4, normal: Vec3) -> bool {
+        let facing = normal.dot(projection.toward_camera(clip));
+        crate::reference::smoothstep(crate::GRAZING[0], crate::GRAZING[1], facing) > 0.0
+    }
+
     /// Every texel a dab can paint (its nearest surface point lands under the dab, within
-    /// the painted margin) lies in a touched tile, and far dabs touch nothing.
+    /// the painted margin, and faces the camera) lies in a touched tile, and far dabs
+    /// touch nothing.
     #[test]
     fn touched_tiles_hold_every_painted_texel() {
         use patine_procedural::reference::surface::{closest_barycentric, surface_at};
@@ -434,9 +540,13 @@ mod tests {
                     [x, y],
                     size as f32,
                 );
-                let Some(pixel) = projection.pixel(projection.clip(surface.position)) else {
+                let clip = projection.clip(surface.position);
+                let Some(pixel) = projection.pixel(clip) else {
                     continue;
                 };
+                if !faces(&projection, clip, surface.normal) {
+                    continue;
+                }
                 let covered = dabs.iter().any(|dab| {
                     dab_coverage(dab, pixel, None) > 0.0
                         || dab_coverage(dab, pixel, alpha.as_ref()) > 0.0
@@ -511,9 +621,10 @@ mod tests {
                     surface.position
                 };
                 let covered = projections.iter().any(|projection| {
-                    projection
-                        .pixel(projection.clip(point))
-                        .is_some_and(|pixel| {
+                    let clip = projection.clip(point);
+                    // In UV space every texel faces the camera.
+                    (uv || faces(projection, clip, surface.normal))
+                        && projection.pixel(clip).is_some_and(|pixel| {
                             dabs.iter().any(|dab| dab_coverage(dab, pixel, None) > 0.0)
                         })
                 });
@@ -524,6 +635,112 @@ mod tests {
             }
         }
         (outside, painted)
+    }
+
+    proptest::proptest! {
+        /// A triangle culled as facing away takes no paint anywhere: at any point, its
+        /// interpolated normal against the direction toward the camera stays under the
+        /// grazing bound, in perspective and orthographic views.
+        #[test]
+        fn culled_triangles_take_no_paint(
+            corners in proptest::array::uniform3(proptest::array::uniform3(-1.0f32..1.0)),
+            normals in proptest::array::uniform3(proptest::array::uniform3(-1.0f32..1.0)),
+            eye in proptest::array::uniform3(-4.0f32..4.0),
+            orthographic in proptest::bool::ANY,
+            weights in proptest::array::uniform3(0.0f32..1.0),
+        ) {
+            let eye = Vec3::from(eye);
+            proptest::prop_assume!(eye.length() > 2.5);
+            let normals = normals.map(|n| Vec3::from(n).normalize_or(Vec3::Z));
+            let mesh = MeshAsset {
+                positions: corners.to_vec(),
+                normals: normals.map(|n| n.to_array()).to_vec(),
+                uv0: Some(vec![[0.0, 0.0], [1.0, 0.0], [0.0, 1.0]]),
+                triangles: vec![[0, 1, 2]],
+                triangle_polygon: vec![0],
+                triangle_object: vec![0],
+                objects: vec!["o".into()],
+                materials: vec!["m".into()],
+                submeshes: vec![patine_core::mesh::Submesh { material: 0, triangles: 0..1 }],
+                ..MeshAsset::default()
+            };
+            let geometry = SetGeometry::new(&mesh, 0);
+            let proj = if orthographic {
+                Mat4::from_cols(
+                    Vec4::new(1.0 / 3.0, 0.0, 0.0, 0.0),
+                    Vec4::new(0.0, 1.0 / 3.0, 0.0, 0.0),
+                    Vec4::new(0.0, 0.0, -0.05, 0.0),
+                    Vec4::new(0.0, 0.0, 0.5, 1.0),
+                )
+            } else {
+                Mat4::from_cols(
+                    Vec4::new(1.2, 0.0, 0.0, 0.0),
+                    Vec4::new(0.0, 1.2, 0.0, 0.0),
+                    Vec4::new(0.0, 0.0, 0.0, -1.0),
+                    Vec4::new(0.0, 0.0, 0.05, 0.0),
+                )
+            };
+            let projection = StrokeProjection::new(&camera(proj * look(eye, Vec3::ZERO)));
+            if geometry.faces_away(&projection, [0, 1, 2]) {
+                let sum = weights[0] + weights[1] + weights[2];
+                proptest::prop_assume!(sum > 1e-3);
+                let w = Vec3::from(weights) / sum;
+                let point = Vec3::from(corners[0]) * w.x
+                    + Vec3::from(corners[1]) * w.y
+                    + Vec3::from(corners[2]) * w.z;
+                let normal = (normals[0] * w.x + normals[1] * w.y + normals[2] * w.z).normalize();
+                let clip = projection.clip(point);
+                proptest::prop_assume!(clip.w > W_MIN);
+                proptest::prop_assert!(!faces(&projection, clip, normal));
+            }
+        }
+    }
+
+    /// A dab behind the cube's faces seen from the front touches only the front faces:
+    /// the faces turned away from the camera, which project under it too, are left out.
+    #[test]
+    fn faces_turned_away_touch_no_tile() {
+        let mesh = patine_mesh::primitives::cube_cross();
+        let geometry = SetGeometry::new(&mesh, 0);
+        let proj = Mat4::from_cols(
+            Vec4::new(1.2, 0.0, 0.0, 0.0),
+            Vec4::new(0.0, 1.2, 0.0, 0.0),
+            Vec4::new(0.0, 0.0, 0.0, -1.0),
+            Vec4::new(0.0, 0.0, 0.05, 0.0),
+        );
+        let projection =
+            StrokeProjection::new(&camera(proj * look(Vec3::new(0.0, 0.0, 4.0), Vec3::ZERO)));
+        let culled = (0..geometry.triangles.len())
+            .filter(|&i| geometry.faces_away(&projection, geometry.triangles[i]))
+            .count();
+        // Seen from +Z, the back face and the four side faces seen edge-on or from behind.
+        assert!(culled >= 2, "{culled} triangles culled");
+        assert!(culled < geometry.triangles.len());
+        let front = (0..geometry.triangles.len())
+            .filter(|&i| {
+                let normal = Vec3::from(mesh.normals[geometry.triangles[i][0] as usize]);
+                normal.z > 0.9
+            })
+            .all(|i| !geometry.faces_away(&projection, geometry.triangles[i]));
+        assert!(front, "front faces are never culled");
+        // No point of a culled triangle faces the camera.
+        for triangle in geometry
+            .triangles
+            .iter()
+            .filter(|t| geometry.faces_away(&projection, **t))
+        {
+            let [a, b, c] = triangle.map(|v| Vec3::from(mesh.positions[v as usize]));
+            let [na, nb, nc] = triangle.map(|v| Vec3::from(mesh.normals[v as usize]));
+            for i in 0..=8 {
+                for j in 0..=(8 - i) {
+                    let (u, v) = (i as f32 / 8.0, j as f32 / 8.0);
+                    let w = 1.0 - u - v;
+                    let point = a * u + b * v + c * w;
+                    let normal = (na * u + nb * v + nc * w).normalize();
+                    assert!(!faces(&projection, projection.clip(point), normal));
+                }
+            }
+        }
     }
 
     /// With symmetry copies, and in UV space, every painted texel lies in a touched tile.

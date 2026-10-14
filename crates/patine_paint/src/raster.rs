@@ -62,7 +62,11 @@ struct DabUniforms {
     depth_bias: f32,
     uv: u32,
     grazing: [f32; 2],
+    bounds: [f32; 4],
 }
+
+// WGSL rounds the uniform structure to 16 bytes: 64 bytes with the bounds.
+const _: () = assert!(std::mem::size_of::<DabUniforms>() == 64);
 
 /// The camera of one symmetry copy. Must match `Copy` in `shaders/paint/dabs.wgsl`.
 #[repr(C)]
@@ -761,6 +765,7 @@ impl Painter {
             depth_bias: DEPTH_BIAS,
             uv: u32::from(target.space == StrokeSpace::Uv),
             grazing: GRAZING,
+            bounds: crate::projection::dab_bounds(dabs),
         };
         let storage = wgpu::BufferUsages::STORAGE;
         let uniforms = buffer(

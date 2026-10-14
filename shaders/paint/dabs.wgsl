@@ -4,7 +4,8 @@
 // checks that the camera sees it (its own depth image). Then the dabs, in order, and for
 // each dab the copies, in order: s = max(s, min(o, s + (1 − s) × flow × coverage × angle)).
 // A stroke painted in UV space projects the point's UV with one camera, without depth or
-// angle.
+// angle. A copy whose pixel falls outside the bounds of the batch's dabs is skipped
+// before its depth test: no dab covers it, so the result is the same.
 // Must match `patine_paint::reference` and `DabUniforms`, `GpuCopy` and `GpuDab` in
 // crates/patine_paint/src/raster.rs and projection.rs.
 
@@ -28,6 +29,8 @@ struct DabUniforms {
     // 1 for a stroke painted in UV space.
     uv: u32,
     grazing: vec2<f32>,
+    // Pixels beyond which no dab of the batch covers anything: min xy, max xy.
+    bounds: vec4<f32>,
 }
 
 // The camera of one symmetry copy.
@@ -100,6 +103,10 @@ fn to_pixel(clip: vec4<f32>) -> vec2<f32> {
     return vec2<f32>((ndc.x * 0.5 + 0.5) * u.viewport.x, (0.5 - ndc.y * 0.5) * u.viewport.y);
 }
 
+fn outside(pixel: vec2<f32>) -> bool {
+    return any(pixel < u.bounds.xy) || any(pixel > u.bounds.zw);
+}
+
 fn alpha_texel(x: i32, y: i32) -> f32 {
     let size = vec2<i32>(textureDimensions(alpha_image));
     if x < 0 || y < 0 || x >= size.x || y >= size.y {
@@ -167,6 +174,9 @@ fn cs_main(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id
                 continue;
             }
             pixels[k] = to_pixel(clip);
+            if outside(pixels[k]) {
+                continue;
+            }
             angles[k] = 1.0;
             seen += 1u;
             continue;
@@ -176,6 +186,9 @@ fn cs_main(@builtin(workgroup_id) group: vec3<u32>, @builtin(local_invocation_id
             continue;
         }
         let pixel = to_pixel(clip);
+        if outside(pixel) {
+            continue;
+        }
         let facing = dot(surface.normal, toward_camera(copy, clip));
         let angle = smoothstep(u.grazing.x, u.grazing.y, facing);
         if angle <= 0.0 {
