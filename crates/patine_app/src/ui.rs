@@ -608,6 +608,8 @@ impl TabViewer for PanelViewer<'_, '_> {
                     self.view_2d,
                     self.info.i18n,
                     self.info.project.is_some(),
+                    &self.view.pen_events,
+                    self.view.pen_near,
                 );
             }
             Panel::Display => {

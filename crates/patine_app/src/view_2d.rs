@@ -1,10 +1,13 @@
 //! 2D view panel: the current texture set in UV space (image rendered by
-//! `patine_render::uv_view`), with pan and zoom.
+//! `patine_render::uv_view`), with pan and zoom. The brush paints there too, in UV
+//! space.
 
 use egui::{PointerButton, RichText, Sense, Ui};
 use patine_render::uv_view::UvTransform;
 
 use crate::i18n::I18n;
+use crate::tablet::{PaintSource, PenEvent};
+use crate::viewport_panel::{PaintEvent, view_paint_events};
 
 /// Zoom factor exponent per scrolled point.
 const WHEEL_ZOOM_SPEED: f32 = 0.0015;
@@ -24,6 +27,14 @@ pub struct View2dState {
     pub hovered: bool,
     /// Whether the transform was fitted to the panel since the document was opened.
     pub framed: bool,
+    /// Whether the left button or the pen paints.
+    pub painting: bool,
+    /// Device of the stroke in progress.
+    pub paint_source: Option<PaintSource>,
+    /// Painting gestures not handled yet by the application, in the panel's pixels.
+    pub paint_events: Vec<PaintEvent>,
+    /// Brush cursor: radius in pixels, and whether the selection can be painted.
+    pub cursor: Option<(f32, bool)>,
 }
 
 impl Default for View2dState {
@@ -35,6 +46,10 @@ impl Default for View2dState {
             visible: false,
             hovered: false,
             framed: false,
+            painting: false,
+            paint_source: None,
+            paint_events: Vec::new(),
+            cursor: None,
         }
     }
 }
@@ -47,8 +62,16 @@ impl View2dState {
     }
 }
 
-/// Draws the panel and applies the mouse input of this frame.
-pub fn show(ui: &mut Ui, state: &mut View2dState, i18n: &I18n, has_project: bool) {
+/// Draws the panel and applies the mouse and pen input of this frame (`pen`: the pen
+/// gestures of the frame, `pen_near`: whether a pen is in proximity).
+pub fn show(
+    ui: &mut Ui,
+    state: &mut View2dState,
+    i18n: &I18n,
+    has_project: bool,
+    pen: &[PenEvent],
+    pen_near: bool,
+) {
     state.visible = true;
     if !has_project {
         state.hovered = false;
@@ -77,6 +100,31 @@ pub fn show(ui: &mut Ui, state: &mut View2dState, i18n: &I18n, has_project: bool
     );
 
     state.hovered = response.hovered();
+    let events = view_paint_events(
+        ui,
+        &response,
+        rect,
+        &mut state.painting,
+        &mut state.paint_source,
+        pen,
+        pen_near,
+    );
+    state.paint_events.extend(events);
+    if let (Some(pointer), Some((radius, paintable))) = (response.hover_pos(), state.cursor) {
+        let color = if paintable {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::from_gray(120)
+        };
+        let radius = radius / pixels_per_point;
+        ui.painter().circle_stroke(
+            pointer,
+            radius,
+            egui::Stroke::new(2.5, egui::Color32::from_black_alpha(140)),
+        );
+        ui.painter()
+            .circle_stroke(pointer, radius, egui::Stroke::new(1.2, color));
+    }
     if response.dragged_by(PointerButton::Middle) {
         let delta = response.drag_delta() * pixels_per_point;
         state.transform.pan([delta.x, delta.y]);

@@ -714,6 +714,10 @@ impl App {
                             layer.name.clone(),
                         ))
                     }
+                    StartupEdit::HeightForce(force) => {
+                        let set = self.ui.texture_sets.selected;
+                        Box::new(patine_core::commands::SetHeightForce::new(set, *force))
+                    }
                     StartupEdit::PaintLayer => {
                         let Some(set) = document.project.texture_set(self.ui.texture_sets.selected)
                         else {
@@ -853,10 +857,69 @@ impl App {
                 crate::paint_tool::Tool::Brush
             };
         }
+        if let Some(name) = &options.preset {
+            let shipped = crate::brush_presets::shipped();
+            let key = format!("preset-{name}");
+            let found = crate::brush_presets::SHIPPED_KEYS
+                .iter()
+                .zip(&shipped)
+                .find(|(k, _)| **k == key)
+                .map(|(k, preset)| (preset.clone(), crate::paint_tool::PresetChoice::Shipped(k)))
+                .or_else(|| {
+                    self.ui
+                        .tool
+                        .presets
+                        .user
+                        .iter()
+                        .find(|p| p.name == *name)
+                        .map(|p| {
+                            (
+                                p.clone(),
+                                crate::paint_tool::PresetChoice::User(p.name.clone()),
+                            )
+                        })
+                });
+            match found {
+                Some((preset, choice)) => self.ui.tool.apply_preset(&preset, choice),
+                None => anyhow::bail!("unknown preset {name}"),
+            }
+        }
+        if let Some(symmetry) = options.symmetry {
+            self.ui.tool.symmetry = symmetry;
+        }
         for option in &options.brush {
             use crate::cli::BrushOption;
             let tool = &mut self.ui.tool;
+            let procedural = |id: &Option<String>| -> anyhow::Result<_> {
+                match id {
+                    None => Ok(None),
+                    Some(id) => match patine_procedural::library::find(id) {
+                        Some(def) => Ok(Some(def.instance())),
+                        None => anyhow::bail!("unknown procedural {id}"),
+                    },
+                }
+            };
             match option {
+                BrushOption::SizeJitter(v) => tool.size_jitter = *v,
+                BrushOption::AngleJitter(v) => tool.angle_jitter = v.to_radians(),
+                BrushOption::FlowJitter(v) => tool.flow_jitter = *v,
+                BrushOption::Scatter(v) => tool.scatter = *v,
+                BrushOption::FollowPath(v) => tool.follow_path = *v,
+                BrushOption::TiltAngle(v) => tool.tilt_angle = *v,
+                BrushOption::Pressure(which, linear) => {
+                    let curve = if *linear {
+                        patine_core::stroke::Curve::identity()
+                    } else {
+                        patine_core::stroke::Curve::constant(1.0)
+                    };
+                    match which {
+                        0 => tool.pressure.size = curve,
+                        1 => tool.pressure.flow = curve,
+                        _ => tool.pressure.opacity = curve,
+                    }
+                }
+                BrushOption::Material(id) => tool.procedural = procedural(id)?,
+                BrushOption::MaskPattern(id) => tool.mask_procedural = procedural(id)?,
                 BrushOption::Size(v) => tool.size = *v,
                 BrushOption::Flow(v) => tool.flow = *v,
                 BrushOption::Opacity(v) => tool.opacity = *v,
@@ -1820,21 +1883,45 @@ impl App {
             None => {}
         }
 
-        // Strokes given on the command line, once the view has settled: one per frame,
+        // Strokes given on the command line, once their view has settled: one per frame,
         // each with its tool.
-        if !view.frame_pending && view.texture.is_some() && !self.startup.strokes.is_empty() {
+        let ready = |uv: bool| {
+            if uv {
+                self.ui.view_2d.framed && self.ui.view_2d.texture.is_some()
+            } else {
+                !view.frame_pending && view.texture.is_some()
+            }
+        };
+        if let Some(stroke) = self.startup.strokes.first()
+            && ready(stroke.uv)
+        {
             let stroke = self.startup.strokes.remove(0);
             if stroke.eraser {
                 self.ui.tool.tool = crate::paint_tool::Tool::Eraser;
             } else if self.startup.eraser != Some(true) {
                 self.ui.tool.tool = crate::paint_tool::Tool::Brush;
             }
-            let mut points = stroke.points.iter().map(|p| PaintPoint::mouse(*p));
+            let mut points = stroke.points.iter().map(|[x, y, pressure]| PaintPoint {
+                position: [*x, *y],
+                pressure: *pressure,
+                tilt: [0.0, 0.0],
+            });
+            let queue = if stroke.uv {
+                &mut self.ui.view_2d.paint_events
+            } else {
+                &mut view.paint_events
+            };
             if let Some(first) = points.next() {
-                view.paint_events.push(PaintEvent::Press(first));
+                queue.push(if stroke.line {
+                    PaintEvent::LineTo(first)
+                } else {
+                    PaintEvent::Press(first)
+                });
             }
-            view.paint_events.extend(points.map(PaintEvent::Move));
-            view.paint_events.push(PaintEvent::Release);
+            queue.extend(points.map(PaintEvent::Move));
+            queue.push(PaintEvent::Release);
+            gfx.window.request_redraw();
+        } else if !self.startup.strokes.is_empty() {
             gfx.window.request_redraw();
         }
         // Painting gestures of this frame, on the synced document.
@@ -1848,18 +1935,49 @@ impl App {
                     .to_cols_array_2d(),
                 viewport: view.size,
             };
+            let view_2d = &mut self.ui.view_2d;
+            let camera_2d = crate::paint_tool::uv_camera(&view_2d.transform, view_2d.size);
             // A straight line starts where the previous stroke ended, in the same view.
-            let line_from = self
-                .last_stroke_end
-                .filter(|(end_camera, _)| *end_camera == camera)
-                .map(|(_, position)| position);
-            let events = expand_lines(std::mem::take(&mut view.paint_events), line_from);
-            for event in events {
+            let line_from = |camera: patine_core::stroke::StrokeCamera| {
+                self.last_stroke_end
+                    .filter(|(end_camera, _)| *end_camera == camera)
+                    .map(|(_, position)| position)
+            };
+            let mut events: Vec<(patine_core::stroke::StrokeSpace, PaintEvent)> = Vec::new();
+            for (space, queue, camera) in [
+                (
+                    patine_core::stroke::StrokeSpace::View,
+                    std::mem::take(&mut view.paint_events),
+                    camera,
+                ),
+                (
+                    patine_core::stroke::StrokeSpace::Uv,
+                    std::mem::take(&mut view_2d.paint_events),
+                    camera_2d,
+                ),
+            ] {
+                events.extend(
+                    expand_lines(queue, line_from(camera))
+                        .into_iter()
+                        .map(|event| (space, event)),
+                );
+            }
+            for (space, event) in events {
                 match event {
-                    PaintEvent::Press(_)
+                    PaintEvent::Press(point)
                         if self.ui.tool.tool == crate::paint_tool::Tool::Picker =>
                     {
-                        let picked = view.hovered_uv.and_then(|(material, uv)| {
+                        let hit = match space {
+                            patine_core::stroke::StrokeSpace::View => view.hovered_uv,
+                            patine_core::stroke::StrokeSpace::Uv => {
+                                let uv = view_2d.transform.uv_at(point.position, view_2d.size);
+                                project
+                                    .texture_set(self.ui.texture_sets.selected)
+                                    .filter(|_| uv.iter().all(|t| (0.0..=1.0).contains(t)))
+                                    .map(|set| (set.material_index, uv))
+                            }
+                        };
+                        let picked = hit.and_then(|(material, uv)| {
                             let set = project
                                 .texture_sets
                                 .iter()
@@ -1916,9 +2034,18 @@ impl App {
                         let stroke = patine_core::stroke::Stroke {
                             brush,
                             tool,
-                            camera,
-                            space: patine_core::stroke::StrokeSpace::View,
-                            symmetry: self.ui.tool.symmetry,
+                            camera: match space {
+                                patine_core::stroke::StrokeSpace::View => camera,
+                                patine_core::stroke::StrokeSpace::Uv => camera_2d,
+                            },
+                            space,
+                            // Symmetry is in object space: not in the 2D view.
+                            symmetry: match space {
+                                patine_core::stroke::StrokeSpace::View => self.ui.tool.symmetry,
+                                patine_core::stroke::StrokeSpace::Uv => {
+                                    patine_core::stroke::Symmetry::default()
+                                }
+                            },
                             seed: self.ui.tool.next_seed(),
                             dabs: Vec::new(),
                         };
@@ -2018,6 +2145,7 @@ impl App {
             }
         } else {
             view.paint_events.clear();
+            self.ui.view_2d.paint_events.clear();
         }
         if let (Some(command), Some(document)) = (finished, self.document.as_mut()) {
             document.history.seal();
@@ -2061,6 +2189,26 @@ impl App {
                 _ => None,
             };
         }
+        // The brush cursor of the 2D view.
+        self.ui.view_2d.cursor = self.document.as_ref().map(|document| {
+            let paintable = document
+                .project
+                .texture_set(self.ui.texture_sets.selected)
+                .and_then(|set| {
+                    crate::paint_tool::paint_target(
+                        set,
+                        Some(self.ui.layers.part),
+                        self.ui.layers.selected,
+                    )
+                })
+                .is_some();
+            let radius = if self.ui.tool.tool == crate::paint_tool::Tool::Picker {
+                PICKER_RADIUS
+            } else {
+                self.ui.tool.size * 0.5
+            };
+            (radius, paintable)
+        });
         // The brush cursor, at the size of the brush, gray when nothing can be painted.
         view.cursor = match (view.hovered_point, &self.document) {
             (Some(point), Some(document)) if view.hover_pixel.is_some() => {

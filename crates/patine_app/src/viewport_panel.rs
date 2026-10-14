@@ -158,6 +158,64 @@ pub fn window_to_viewport(
     ]
 }
 
+/// The painting gestures of a view at `rect` for this frame: the left button without
+/// Alt, or the pen while it is near (the mouse events it emulates are then ignored). A
+/// press with Shift draws a straight line. `painting` and `source` follow the stroke in
+/// progress; positions are in the view's pixels.
+pub fn view_paint_events(
+    ui: &Ui,
+    response: &egui::Response,
+    rect: egui::Rect,
+    painting: &mut bool,
+    source: &mut Option<PaintSource>,
+    pen: &[PenEvent],
+    pen_near: bool,
+) -> Vec<PaintEvent> {
+    let pixels_per_point = ui.ctx().pixels_per_point();
+    let modifiers = ui.input(|input| input.modifiers);
+    let to_pixels = |pos: egui::Pos2| {
+        let local = (pos - rect.min) * pixels_per_point;
+        PaintPoint::mouse([local.x, local.y])
+    };
+    let (pressed, released, moves, origin) = ui.input(|input| {
+        let moves: Vec<egui::Pos2> = input
+            .events
+            .iter()
+            .filter_map(|event| match event {
+                egui::Event::PointerMoved(pos) => Some(*pos),
+                _ => None,
+            })
+            .collect();
+        (
+            input.pointer.primary_pressed(),
+            input.pointer.primary_released(),
+            moves,
+            input.pointer.press_origin(),
+        )
+    });
+    let press = (pressed && response.hovered() && !modifiers.alt)
+        .then_some(origin)
+        .flatten()
+        .map(to_pixels);
+    let moves: Vec<PaintPoint> = moves.into_iter().map(to_pixels).collect();
+    let device = paint_source(*source, pen_near);
+    let (now, events) = match device {
+        PaintSource::Mouse => paint_events(*painting, press, &moves, released),
+        PaintSource::Pen => pen_paint_events(
+            *painting,
+            pen,
+            |position| {
+                let point = egui::pos2(position[0], position[1]) / pixels_per_point;
+                rect.contains(point) && response.hovered() && !modifiers.alt
+            },
+            |position| window_to_viewport(position, rect.min, pixels_per_point),
+        ),
+    };
+    *painting = now;
+    *source = now.then_some(device);
+    with_line(events, modifiers.shift)
+}
+
 /// Seconds a notice stays over the viewport.
 const NOTICE_SECONDS: f64 = 3.0;
 
@@ -190,7 +248,8 @@ pub struct ViewState {
     pub paint_source: Option<PaintSource>,
     /// Whether a pen is in proximity of the window.
     pub pen_near: bool,
-    /// Pen gestures of this frame, in physical window pixels.
+    /// Pen gestures of this frame, in physical window pixels (read by the 3D and the 2D
+    /// views, replaced every frame).
     pub pen_events: Vec<PenEvent>,
     /// Painting gestures not handled yet by the application.
     pub paint_events: Vec<PaintEvent>,
@@ -351,50 +410,17 @@ pub fn show(ui: &mut Ui, view: &mut ViewState, overlay: Option<&str>) -> Viewpor
     }
     output.seal = response.drag_stopped();
 
-    // Painting: the left button without Alt, or the pen while it is near (the mouse
-    // events it emulates are then ignored).
-    let to_pixels = |pos: egui::Pos2| {
-        let local = (pos - rect.min) * pixels_per_point;
-        PaintPoint::mouse([local.x, local.y])
-    };
-    let (pressed, released, moves, origin) = ui.input(|input| {
-        let moves: Vec<egui::Pos2> = input
-            .events
-            .iter()
-            .filter_map(|event| match event {
-                egui::Event::PointerMoved(pos) => Some(*pos),
-                _ => None,
-            })
-            .collect();
-        (
-            input.pointer.primary_pressed(),
-            input.pointer.primary_released(),
-            moves,
-            input.pointer.press_origin(),
-        )
-    });
-    let press = (pressed && response.hovered() && !modifiers.alt)
-        .then_some(origin)
-        .flatten()
-        .map(to_pixels);
-    let moves: Vec<PaintPoint> = moves.into_iter().map(to_pixels).collect();
-    let pen = std::mem::take(&mut view.pen_events);
-    let source = paint_source(view.paint_source, view.pen_near);
-    let (painting, events) = match source {
-        PaintSource::Mouse => paint_events(view.painting, press, &moves, released),
-        PaintSource::Pen => pen_paint_events(
-            view.painting,
-            &pen,
-            |position| {
-                let point = egui::pos2(position[0], position[1]) / pixels_per_point;
-                rect.contains(point) && response.hovered() && !modifiers.alt
-            },
-            |position| window_to_viewport(position, rect.min, pixels_per_point),
-        ),
-    };
-    view.painting = painting;
-    view.paint_source = painting.then_some(source);
-    view.paint_events.extend(with_line(events, modifiers.shift));
+    // Painting.
+    let events = view_paint_events(
+        ui,
+        &response,
+        rect,
+        &mut view.painting,
+        &mut view.paint_source,
+        &view.pen_events,
+        view.pen_near,
+    );
+    view.paint_events.extend(events);
 
     // Computed by the application while the viewport is hovered (or a hover is forced).
     if let Some((outline, paintable)) = &view.cursor {

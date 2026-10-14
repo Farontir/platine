@@ -8,7 +8,9 @@ use egui_phosphor::regular as icons;
 use fluent_bundle::FluentArgs;
 use patine_core::channel::{Channel, ChannelDef};
 use patine_core::command::Command;
-use patine_core::commands::{RenameTextureSet, SetChannelDef, SetTextureSetResolution};
+use patine_core::commands::{
+    RenameTextureSet, SetChannelDef, SetHeightForce, SetTextureSetResolution,
+};
 use patine_core::project::{Project, Resolution, TextureSet, TextureSetId};
 
 use crate::display_panel::gesture_ended;
@@ -196,6 +198,21 @@ fn channels(ui: &mut Ui, i18n: &I18n, set: &TextureSet, output: &mut TextureSets
                 ui.end_row();
             }
         });
+    // The relief of the height channel in the viewport.
+    if set
+        .channels
+        .iter()
+        .any(|def| def.channel == Channel::Height)
+    {
+        let mut force = set.height_force;
+        let response = ui.add(
+            egui::Slider::new(&mut force, 0.0..=4.0).text(i18n.tr("texture-sets-height-force")),
+        );
+        output.seal |= gesture_ended(&response);
+        if response.changed() {
+            output.command = Some(Box::new(SetHeightForce::new(set.id, force)));
+        }
+    }
     let absent: Vec<Channel> = addable()
         .filter(|channel| !set.channels.iter().any(|def| def.channel == *channel))
         .collect();

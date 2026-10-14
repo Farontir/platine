@@ -47,14 +47,24 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
                                 mask-levels=IN_LOW,IN_HIGH,GAMMA,OUT_LOW,OUT_HIGH,
                                 mask-invert=, material=ID, mask-procedural=ID,
                                 param=NAME:VALUE, projection=KIND,SCALE, paint-layer=,
-                                mask-paint=
+                                mask-paint=, height-force=V
   --tool brush|eraser           painting tool
   --brush KEY=VALUE             brush setting (repeatable): size=PX, flow=V, opacity=V,
                                 hardness=V, spacing=V, angle=DEG, smoothing=PX,
                                 alpha=ID|round, color=R,G,B, roughness=V, metallic=V,
-                                height=V, mask=V, off=CHANNEL
-  --stroke [eraser:]X,Y;X,Y;... paint a stroke through these viewport pixels, as with
-                                the mouse, with the brush (or the eraser) (repeatable)
+                                height=V, mask=V, off=CHANNEL, size-jitter=V,
+                                angle-jitter=DEG, flow-jitter=V, scatter=V,
+                                follow-path=on|off, tilt-angle=on|off,
+                                pressure-size|pressure-flow|pressure-opacity=linear|off,
+                                material=ID|values, mask-pattern=ID|value
+  --preset NAME                 brush preset: standard, airbrush, hard-felt, chalk,
+                                splatter, scratches, or a saved preset's name
+  --symmetry x,y,z,radial=N     symmetry of the strokes (any of the items)
+  --stroke [PREFIX:]X,Y[,P];... paint a stroke through these pixels, as with the mouse,
+                                at pen pressure P (default 1) (repeatable). Prefixes,
+                                combinable: eraser: (with the eraser), uv: (in the 2D
+                                view), line: (Shift + click: a straight line from the
+                                end of the previous stroke)
 
   A project file (.patine) can be given instead of a mesh.";
 
@@ -97,6 +107,8 @@ pub enum StartupEdit {
     PaintLayer,
     /// Add a paint effect to the selected layer's mask and select it.
     MaskPaint,
+    /// Set the height force of the current texture set.
+    HeightForce(f32),
 }
 
 /// A brush setting given on the command line.
@@ -126,13 +138,54 @@ pub enum BrushOption {
     Off(Channel),
     /// Gray painted into masks.
     MaskValue(f32),
+    /// Random size variation.
+    SizeJitter(f32),
+    /// Random rotation, degrees.
+    AngleJitter(f32),
+    /// Random flow variation.
+    FlowJitter(f32),
+    /// Random offset across the stroke.
+    Scatter(f32),
+    /// Dabs turn along the stroke.
+    FollowPath(bool),
+    /// The pen tilt turns the dabs.
+    TiltAngle(bool),
+    /// A pressure curve (0 size, 1 flow, 2 opacity): linear (`true`) or off.
+    Pressure(usize, bool),
+    /// Procedural material painted on layers, or `None` for the values.
+    Material(Option<String>),
+    /// Procedural pattern painted into masks, or `None` for the gray.
+    MaskPattern(Option<String>),
 }
 
 impl BrushOption {
     fn parse(text: &str) -> Option<Self> {
         let (key, value) = text.split_once('=')?;
         let number = || value.parse::<f32>().ok();
+        let switch = || match value {
+            "on" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        };
+        let curve = || match value {
+            "linear" => Some(true),
+            "off" => Some(false),
+            _ => None,
+        };
         Some(match key {
+            "size-jitter" => BrushOption::SizeJitter(number()?),
+            "angle-jitter" => BrushOption::AngleJitter(number()?),
+            "flow-jitter" => BrushOption::FlowJitter(number()?),
+            "scatter" => BrushOption::Scatter(number()?),
+            "follow-path" => BrushOption::FollowPath(switch()?),
+            "tilt-angle" => BrushOption::TiltAngle(switch()?),
+            "pressure-size" => BrushOption::Pressure(0, curve()?),
+            "pressure-flow" => BrushOption::Pressure(1, curve()?),
+            "pressure-opacity" => BrushOption::Pressure(2, curve()?),
+            "material" if value == "values" => BrushOption::Material(None),
+            "material" => BrushOption::Material(Some(value.to_owned())),
+            "mask-pattern" if value == "value" => BrushOption::MaskPattern(None),
+            "mask-pattern" => BrushOption::MaskPattern(Some(value.to_owned())),
             "size" => BrushOption::Size(number()?),
             "flow" => BrushOption::Flow(number()?),
             "opacity" => BrushOption::Opacity(number()?),
@@ -160,28 +213,71 @@ impl BrushOption {
 }
 
 /// A stroke given on the command line.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct StartupStroke {
     /// Painted with the eraser instead of the tool chosen with `--tool`.
     pub eraser: bool,
-    /// Viewport pixels the pointer goes through.
-    pub points: Vec<[f32; 2]>,
+    /// Painted in the 2D view (pixels of the 2D view).
+    pub uv: bool,
+    /// Starts as a Shift + click: a straight line from the end of the previous stroke.
+    pub line: bool,
+    /// Pixels the pointer goes through, with the pen pressure.
+    pub points: Vec<[f32; 3]>,
 }
 
-/// A `--stroke` value: `[eraser:]X,Y;X,Y;...`.
+/// A `--stroke` value: `[eraser:][uv:][line:]X,Y[,P];X,Y[,P];...`.
 fn stroke_points(value: &str) -> Option<StartupStroke> {
-    let (eraser, value) = match value.strip_prefix("eraser:") {
-        Some(rest) => (true, rest),
-        None => (false, value),
-    };
-    let points: Vec<[f32; 2]> = value
+    let mut stroke = StartupStroke::default();
+    let mut rest = value;
+    loop {
+        if let Some(r) = rest.strip_prefix("eraser:") {
+            stroke.eraser = true;
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("uv:") {
+            stroke.uv = true;
+            rest = r;
+        } else if let Some(r) = rest.strip_prefix("line:") {
+            stroke.line = true;
+            rest = r;
+        } else {
+            break;
+        }
+    }
+    stroke.points = rest
         .split(';')
         .map(|point| {
-            let (x, y) = point.split_once(',')?;
-            Some([x.trim().parse().ok()?, y.trim().parse().ok()?])
+            let numbers: Vec<f32> = point
+                .split(',')
+                .map(|v| v.trim().parse().ok())
+                .collect::<Option<_>>()?;
+            match numbers.as_slice() {
+                [x, y] => Some([*x, *y, 1.0]),
+                [x, y, p] => Some([*x, *y, *p]),
+                _ => None,
+            }
         })
         .collect::<Option<_>>()?;
-    (!points.is_empty()).then_some(StartupStroke { eraser, points })
+    (!stroke.points.is_empty()).then_some(stroke)
+}
+
+/// A `--symmetry` value: `x`, `y`, `z` and `radial=N`, separated by commas.
+fn symmetry(value: &str) -> Option<patine_core::stroke::Symmetry> {
+    let mut symmetry = patine_core::stroke::Symmetry::default();
+    for item in value.split(',').map(str::trim) {
+        match item {
+            "x" => symmetry.mirror[0] = true,
+            "y" => symmetry.mirror[1] = true,
+            "z" => symmetry.mirror[2] = true,
+            _ => {
+                let n: u32 = item.strip_prefix("radial=")?.parse().ok()?;
+                if !(1..=16).contains(&n) {
+                    return None;
+                }
+                symmetry.radial = n;
+            }
+        }
+    }
+    Some(symmetry)
 }
 
 impl StartupEdit {
@@ -244,6 +340,7 @@ impl StartupEdit {
             }
             "paint-layer" => StartupEdit::PaintLayer,
             "mask-paint" => StartupEdit::MaskPaint,
+            "height-force" => StartupEdit::HeightForce(value.parse().ok()?),
             _ => return None,
         })
     }
@@ -317,7 +414,11 @@ pub struct StartupOptions {
     pub eraser: Option<bool>,
     /// Brush settings, in order.
     pub brush: Vec<BrushOption>,
-    /// Strokes to paint once the view has settled, in viewport pixels.
+    /// Brush preset applied before the `--brush` settings.
+    pub preset: Option<String>,
+    /// Symmetry of the strokes.
+    pub symmetry: Option<patine_core::stroke::Symmetry>,
+    /// Strokes to paint once their view has settled.
     pub strokes: Vec<StartupStroke>,
 }
 
@@ -499,6 +600,11 @@ impl StartupOptions {
                     options
                         .strokes
                         .push(stroke_points(&v).ok_or_else(|| invalid(&v))?);
+                }
+                "--preset" => options.preset = Some(value()?),
+                "--symmetry" => {
+                    let v = value()?;
+                    options.symmetry = Some(symmetry(&v).ok_or_else(|| invalid(&v))?);
                 }
                 "--capture" => options.capture = Some(PathBuf::from(value()?)),
                 "--capture-frames" => {
@@ -708,15 +814,72 @@ mod tests {
             options.strokes,
             [
                 StartupStroke {
-                    eraser: false,
-                    points: vec![[10.0, 20.0], [30.5, 40.0]]
+                    points: vec![[10.0, 20.0, 1.0], [30.5, 40.0, 1.0]],
+                    ..StartupStroke::default()
                 },
                 StartupStroke {
                     eraser: true,
-                    points: vec![[1.0, 2.0]]
+                    points: vec![[1.0, 2.0, 1.0]],
+                    ..StartupStroke::default()
                 },
             ]
         );
+        let options = parse(&[
+            "--preset",
+            "chalk",
+            "--symmetry",
+            "x,z,radial=4",
+            "--brush",
+            "size-jitter=0.4",
+            "--brush",
+            "angle-jitter=90",
+            "--brush",
+            "follow-path=on",
+            "--brush",
+            "pressure-opacity=linear",
+            "--brush",
+            "material=material.copper",
+            "--brush",
+            "mask-pattern=value",
+            "--stroke",
+            "uv:line:eraser:1,2,0.5;3,4",
+            "--edit",
+            "height-force=2.5",
+        ])
+        .unwrap();
+        assert_eq!(options.preset.as_deref(), Some("chalk"));
+        assert_eq!(
+            options.symmetry,
+            Some(patine_core::stroke::Symmetry {
+                mirror: [true, false, true],
+                radial: 4
+            })
+        );
+        assert_eq!(
+            options.brush,
+            [
+                BrushOption::SizeJitter(0.4),
+                BrushOption::AngleJitter(90.0),
+                BrushOption::FollowPath(true),
+                BrushOption::Pressure(2, true),
+                BrushOption::Material(Some("material.copper".into())),
+                BrushOption::MaskPattern(None),
+            ]
+        );
+        assert_eq!(
+            options.strokes,
+            [StartupStroke {
+                eraser: true,
+                uv: true,
+                line: true,
+                points: vec![[1.0, 2.0, 0.5], [3.0, 4.0, 1.0]],
+            }]
+        );
+        assert_eq!(options.edits, [StartupEdit::HeightForce(2.5)]);
+        assert!(parse(&["--symmetry", "w"]).is_err());
+        assert!(parse(&["--symmetry", "radial=17"]).is_err());
+        assert!(parse(&["--brush", "follow-path=yes"]).is_err());
+        assert!(parse(&["--stroke", "1,2,3,4"]).is_err());
         assert!(parse(&["--brush", "color=1,0"]).is_err());
         assert!(parse(&["--brush", "girth=3"]).is_err());
         assert!(parse(&["--stroke", "10;20"]).is_err());

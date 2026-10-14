@@ -891,6 +891,26 @@ pub fn surface_uv(
     Some((material, uv.to_array()))
 }
 
+/// The camera of a stroke painted in the 2D view: it maps UVs `(u, v, 0, 1)` to the
+/// pixels of a `size` view showing them with `transform`.
+pub fn uv_camera(
+    transform: &patine_render::uv_view::UvTransform,
+    size: [u32; 2],
+) -> patine_core::stroke::StrokeCamera {
+    let (w, h) = (size[0].max(1) as f32, size[1].max(1) as f32);
+    let (z, [cx, cy]) = (transform.zoom, transform.center);
+    let view_proj = Mat4::from_cols(
+        glam::Vec4::new(2.0 * z / w, 0.0, 0.0, 0.0),
+        glam::Vec4::new(0.0, -2.0 * z / h, 0.0, 0.0),
+        glam::Vec4::new(0.0, 0.0, 1.0, 0.0),
+        glam::Vec4::new(-2.0 * z * cx / w, 2.0 * z * cy / h, 0.0, 1.0),
+    );
+    patine_core::stroke::StrokeCamera {
+        view_proj: view_proj.to_cols_array_2d(),
+        viewport: size,
+    }
+}
+
 /// The texel of a `size`² texture under `uv` (clamped to the texture).
 pub fn texel_of(uv: [f32; 2], size: u32) -> [u32; 2] {
     let last = size.saturating_sub(1) as f32;
@@ -1260,6 +1280,27 @@ mod tests {
             &[(MASK_VALUE_CHANNEL, [1.4; 4])],
         );
         assert_eq!(state.mask_value, 1.0);
+    }
+
+    #[test]
+    fn the_uv_camera_puts_uvs_where_the_2d_view_shows_them() {
+        let transform = patine_render::uv_view::UvTransform {
+            center: [0.3, 0.6],
+            zoom: 700.0,
+        };
+        let size = [900, 500];
+        let camera = uv_camera(&transform, size);
+        let projection = patine_paint::projection::StrokeProjection::new(&camera);
+        for uv in [[0.0, 0.0], [0.3, 0.6], [1.0, 0.25], [0.5, 1.0]] {
+            let pixel = projection
+                .pixel(projection.clip(Vec3::new(uv[0], uv[1], 0.0)))
+                .expect("in front");
+            let expected = Vec2::from(transform.pixel_of(uv, size));
+            assert!(
+                pixel.distance(expected) < 1e-3,
+                "{uv:?}: {pixel} vs {expected}"
+            );
+        }
     }
 
     #[test]
