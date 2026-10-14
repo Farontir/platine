@@ -2527,6 +2527,7 @@ dependencies = [
  "patine_mesh",
  "patine_procedural",
  "proptest",
+ "serde",
  "thiserror 2.0.21",
 ]
 

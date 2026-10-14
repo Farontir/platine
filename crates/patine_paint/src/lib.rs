@@ -16,6 +16,7 @@
 
 pub mod alphas;
 pub mod dynamics;
+pub mod presets;
 pub mod projection;
 pub mod raster;
 pub mod reference;

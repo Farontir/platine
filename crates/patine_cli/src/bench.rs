@@ -524,16 +524,26 @@ pub struct PaintBench {
     pub dabs: usize,
     /// Brush diameter in pixels.
     pub size: f32,
+    /// Radial copies of the stroke around Y (1 for none).
+    pub radial: u32,
+    /// Mirror the stroke across X.
+    pub mirror: bool,
+    /// Shipped brush preset, by name (`chalk`...).
+    pub preset: Option<String>,
 }
 
 impl PaintBench {
-    /// Parses `--layers N --resolution N --dabs N --size PX`.
+    /// Parses `--layers N --resolution N --dabs N --size PX --symmetry N --mirror
+    /// --preset NAME`.
     pub fn parse(args: &[String]) -> anyhow::Result<Self> {
         let mut bench = Self {
             layers: 20,
             resolution: Resolution::new(4096).context("supported")?,
             dabs: 200,
             size: 80.0,
+            radial: 1,
+            mirror: false,
+            preset: None,
         };
         let mut args = args.iter();
         while let Some(arg) = args.next() {
@@ -546,6 +556,20 @@ impl PaintBench {
                 }
                 "--dabs" => bench.dabs = value()?.parse()?,
                 "--size" => bench.size = value()?.parse()?,
+                "--symmetry" => {
+                    bench.radial = value()?.parse()?;
+                    if !(1..=16).contains(&bench.radial) {
+                        bail!("--symmetry takes 1 to 16 radial copies");
+                    }
+                }
+                "--mirror" => bench.mirror = true,
+                "--preset" => {
+                    let name = value()?;
+                    if patine_paint::presets::find_shipped(name).is_none() {
+                        bail!("unknown preset {name}");
+                    }
+                    bench.preset = Some(name.clone());
+                }
                 other => bail!("unknown option {other}"),
             }
         }
@@ -623,7 +647,7 @@ impl PaintBench {
                 }
             })
             .collect();
-        let stroke = Stroke {
+        let mut stroke = Stroke {
             brush: BrushSnapshot {
                 size: self.size,
                 size_space: SizeSpace::Screen,
@@ -652,10 +676,31 @@ impl PaintBench {
             tool: Tool::Brush,
             camera: stroke_camera,
             space: patine_core::stroke::StrokeSpace::View,
-            symmetry: Symmetry::default(),
-            seed: 0,
+            symmetry: Symmetry {
+                mirror: [self.mirror, false, false],
+                radial: self.radial,
+            },
+            seed: 1,
             dabs: Vec::new(),
         };
+        // A preset sets the tip and the dynamics; the size stays the bench's.
+        let mut alpha = None;
+        if let Some(preset) = self
+            .preset
+            .as_deref()
+            .and_then(patine_paint::presets::find_shipped)
+        {
+            preset.brush.apply_to(&mut stroke.brush);
+            stroke.brush.size = self.size;
+            alpha = preset
+                .brush
+                .alpha
+                .as_deref()
+                .and_then(patine_paint::alphas::find)
+                .map(|alpha| alpha.resource());
+            stroke.brush.alpha = alpha.as_ref().map(|(hash, _)| *hash);
+        }
+        let copies = patine_paint::symmetry::copies(&stroke.symmetry).len();
 
         let compositor = Compositor::new(&ctx)?;
         let mut pool = TexturePool::new(u64::MAX);
@@ -673,11 +718,20 @@ impl PaintBench {
         let target = PaintTarget::Layer(paint);
         let start = Instant::now();
         document
-            .begin_stroke(&ctx, &mut pool, &compositor, &project, target, stroke, None)
+            .begin_stroke(
+                &ctx,
+                &mut pool,
+                &compositor,
+                &project,
+                target,
+                stroke,
+                alpha.as_ref().map(|(_, resource)| resource),
+            )
             .context("the paint layer takes strokes")?;
         ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
         let begin = start.elapsed().as_secs_f64() * 1e3;
         let mut times = Vec::new();
+        let mut encoding = Vec::new();
         for dab in &dabs {
             let start = Instant::now();
             document.paint(
@@ -687,9 +741,12 @@ impl PaintBench {
                 &project,
                 std::slice::from_ref(dab),
             );
+            encoding.push(start.elapsed().as_secs_f64() * 1e3);
             ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
             times.push(start.elapsed().as_secs_f64() * 1e3);
         }
+        let cpu =
+            encoding.iter().skip(1).sum::<f64>() / encoding.len().saturating_sub(1).max(1) as f64;
         let slowest = times
             .iter()
             .copied()
@@ -710,10 +767,13 @@ impl PaintBench {
             "stroke     start {begin:.1} ms; first dab {first:.1} ms (composes the layers below once)"
         );
         println!(
-            "dab        {} px: average {average:.2} ms, 95th percentile {p95:.2} ms, max {max:.2} ms over {} dabs",
+            "dab        {} px, {copies} cop{}, preset {}: average {average:.2} ms, 95th percentile {p95:.2} ms, max {max:.2} ms over {} dabs",
             self.size,
+            if copies == 1 { "y" } else { "ies" },
+            self.preset.as_deref().unwrap_or("none"),
             rest.len()
         );
+        println!("cpu        {cpu:.2} ms per dab on average to prepare and submit the GPU work");
         if let Some((index, ms)) = slowest {
             println!(
                 "slowest    dab {index}: {ms:.2} ms (new tiles saved for undo may need GPU memory)"
@@ -725,7 +785,7 @@ impl PaintBench {
         let painted = document
             .end_stroke(&mut pool, &compositor)
             .context("dabs were painted")?;
-        PaintStroke::new(target, painted, None, "paint")
+        PaintStroke::new(target, painted, alpha, "paint")
             .apply(&mut project)
             .expect("the paint layer takes the stroke");
         document.sync(&ctx, &mut pool, &compositor, &project);
