@@ -620,9 +620,9 @@ Critères d'acceptation : une tablette Wacom fonctionne sous Windows (test manue
 
 Objectif : changer de résolution sans perte de qualité.
 
-- [ ] Rejeu complet des strokes à une nouvelle résolution
-- [ ] Résolution d'export distincte de la résolution de travail
-- [ ] Caches raster facultatifs dans le fichier projet
+- [x] Rejeu complet des strokes à une nouvelle résolution
+- [x] Résolution d'export distincte de la résolution de travail
+- [x] Caches raster facultatifs dans le fichier projet
 
 Critères d'acceptation : peindre en 1K, passer en 4K puis réduire en 1K redonne l'original à la tolérance près ; le résultat en 4K est net, pas agrandi.
 

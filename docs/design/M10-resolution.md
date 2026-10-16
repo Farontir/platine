@@ -157,3 +157,70 @@ pub fn evaluate_set(ctx, project, set: TextureSetId, resolution: Resolution) -> 
 6. Ouvrir un projet du M9 (sans caches) : rejeu, identique.
 7. `patine_cli channels manual_tests/casque.patine --out sortie --resolution 2048` : un PNG par canal, lisible.
 8. `patine_cli bench resolution` et `bench open --layers 30 --resolution 4096` sur la RTX A2000.
+
+## Mesures (16/10/2026, RTX 3080 Ti, build release)
+
+**Changement de résolution** : `bench resolution`, une sphère avec 4 calques peints de 25 traits de 400 dabs (60 px).
+
+| Résolution | Rejeu et composition des 100 traits | Pool |
+| --- | --- | --- |
+| 1024² | 162 ms | 117 Mo |
+| 4096² | 328 ms | 1,9 Go |
+| 8192² | 950 ms | 7,5 Go |
+| retour en 1024² | 180 ms | 117 Mo |
+
+**Pire trait rejoué seul en 8K** : 52 ms, loin du timeout du pilote (environ 2 s).
+
+**Ouverture** : `bench open`, 4K, 30 calques dont 10 peints (traits de 300 dabs), jusqu'à la première évaluation complète.
+
+| Traits par calque peint | Sans caches | Avec caches | Taille des caches |
+| --- | --- | --- | --- |
+| 20 (200 traits) | 0,77 s | 1,37 s | 89 Mo |
+| 50 (500 traits) | 1,27 s | 0,96 s | 83 Mo |
+| 200 (2 000 traits) | **5,6 s** (budget dépassé) | **0,95 s** | 57 Mo |
+
+- **Lecture** : avec caches, le temps d'ouverture ne dépend plus du nombre de traits, mais de la surface peinte (environ 1 Go de texels bruts ici, décompressés en parallèle).
+- **Budget** : il est dépassé sans caches pour un projet longuement peint, et tenu avec caches.
+- **Enregistrement** : la relecture des tuiles sur le thread principal prend 0,42 à 0,48 s ; l'encodage, en parallèle, 0,26 à 0,37 s.
+- **Projet peu peint** : rejouer reste alors plus rapide que lire les caches. Le gain dépend du projet.
+
+**Peinture en direct** : pas de régression. Dab de 80 px : 2,4 ms en moyenne ; avec 16 copies : 8,2 ms en moyenne, contre 7,9 ms au M9, ce qui reste dans la variance de la mesure.
+
+**Export** : `patine_cli channels` en 2048² sur le casque. Pour chacun des 6 texture sets, environ 135 ms d'évaluation et 235 ms d'écriture des 5 PNG.
+
+## Écarts constatés pendant l'implémentation
+
+Les mesures ont révélé trois défauts du M8, que le 8K rendait visibles. Chacun est corrigé, mesuré et testé.
+
+- **Tampons de trait en attente.**
+  - *Défaut* : un rejeu de N traits dans un même encodeur gardait N tampons de trait (256 Mo chacun en 8K) jusqu'à la fin de la synchronisation, sans que le pool les compte.
+  - *Correction* : `TexturePool::allocate_recycled` redonne une texture relâchée de même description, l'ordre des commandes garantissant que l'ancien usage précède le nouveau. Le rejeu de 100 traits en 4K est passé de 1 474 à 445 ms, et le 8K ne manque plus de mémoire.
+- **Images de profondeur.**
+  - *Défaut* : créées directement sur le périphérique (environ 16 Mo chacune), elles s'accumulaient de la même façon. 2 000 traits en 4K manquaient de mémoire.
+  - *Correction* : elles passent maintenant par le pool, avec la même règle de recyclage.
+- **Textures de travail et pic de mémoire.**
+  - *Défaut* : les textures de travail du compositeur restaient allouées pour chaque taille déjà utilisée. Après un passage par la 8K, 1,8 Go restait vivant de retour en 1K. Et un texture set redimensionné gardait son ancienne taille jusqu'à la fin de la synchronisation, si bien que le pic était la somme des deux tailles.
+  - *Correction* : au début de `sync`, tout ce qu'il tient est libéré et détruit, puis les tailles qui ne servent plus sont lâchées. Le test d'aller-retour vérifie que le pool revient exactement à la mémoire d'un document ouvert en 1K ; sans la correction, il échoue (130 Mo contre 47 Mo).
+- **Format des caches.**
+  - *Choix* : tuiles peintes en f16 exactes, compressées par zstd, au lieu de l'EXR du plan (voir les décisions).
+  - *Organisation* : un en-tête postcard, puis les texels bruts. Désérialiser les texels avec postcard les lisait octet par octet : 1,8 s pour 89 Mo.
+  - *Parallélisme* : l'encodage et le décodage tournent sur tous les cœurs.
+- **Critère 2** : la netteté se mesure sur un trait dur, dans le masque. Le trait à jitters a un bord flou de plusieurs pixels d'écran, aussi large à toutes les résolutions : il ne dit rien de la netteté.
+- **Ligne de commande** : `--edit resolution=N` règle la résolution du texture set courant, pour les captures.
+- **Hors du M10**, comme prévu :
+  - le moteur d'export et ses presets (M17), qui reprendra `offline::evaluate_set` ;
+  - le déchargement en mémoire CPU des contenus peints épinglés. En 8K, un calque peint sur deux canaux occupe 768 Mo épinglés : avec 4 calques peints, le pool atteint 7,5 Go. Rien n'empêche encore de choisir le 8K sur un projet qui ne tiendrait pas en mémoire GPU : une estimation avant changement de résolution serait à prévoir.
+
+## État à la clôture (16/10/2026)
+
+- **Critère 1** : de retour en 1K après la 4K, les canaux finaux et les contenus peints sont identiques à l'original (écart maximal : 0), sur WARP (512 puis 2048) et sur la RTX 3080 Ti (1024 puis 4096). Le pool revient exactement à la mémoire et aux textures d'un document ouvert en 1K.
+- **Critère 2** : le long du trait dur, la 4K a 296 texels en transition, contre 4 741 pour l'agrandissement bilinéaire de la 1K (RTX), soit 6 %. Un trait rejoué en 4K est égal à la même peinture faite en direct en 4K.
+- **Rejeu par lots** : égal au rejeu en un bloc, à l'octet près (lots de 1, 7 et le trait entier ; une tuile par dispatch).
+- **Export** : `evaluate_set` à la résolution de travail est égal au document ; à une autre résolution, il est égal à un document à cette résolution. Le document de travail n'est pas touché. `patine_cli channels` est testé de bout en bout.
+- **Caches** :
+  - ouverture sans rejeu, texels identiques à l'octet près ;
+  - rejeu pour une résolution, une clé, un log ou des texels qui ne correspondent pas ;
+  - octets abîmés refusés ;
+  - dans l'application, l'ouverture d'un fichier avec caches donne 10 calques chargés et 0 trait rejoué.
+- **Tests** : 337 passent sur WARP ; ceux de `patine_gpu`, `patine_paint` et `patine_compositor` passent aussi sur la RTX 3080 Ti.
+- **À vérifier à la main** : la checklist ci-dessus, en particulier l'enregistrement avec caches depuis l'application (Ctrl+S, puis la bascule du menu Fichier), et les benchs sur la RTX A2000.

@@ -4,7 +4,7 @@ Run from the repository root after capture_tutorial.py:
     python scripts/manual_tests/build_tutorial.py
 
 Writes manual_tests/tutorial/ (HTML and cropped images) and
-manual_tests/Patine-tutoriel-M0-M9.pdf, printed by Microsoft Edge (or Chrome) headless.
+manual_tests/Patine-tutoriel-M0-M10.pdf, printed by Microsoft Edge (or Chrome) headless.
 """
 
 import html
@@ -19,7 +19,7 @@ from PIL import Image
 CAPTURES = os.path.join("manual_tests", "captures")
 OUT = os.path.join("manual_tests", "tutorial")
 IMAGES = os.path.join(OUT, "img")
-PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M9.pdf")
+PDF = os.path.join("manual_tests", "Patine-tutoriel-M0-M10.pdf")
 
 # Regions of the 1600 x 900 captures.
 FULL = None
@@ -41,6 +41,8 @@ LANTERN_CROP = (420, 100, 780, 628)
 TEXTURE_SETS = (1178, 30, 1600, 340)
 # The Properties panel of the 1600 x 1600 capture, brush sections open.
 BRUSH_SECTIONS = (1180, 1090, 1600, 1545)
+# The stroke of the M10 captures, close up.
+CLOSE_STROKE = (740, 180, 1170, 480)
 
 BROWSERS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -181,6 +183,7 @@ OPTIONS = [
     ["<code>--brush CLÉ=VALEUR</code> (M9)", "size-jitter, angle-jitter=DEG, flow-jitter, scatter, follow-path=on|off, tilt-angle=on|off, pressure-size|pressure-flow|pressure-opacity=linear|off, material=ID|values, mask-pattern=ID|value"],
     ["<code>--preset NOM</code>, <code>--symmetry x,y,z,radial=N</code>, <code>--expand-brush</code>", "preset de brosse (standard, airbrush, hard-felt, chalk, splatter, scratches ou un preset enregistré), symétrie, sections Dynamique et Symétrie ouvertes (M9)"],
     ["<code>--edit height-force=V</code>", "force du relief du texture set courant (M9)"],
+    ["<code>--edit resolution=N</code>", "résolution du texture set courant : 512, 1024, 2048, 4096 ou 8192 (M10)"],
     ["<code>--edit material=ID|mask-procedural=ID|param=NOM:VALEUR|projection=TYPE,ÉCHELLE</code>", "ajoute un matériau procédural au-dessus de la sélection, ou un bruit ou motif au masque sélectionné ; règle un paramètre ou la projection de la sélection (M7)"],
     ["<code>--edit mask=black|white|mask-fill=V,MODE,OPACITÉ|mask-levels=A,B,G,C,D|mask-invert=</code>", "donne un masque au calque sélectionné, puis lui ajoute un fill, un levels ou une inversion au-dessus de l'effet sélectionné (M6)"],
     ["<code>--edit fill=R,V,B,ROUGHNESS|mode=MODE,OPACITÉ|group=</code>", "ajoute un fill au-dessus de la sélection et le sélectionne ; règle le mélange de la couleur de base du calque sélectionné ; le groupe dans un dossier (M5)"],
@@ -199,9 +202,9 @@ def body():
         '<div class="kicker">Tutoriel et cahier de tests manuels</div>'
         "<h1>Patine</h1>"
         '<p class="subtitle">Texturing PBR par calques sur mesh 3D<br>'
-        "Fonctionnalités des jalons M0 à M9</p>"
+        "Fonctionnalités des jalons M0 à M10</p>"
         + figure("helmet_texture_sets", FULL, "full", "Le casque d'aviateur importé, panneau Texture sets au premier plan.", "92%")
-        + '<p class="meta">Version 0.1.0 — 14 octobre 2026 — captures réalisées sur RTX 3080 Ti (Vulkan), '
+        + '<p class="meta">Version 0.1.0 — 16 octobre 2026 — captures réalisées sur RTX 3080 Ti (Vulkan), '
         "interface en français, fenêtre 1600 × 900.</p></section>")
 
     # Contents.
@@ -218,6 +221,8 @@ def body():
         "<li>M8 — Peinture : brosse, gomme, alphas, masques peints, undo par tuiles</li>"
         "<li>M9 — Peinture v2 : tablette, dynamique, presets, symétrie, ligne droite, pipette, vue 2D, "
         "relief</li>"
+        "<li>M10 — Indépendance de résolution : changer de résolution, exporter à une autre, caches de "
+        "peinture</li>"
         "<li>Checklist complète des tests manuels</li>"
         "<li>Annexe : options de lancement et régénération de ce document</li>"
         "</ol>"
@@ -1078,8 +1083,66 @@ def body():
         + "<p>Budget : un dab en moins de 8 ms (16 ms sur la RTX A2000, <b>à mesurer</b>).</p>"
         + "</section>")
 
-    # 12. Checklist.
-    add("<section><h2>12. Checklist complète des tests manuels</h2>"
+    # 12. M10.
+    add("<section><h2>12. M10 — Indépendance de résolution</h2>"
+        "<p>Un calque de peinture garde ses <b>traits</b>, pas des pixels. Changer la résolution d'un texture "
+        "set les rejoue à la nouvelle taille : la peinture est aussi nette qu'un trait peint directement à "
+        "cette résolution, et revenir à la résolution de départ redonne exactement l'original.</p>"
+        "<h3>12.1 Changer de résolution</h3>"
+        "<p>Panneau <b>Texture sets</b>, colonne Résolution. Les traits sont rejoués par lots de 64 dabs : "
+        "même en 8K, aucun calcul ne bloque la carte graphique plus de quelques dizaines de millisecondes. "
+        "Ctrl+Z ramène la résolution précédente.</p>"
+        + '<div class="grid c2">'
+        + figure("m10_1k", CLOSE_STROKE, "view", "Un trait à brosse dure, texture set en 1024² : bord en escalier.")
+        + figure("m10_4k", CLOSE_STROKE, "view", "Le même trait en 4096² : net, pas agrandi.")
+        + "</div>"
+        + figure("m10_4k", TEXTURE_SETS, "panel", "La résolution dans le panneau Texture sets.", "60%")
+        + test(["Peindre quelques traits en 1024² (brosse dure, alpha, jitters), zoomer sur un bord.",
+                "Passer en 4096², observer le même bord ; revenir en 1024² ; Ctrl+Z deux fois.",
+                "Passer en 8192² sur la valise."],
+               "En 4096², le bord est net ; de retour en 1024², la peinture est identique au départ ; le "
+               "passage en 8192² prend environ une seconde, sans gel prolongé ni perte du périphérique.")
+        + "</section>")
+
+    add("<section>"
+        "<h3>12.2 Exporter à une autre résolution</h3>"
+        "<p>La résolution d'export ne dépend pas de la résolution de travail : un texture set peut être "
+        "évalué à n'importe quelle taille, à part, sans toucher au document ouvert. En attendant l'exporteur "
+        "(M17), la ligne de commande écrit chaque canal en PNG 16 bits (couleur de base et émissif en sRGB, "
+        "normale et hauteur ramenées de [-1, 1] à [0, 1]).</p>"
+        + code("patine_cli channels manual_tests/casque.patine --out sortie --resolution 2048 [--set NOM]")
+        + test(["Lancer la commande sur le projet du casque, puis ouvrir les PNG dans un visualiseur."],
+               "Un fichier par canal et par texture set (<code>LeatherPartsMat_base-color.png</code>…), en "
+               "2048 × 2048, avec les couleurs et les valeurs du projet.")
+        + "<h3>12.3 Caches de peinture</h3>"
+        "<p>À l'ouverture, les traits sont rejoués : quelques secondes pour un projet longuement peint. "
+        "Pour éviter ce rejeu, « Enregistrer » joint au fichier un <b>cache</b> par calque peint : ses tuiles "
+        "peintes, exactes. À l'ouverture, un cache qui correspond encore à ses traits (même résolution, mêmes "
+        "traits, même version de Patine) remplace le rejeu ; sinon les traits sont rejoués, comme sans cache. "
+        "<b>Fichier › Enregistrer les caches de peinture</b> les désactive (fichier plus petit). L'autosave "
+        "n'en écrit pas. La console indique, à l'ouverture, les calques chargés depuis un cache et les traits "
+        "rejoués.</p>"
+        + table(["Projet 4K, 30 calques dont 10 peints", "Sans caches", "Avec caches"],
+                [["200 traits", "0,77 s", "1,37 s"],
+                 ["2 000 traits", "5,6 s", "0,95 s"]])
+        + test(["Peindre beaucoup de traits, enregistrer, rouvrir : lire la console.",
+                "Décocher Fichier › Enregistrer les caches de peinture, enregistrer, rouvrir."],
+               "Avec caches : « paint layers ready from_caches=N strokes_replayed=0 » ; sans caches, les traits "
+               "sont rejoués ; dans les deux cas, la peinture est identique.")
+        + "<h3>12.4 Mesure</h3>"
+        + code("cargo run --release -p patine_cli -- bench resolution\n"
+               "cargo run --release -p patine_cli -- bench open [--strokes N] [--out fichier.patine]")
+        + table(["Résolution (4 calques, 100 traits)", "Rejeu et composition", "Mémoire du pool"],
+                [["1024²", "162 ms", "117 Mo"],
+                 ["4096²", "328 ms", "1,9 Go"],
+                 ["8192²", "950 ms", "7,5 Go"],
+                 ["retour en 1024²", "180 ms", "117 Mo"]])
+        + "<p>Budget : ouvrir un projet 4K de 30 calques en moins de 5 s (10 s sur la RTX A2000, "
+        "<b>à mesurer</b>).</p>"
+        + "</section>")
+
+    # 13. Checklist.
+    add("<section><h2>13. Checklist complète des tests manuels</h2>"
         "<h3>M0 — Fondations</h3>"
         + checklist(["<code>cargo run -p patine_app</code> ouvre une fenêtre sans erreur dans le terminal.",
                      "Les 9 panneaux sont présents ; on peut les détacher, les déplacer et les réancrer.",
@@ -1188,10 +1251,20 @@ def body():
                      "Enregistrer, rouvrir : identique ; un projet du M8 s'ouvre avec ses traits.",
                      "<code>patine_cli bench paint --symmetry 8 --mirror</code> sur la RTX A2000 : moins de 16 ms "
                      "par dab."])
+        + "<h3>M10 — Indépendance de résolution</h3>"
+        + checklist(["Peindre en 1024², passer en 4096² : le bord des traits est net en gros plan.",
+                     "Revenir en 1024² : identique au départ ; Ctrl+Z ramène la résolution, puis le dernier trait.",
+                     "8192² sur la valise : environ une seconde, pas de gel prolongé ni de perte du périphérique.",
+                     "Enregistrer avec caches, rouvrir : ouverture rapide, la console indique les caches utilisés.",
+                     "Sans caches (menu Fichier) : fichier plus petit ; rouvrir : rejeu, même résultat.",
+                     "Un projet du M9 (sans caches) s'ouvre, identique.",
+                     "<code>patine_cli channels</code> : un PNG lisible par canal, à la résolution demandée.",
+                     "<code>bench resolution</code> et <code>bench open</code> sur la RTX A2000 (ouverture : moins "
+                     "de 10 s)."])
         + "</section>")
 
     # Appendix.
-    add("<section><h2>13. Annexe</h2>"
+    add("<section><h2>14. Annexe</h2>"
         "<h3>Options de lancement de patine_app</h3>"
         "<p>Ces options servent aux captures et aux tests ; <code>patine_app --help</code> les liste.</p>"
         + table(["Option", "Effet"], OPTIONS)
@@ -1202,7 +1275,7 @@ def body():
         + code("cargo build --release -p patine_app -p patine_cli\n"
                "python scripts/manual_tests/capture_tutorial.py\n"
                "python scripts/manual_tests/build_tutorial.py")
-        + "<p>Le premier script produit les 97 captures dans <code>manual_tests/captures/</code> (et le projet "
+        + "<p>Le premier script produit les 99 captures dans <code>manual_tests/captures/</code> (et le projet "
         "<code>manual_tests/casque.patine</code>) ; le second les "
         "recadre et imprime ce PDF avec Microsoft Edge (ou Chrome) sans interface.</p>"
         "<h3>Crédits</h3>"
@@ -1287,7 +1360,7 @@ def main():
     os.makedirs(IMAGES)
     document = (
         '<!doctype html><html lang="fr"><head><meta charset="utf-8">'
-        f"<title>Patine — tutoriel M0 à M9</title><style>{STYLE}</style></head>"
+        f"<title>Patine — tutoriel M0 à M10</title><style>{STYLE}</style></head>"
         f"<body>{body()}</body></html>"
     )
     page = os.path.join(OUT, "index.html")
