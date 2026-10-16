@@ -465,3 +465,63 @@ gpu_test!(
         assert_eq!(project, before);
     }
 );
+
+/// The channels of [`CHANNELS`] among `images`, as [`Gpu::state`] lists them.
+fn as_images(images: &[patine_compositor::offline::ChannelImage]) -> Vec<Vec<f32>> {
+    CHANNELS
+        .iter()
+        .map(|channel| {
+            let image = images
+                .iter()
+                .find(|image| image.def.channel == *channel)
+                .expect("evaluated");
+            match ChannelKind::of(*channel) {
+                ChannelKind::Scalar => image.texels.iter().map(|t| t[0]).collect(),
+                _ => image.texels.iter().flatten().copied().collect(),
+            }
+        })
+        .collect()
+}
+
+gpu_test!(
+    /// Export resolution: a texture set evaluated at the working resolution equals the
+    /// working document, at a higher one it equals a document at that resolution, and
+    /// the working document is left as it was.
+    fn texture_sets_evaluate_at_any_resolution(ctx) {
+        use patine_compositor::offline::{OfflineError, evaluate_set};
+
+        let (low, high) = resolutions();
+        let mut gpu = Gpu::new(&ctx);
+        let mut scene = scene(low);
+        gpu.sync(&ctx, &scene.project);
+        for (target, stroke) in strokes(&scene) {
+            gpu.paint_live(&ctx, &mut scene, target, &stroke);
+        }
+        let working = gpu.state(&ctx, &scene);
+        let replays = gpu.document.paints().replays();
+        let memory = gpu.document.memory();
+
+        let at_low = evaluate_set(&ctx, &gpu.compositor, &scene.project, SET, low).expect("evaluated");
+        assert_eq!(at_low.len(), scene.project.texture_sets[0].channels.len());
+        assert!(at_low.iter().all(|image| image.size == low.pixels()));
+        let difference = largest_difference(&as_images(&at_low), &working[..2]);
+        assert_eq!(difference, 0.0, "at the working resolution");
+
+        let at_high = evaluate_set(&ctx, &gpu.compositor, &scene.project, SET, high).expect("evaluated");
+        let mut reference_gpu = Gpu::new(&ctx);
+        let mut reference = scene.project.clone();
+        reference.texture_sets[0].resolution = high;
+        reference_gpu.sync(&ctx, &reference);
+        let expected = Scene { project: reference, ..self::scene(high) };
+        let difference = largest_difference(&as_images(&at_high), &reference_gpu.state(&ctx, &expected)[..2]);
+        assert_eq!(difference, 0.0, "at {high:?}");
+
+        // The working document did not move.
+        assert_eq!(gpu.document.paints().replays(), replays);
+        assert_eq!(gpu.document.memory(), memory);
+        assert_eq!(gpu.state(&ctx, &scene), working);
+
+        let missing = evaluate_set(&ctx, &gpu.compositor, &scene.project, TextureSetId(9), low);
+        assert!(matches!(missing, Err(OfflineError::NoTextureSet(_))));
+    }
+);
