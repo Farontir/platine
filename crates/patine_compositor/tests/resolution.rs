@@ -436,6 +436,13 @@ gpu_test!(
         let difference = largest_difference(&back, &original);
         assert!(difference <= 1.0 / 512.0, "the round trip changed the paint by {difference}");
         println!("round trip: largest difference {difference}");
+        // Nothing of the high resolution is left: the pool holds what a document opened
+        // at the low resolution holds.
+        let mut opened = Gpu::new(&ctx);
+        opened.sync(&ctx, &scene.project);
+        assert_eq!(gpu.pool.memory(), opened.pool.memory(), "memory after the round trip");
+        assert_eq!(gpu.pool.len(), opened.pool.len(), "textures after the round trip");
+        drop(opened);
 
         // Undo the two resolution changes and the last stroke: replayed, without the tiles
         // saved at the first resolution (released with the rasters).

@@ -500,6 +500,42 @@ impl Contents {
 
     /// Releases the contents not in `used` and the surface maps of texture sets that no
     /// longer exist.
+    /// Releases at once the surface maps and brush materials of the texture sets
+    /// `resized`, whose resolution changed, and the contents at sizes no texture set has
+    /// anymore (`sizes` are those in use): evaluated again at the new size.
+    pub fn release_resized(
+        &mut self,
+        pool: &mut TexturePool,
+        resized: &[TextureSetId],
+        sizes: &[u32],
+    ) {
+        self.textures.retain(|_, content| {
+            let keep = sizes.contains(&content.key.size);
+            if !keep {
+                pool.release(content.texture);
+            }
+            keep
+        });
+        self.surfaces.retain(|id, map| {
+            let keep = !resized.contains(id);
+            if !keep {
+                pool.release(map.texture);
+            }
+            keep
+        });
+        self.brushes.retain(|brush| {
+            let keep = !resized.contains(&brush.key.set);
+            if !keep {
+                for (_, id, _) in &brush.textures {
+                    pool.release(*id);
+                }
+            }
+            keep
+        });
+    }
+
+    /// Releases the contents not in `used`, and the surface maps (and their brush
+    /// materials) of texture sets not in `sets`.
     pub fn release_unused(
         &mut self,
         pool: &mut TexturePool,

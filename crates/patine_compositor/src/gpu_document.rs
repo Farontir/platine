@@ -240,6 +240,18 @@ impl Scratch {
             pool.release(id);
         }
     }
+
+    /// Releases the textures of sizes not in `sizes` (no texture set has them anymore,
+    /// after a change of resolution).
+    fn retain_sizes(&mut self, pool: &mut TexturePool, sizes: &[u32]) {
+        self.textures.retain(|(size, _, _), id| {
+            let keep = sizes.contains(size);
+            if !keep {
+                pool.release(*id);
+            }
+            keep
+        });
+    }
 }
 
 /// The final textures of every texture set.
@@ -686,6 +698,67 @@ impl GpuDocument {
         pool.flush();
     }
 
+    /// Releases, before anything is allocated, what the texture sets whose resolution
+    /// changed hold (channels, shading normal, masks, paint contents, surface maps,
+    /// procedural contents and working textures at sizes no longer used), and destroys
+    /// it: a change of resolution then needs the memory of the larger size, not of both.
+    /// A stroke being painted on such a set is abandoned.
+    fn release_resized(&mut self, pool: &mut TexturePool, project: &Project) {
+        let resized: Vec<TextureSetId> = self
+            .sets
+            .iter()
+            .filter(|gpu| {
+                project.texture_set(gpu.id).is_some_and(|set| {
+                    let size = set.resolution.pixels();
+                    gpu.channels.iter().any(|channel| channel.size != size)
+                })
+            })
+            .map(|gpu| gpu.id)
+            .collect();
+        if resized.is_empty() {
+            return;
+        }
+        if self
+            .live
+            .as_ref()
+            .is_some_and(|live| resized.contains(&live.set))
+            && let Some(live) = self.live.take()
+        {
+            live.stroke.abandon(pool);
+        }
+        let mut kept = Vec::new();
+        for set in self.sets.drain(..) {
+            if resized.contains(&set.id) {
+                for channel in set.channels {
+                    release_channel(pool, channel);
+                }
+                if let Some(shading) = set.shading {
+                    pool.release(shading.texture);
+                }
+            } else {
+                kept.push(set);
+            }
+        }
+        self.sets = kept;
+        self.masks.retain(|_, mask| {
+            let keep = !resized.contains(&mask.set);
+            if !keep {
+                pool.release(mask.texture);
+            }
+            keep
+        });
+        self.paints.release_sets(pool, &resized);
+        let sizes: Vec<u32> = project
+            .texture_sets
+            .iter()
+            .map(|set| set.resolution.pixels())
+            .collect();
+        self.contents.release_resized(pool, &resized, &sizes);
+        self.scratch.retain_sizes(pool, &sizes);
+        // Nothing recorded refers to them: destroyed now.
+        pool.flush();
+    }
+
     /// Brings the GPU textures in line with `project`: allocates, reallocates and
     /// releases what changed, evaluates the masks that changed, then evaluates the layer
     /// stacks from the first changed layer of each channel. Returns the texture sets whose
@@ -698,6 +771,7 @@ impl GpuDocument {
         project: &Project,
     ) -> Vec<TextureSetId> {
         let mut changed = Vec::new();
+        self.release_resized(pool, project);
         let mut encoder = ctx
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor {
@@ -877,6 +951,12 @@ impl GpuDocument {
         let sets: Vec<TextureSetId> = project.texture_sets.iter().map(|set| set.id).collect();
         self.contents.release_unused(pool, &used, &sets);
         self.paints.release_unused(pool, &painted);
+        let sizes: Vec<u32> = project
+            .texture_sets
+            .iter()
+            .map(|set| set.resolution.pixels())
+            .collect();
+        self.scratch.retain_sizes(pool, &sizes);
         ctx.queue.submit([encoder.finish()]);
         // Textures released or evicted while recording may be used by the commands just
         // submitted: only now can they be destroyed.

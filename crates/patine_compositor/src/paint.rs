@@ -620,6 +620,21 @@ impl PaintRasters {
         dirty
     }
 
+    /// Releases the rasters of the texture sets `sets`.
+    pub(crate) fn release_sets(&mut self, pool: &mut TexturePool, sets: &[TextureSetId]) {
+        let gone: Vec<PaintTarget> = self
+            .rasters
+            .iter()
+            .filter(|(_, raster)| sets.contains(&raster.set))
+            .map(|(target, _)| *target)
+            .collect();
+        for target in gone {
+            if let Some(raster) = self.rasters.remove(&target) {
+                raster.release(pool);
+            }
+        }
+    }
+
     /// Releases the rasters not in `used`.
     pub(crate) fn release_unused(&mut self, pool: &mut TexturePool, used: &HashSet<PaintTarget>) {
         let unused: Vec<PaintTarget> = self
