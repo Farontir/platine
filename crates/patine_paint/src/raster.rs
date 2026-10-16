@@ -187,6 +187,9 @@ pub struct StrokeTarget {
     /// The stroke buffer.
     pub buffer: TextureId,
     depth: wgpu::Texture,
+    /// The depth images and the depth test texture, in the pool (recycled from one
+    /// replayed stroke to the next).
+    depth_ids: [TextureId; 2],
     alpha: Option<wgpu::Texture>,
     size: u32,
 }
@@ -586,18 +589,36 @@ impl Painter {
             },
             ..square(Some("stroke depth"), 1, format, usage)
         };
-        let depth = device.create_texture(&size2(
-            DEPTH_IMAGE_FORMAT,
-            wgpu::TextureUsages::RENDER_ATTACHMENT
-                | wgpu::TextureUsages::TEXTURE_BINDING
-                | wgpu::TextureUsages::COPY_SRC,
-            layers,
-        ));
-        let depth_test = device.create_texture(&size2(
-            wgpu::TextureFormat::Depth32Float,
-            wgpu::TextureUsages::RENDER_ATTACHMENT,
-            1,
-        ));
+        // Both are cleared before they are read: the textures of a stroke replayed
+        // earlier in the encoder will do.
+        let depth_id = pool.allocate_recycled(
+            ctx,
+            &size2(
+                DEPTH_IMAGE_FORMAT,
+                wgpu::TextureUsages::RENDER_ATTACHMENT
+                    | wgpu::TextureUsages::TEXTURE_BINDING
+                    | wgpu::TextureUsages::COPY_SRC,
+                layers,
+            ),
+            Residency::Pinned,
+        );
+        let depth_test_id = pool.allocate_recycled(
+            ctx,
+            &size2(
+                wgpu::TextureFormat::Depth32Float,
+                wgpu::TextureUsages::RENDER_ATTACHMENT,
+                1,
+            ),
+            Residency::Pinned,
+        );
+        let depth = pool
+            .peek(depth_id)
+            .expect("a texture that was just allocated")
+            .clone();
+        let depth_test = pool
+            .peek(depth_test_id)
+            .expect("a texture that was just allocated")
+            .clone();
         let rendered = match stroke.space {
             StrokeSpace::View => projections.as_slice(),
             StrokeSpace::Uv => &[],
@@ -735,6 +756,7 @@ impl Painter {
             eraser: stroke.tool == Tool::Eraser,
             buffer,
             depth,
+            depth_ids: [depth_id, depth_test_id],
             alpha,
             size: set.size,
         }
@@ -965,6 +987,9 @@ impl Painter {
     /// Ends a stroke: releases its stroke buffer.
     pub fn end_stroke(&self, pool: &mut TexturePool, target: StrokeTarget) {
         pool.release(target.buffer);
+        for id in target.depth_ids {
+            pool.release(id);
+        }
     }
 
     /// Replays `stroke` onto `contents`: its dabs by batches of [`REPLAY_BATCH`], each over
@@ -1245,6 +1270,9 @@ impl LiveStroke {
     /// released (the contents are being released too).
     pub fn abandon(self, pool: &mut TexturePool) {
         pool.release(self.target.buffer);
+        for id in self.target.depth_ids {
+            pool.release(id);
+        }
         for before in self.before {
             before.release(pool);
         }
