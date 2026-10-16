@@ -5,6 +5,7 @@
 //! the document; [`content`] and [`paint`] hold the procedural and painted contents;
 //! [`offline`] evaluates a texture set at another resolution (M10).
 
+pub mod cache;
 pub mod compositor;
 pub mod content;
 pub mod gpu_document;

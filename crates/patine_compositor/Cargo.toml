@@ -16,6 +16,9 @@ thiserror.workspace = true
 half.workspace = true
 bytemuck.workspace = true
 tracing.workspace = true
+serde.workspace = true
+postcard.workspace = true
+zstd.workspace = true
 
 [dev-dependencies]
 patine_gpu = { workspace = true, features = ["testing"] }

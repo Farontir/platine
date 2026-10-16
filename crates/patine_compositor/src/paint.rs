@@ -12,7 +12,7 @@
 //! Contents are pinned: only a full replay can rebuild them. Saved tiles are
 //! discardable.
 
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::sync::Arc;
 
 use patine_core::channel::Channel;
@@ -32,6 +32,7 @@ use patine_paint::raster::{Content, Painter, SetSurface, TileSnapshot, content_d
 use patine_paint::reference::ContentLayout;
 use patine_procedural::def::Output;
 
+use crate::cache::RasterCache;
 use crate::compositor::Region;
 use crate::reference::ChannelKind;
 
@@ -134,6 +135,9 @@ pub(crate) struct Raster {
     pub(crate) contents: BTreeMap<Channel, PaintContent>,
     /// Tiles from before each stroke that can be undone without a replay, by stroke.
     pub(crate) undo: HashMap<*const Stroke, StrokeUndo>,
+    /// Tiles the strokes touched (`[x, y]`), kept through undo: what a raster cache
+    /// saves.
+    pub(crate) painted: BTreeSet<[u32; 2]>,
 }
 
 impl Raster {
@@ -161,6 +165,19 @@ pub struct PaintRasters {
     alphas: HashMap<ResourceHash, Option<AlphaImage>>,
     /// Strokes replayed since creation (tests of the undo tiles).
     replays: u64,
+    /// Raster caches of an opened project, by paint node, used at the next sync.
+    pending: HashMap<u64, RasterCache>,
+    /// Rasters loaded from a cache since creation.
+    cache_loads: u64,
+}
+
+/// The identifier of the node `target` paints (the layer, or the mask effect), as
+/// project files name stroke logs and caches.
+pub(crate) fn node_id(target: PaintTarget) -> u64 {
+    match target {
+        PaintTarget::Layer(layer) => layer.0,
+        PaintTarget::Mask(_, effect) => effect.0,
+    }
 }
 
 /// Every paint layer and paint mask effect of `layers`, with the channels they may
@@ -245,6 +262,65 @@ impl PaintRasters {
     /// Strokes replayed since creation.
     pub fn replays(&self) -> u64 {
         self.replays
+    }
+
+    /// Rasters loaded from a raster cache since creation.
+    pub fn cache_loads(&self) -> u64 {
+        self.cache_loads
+    }
+
+    /// Keeps the raster caches of an opened project, by paint node, for the next sync:
+    /// a paint node with no raster yet takes its cache when it matches its strokes.
+    pub fn provide_caches(&mut self, caches: impl IntoIterator<Item = (u64, RasterCache)>) {
+        self.pending = caches.into_iter().collect();
+    }
+
+    /// The painted tiles of `target`, sorted by `[x, y]`.
+    pub(crate) fn painted_tiles(&self, target: PaintTarget) -> Vec<[u32; 2]> {
+        self.rasters
+            .get(&target)
+            .map(|raster| raster.painted.iter().copied().collect())
+            .unwrap_or_default()
+    }
+
+    /// Fills the empty raster of `target` from `cache` when it was made from `log` in
+    /// `set`. Returns the tiles loaded, or `None` when the cache does not match (the
+    /// strokes are then replayed).
+    #[allow(clippy::too_many_arguments)]
+    fn load_cache(
+        &mut self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        encoder: &mut wgpu::CommandEncoder,
+        target: PaintTarget,
+        set: &TextureSet,
+        channels: &[Channel],
+        log: &Arc<StrokeLog>,
+        cache: &RasterCache,
+    ) -> Option<Vec<[u32; 2]>> {
+        let consistent = cache.matches(set, log)
+            && cache.channels.iter().all(|cached| {
+                channels.contains(&cached.channel)
+                    && cached.vector == (layout_of(cached.channel) == ContentLayout::Vector)
+            });
+        if !consistent {
+            return None;
+        }
+        let size = set.resolution.pixels();
+        let painted: Vec<Channel> = cache.channels.iter().map(|cached| cached.channel).collect();
+        self.ensure_contents(ctx, pool, encoder, target, set.id, size, &painted);
+        let raster = self.rasters.get_mut(&target).expect("ensured above");
+        for cached in &cache.channels {
+            if let Some(content) = raster.contents.get(&cached.channel)
+                && let Some(texture) = pool.get(content.texture)
+            {
+                crate::cache::upload_tiles(ctx, encoder, texture, cached);
+            }
+            raster.painted.extend(cached.tiles.iter().copied());
+        }
+        raster.strokes = log.strokes.clone();
+        self.cache_loads += 1;
+        Some(raster.painted.iter().copied().collect())
     }
 
     /// Memory of the contents and saved tiles, in bytes.
@@ -335,6 +411,7 @@ impl PaintRasters {
             strokes: Vec::new(),
             contents: BTreeMap::new(),
             undo: HashMap::new(),
+            painted: BTreeSet::new(),
         });
         for channel in channels {
             raster
@@ -348,6 +425,7 @@ impl PaintRasters {
     /// before it, as the raster's last stroke.
     pub(crate) fn adopt(&mut self, target: PaintTarget, stroke: Arc<Stroke>, undo: StrokeUndo) {
         if let Some(raster) = self.rasters.get_mut(&target) {
+            raster.painted.extend(undo.tiles.iter().copied());
             raster.undo.insert(Arc::as_ptr(&stroke), undo);
             raster.strokes.push(stroke);
         }
@@ -405,6 +483,21 @@ impl PaintRasters {
                 old.release(pool);
             }
             self.ensure_contents(ctx, pool, encoder, target, set.id, size, &[]);
+            // An opened project's cache, for a raster that has nothing yet.
+            if let Some(cache) = self.pending.remove(&node_id(target))
+                && self.rasters[&target].strokes.is_empty()
+                && !log.strokes.is_empty()
+            {
+                match self.load_cache(ctx, pool, encoder, target, set, &channels, &log, &cache) {
+                    Some(tiles) => {
+                        for [x, y] in tiles {
+                            dirty.add_tile(x, y);
+                        }
+                        continue;
+                    }
+                    None => tracing::debug!(?target, "raster cache out of date: strokes replayed"),
+                }
+            }
             let raster = self.rasters.get_mut(&target).expect("ensured above");
             let prefix = raster
                 .strokes
@@ -449,6 +542,7 @@ impl PaintRasters {
                     clear(encoder, &content.view);
                 }
                 raster.strokes.clear();
+                raster.painted.clear();
                 for (_, undo) in raster.undo.drain() {
                     undo.release(pool);
                 }
@@ -515,9 +609,10 @@ impl PaintRasters {
                     alpha.as_ref(),
                     &contents,
                 );
-                for tile in tiles {
+                for tile in &tiles {
                     dirty.add_tile(tile[0], tile[1]);
                 }
+                raster.painted.extend(tiles);
                 raster.strokes.push(stroke.clone());
                 self.replays += 1;
             }
@@ -547,5 +642,6 @@ impl PaintRasters {
         }
         self.geometry.clear();
         self.alphas.clear();
+        self.pending.clear();
     }
 }

@@ -525,3 +525,87 @@ gpu_test!(
         assert!(matches!(missing, Err(OfflineError::NoTextureSet(_))));
     }
 );
+
+/// The raster caches of `gpu`'s document, through their file encoding.
+fn saved_caches(
+    ctx: &GpuContext,
+    gpu: &Gpu,
+    project: &Project,
+) -> Vec<(u64, patine_compositor::cache::RasterCache)> {
+    use patine_compositor::cache::RasterCache;
+    gpu.document
+        .raster_caches(ctx, &gpu.pool, project)
+        .expect("readback")
+        .into_iter()
+        .map(|(id, cache)| (id, RasterCache::decode(&cache.encode()).expect("decodes")))
+        .collect()
+}
+
+gpu_test!(
+    /// Raster caches: a document given the caches of a painted project shows the same
+    /// paint without replaying a stroke; out-of-date or damaged caches are replayed.
+    fn raster_caches_replace_the_replay(ctx) {
+        use patine_compositor::cache::RasterCache;
+
+        let (low, high) = resolutions();
+        let mut gpu = Gpu::new(&ctx);
+        let mut scene = scene(low);
+        gpu.sync(&ctx, &scene.project);
+        let strokes = strokes(&scene);
+        for (target, stroke) in &strokes {
+            gpu.paint_live(&ctx, &mut scene, *target, stroke);
+        }
+        let original = gpu.state(&ctx, &scene);
+        let caches = saved_caches(&ctx, &gpu, &scene.project);
+        assert_eq!(caches.len(), 2, "the paint layer and the mask effect");
+        let bytes: usize = caches.iter().map(|(_, cache)| cache.encode().len()).sum();
+        let tiles: usize = caches.iter().flat_map(|(_, c)| &c.channels).map(|c| c.tiles.len()).sum();
+        println!("caches: {bytes} bytes, {tiles} channel tiles");
+
+        // Opened with its caches: no replay, the same texels.
+        let fresh = |caches: Vec<(u64, RasterCache)>, project: &Project| {
+            let mut opened = Gpu::new(&ctx);
+            opened.document.provide_caches(caches);
+            opened.sync(&ctx, project);
+            opened
+        };
+        let opened = fresh(caches.clone(), &scene.project);
+        assert_eq!(opened.document.paints().replays(), 0);
+        assert_eq!(opened.document.paints().cache_loads(), 2);
+        assert!(opened.state(&ctx, &scene) == original, "cached paint differs");
+        // Its own caches are the same again.
+        assert_eq!(saved_caches(&ctx, &opened, &scene.project), caches);
+        drop(opened);
+
+        // Another resolution: replayed.
+        let mut higher = scene.project.clone();
+        higher.texture_sets[0].resolution = high;
+        let opened = fresh(caches.clone(), &higher);
+        assert_eq!(opened.document.paints().cache_loads(), 0);
+        assert_eq!(opened.document.paints().replays(), strokes.len() as u64);
+        drop(opened);
+
+        // A key from another cache version, or inconsistent texels: replayed.
+        let mut stale = caches.clone();
+        stale[0].1.key[0] ^= 1;
+        stale[1].1.channels[0].texels.pop();
+        let opened = fresh(stale, &scene.project);
+        assert_eq!(opened.document.paints().cache_loads(), 0);
+        assert_eq!(opened.document.paints().replays(), strokes.len() as u64);
+        assert!(opened.state(&ctx, &scene) == original, "replayed paint differs");
+
+        // Another stroke log (the last stroke undone): that node is replayed.
+        assert!(scene.history.undo(&mut scene.project).expect("undo"));
+        let opened = fresh(caches.clone(), &scene.project);
+        assert_eq!(opened.document.paints().cache_loads(), 1, "the paint layer still matches");
+        assert_eq!(opened.document.paints().replays(), 0, "the mask has no stroke left");
+        drop(opened);
+
+        // Damaged bytes are refused.
+        let mut damaged = caches[0].1.encode();
+        let middle = damaged.len() / 2;
+        damaged.truncate(middle);
+        assert!(RasterCache::decode(&damaged).is_err());
+        assert!(RasterCache::decode(b"not a cache").is_err());
+    }
+);

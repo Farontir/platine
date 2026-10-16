@@ -35,13 +35,17 @@ use patine_core::mask::{MASK_VALUE_CHANNEL, MaskEffect, MaskStack};
 use patine_core::project::{Project, TextureSetId};
 use patine_core::stroke::{Dab, Stroke};
 use patine_gpu::pool::{Residency, TextureId, TexturePool, full_mip_count, texture_bytes};
-use patine_gpu::{GpuContext, wgpu};
+use patine_gpu::{GpuContext, GpuError, wgpu};
 use patine_paint::raster::{Content, LiveStroke, SetSurface};
+use patine_paint::reference::ContentLayout;
 use thiserror::Error;
 
+use crate::cache::{CachedChannel, RasterCache, cache_key, read_tiles};
 use crate::compositor::{BlendStep, Compositor, Ping, Region, Source};
 use crate::content::{ContentId, Contents};
-use crate::paint::{PaintRasters, StrokeUndo, layout_of, painted_channels, stroke_value};
+use crate::paint::{
+    PaintRasters, StrokeUndo, layout_of, node_id, paint_targets, painted_channels, stroke_value,
+};
 use crate::reference::ChannelKind;
 
 /// GPU format of a channel format.
@@ -579,6 +583,67 @@ impl GpuDocument {
     /// Memory of the paint contents, in bytes.
     pub fn paint_memory(&self) -> u64 {
         self.paints.memory()
+    }
+
+    /// The raster caches of `project`'s paint nodes, by node identifier, read back from
+    /// the GPU (only the painted tiles). Nodes whose raster is not in step with their
+    /// strokes (not synced yet, or being painted) have none. Blocks until the GPU is
+    /// done.
+    pub fn raster_caches(
+        &self,
+        ctx: &GpuContext,
+        pool: &TexturePool,
+        project: &Project,
+    ) -> Result<Vec<(u64, RasterCache)>, GpuError> {
+        let live = self.live.as_ref().map(|live| live.target);
+        let mut caches = Vec::new();
+        for set in &project.texture_sets {
+            for (target, _, log) in paint_targets(&set.stack.layers) {
+                let Some(raster) = self.paints.rasters.get(&target) else {
+                    continue;
+                };
+                let in_step = raster.size == set.resolution.pixels()
+                    && raster.set == set.id
+                    && raster.strokes.len() == log.strokes.len()
+                    && raster
+                        .strokes
+                        .iter()
+                        .zip(&log.strokes)
+                        .all(|(a, b)| Arc::ptr_eq(a, b));
+                if live == Some(target) || !in_step || log.strokes.is_empty() {
+                    continue;
+                }
+                let tiles = self.paints.painted_tiles(target);
+                let mut channels = Vec::new();
+                for (channel, content) in &raster.contents {
+                    let Some(texture) = pool.peek(content.texture) else {
+                        continue;
+                    };
+                    channels.push(CachedChannel {
+                        channel: *channel,
+                        vector: content.layout == ContentLayout::Vector,
+                        tiles: tiles.clone(),
+                        texels: read_tiles(ctx, texture, &tiles)?,
+                    });
+                }
+                let ids: Vec<Channel> = channels.iter().map(|c| c.channel).collect();
+                caches.push((
+                    node_id(target),
+                    RasterCache {
+                        key: cache_key(set, &ids, &log),
+                        size: raster.size,
+                        channels,
+                    },
+                ));
+            }
+        }
+        Ok(caches)
+    }
+
+    /// Keeps the raster caches of an opened project for the next sync (see
+    /// [`PaintRasters::provide_caches`]).
+    pub fn provide_caches(&mut self, caches: impl IntoIterator<Item = (u64, RasterCache)>) {
+        self.paints.provide_caches(caches);
     }
 
     /// The paint contents (tests and measurements).

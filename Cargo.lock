@@ -2457,9 +2457,12 @@ dependencies = [
  "patine_mesh",
  "patine_paint",
  "patine_procedural",
+ "postcard",
  "proptest",
+ "serde",
  "thiserror 2.0.21",
  "tracing",
+ "zstd",
 ]
 
 [[package]]
