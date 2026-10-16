@@ -47,7 +47,7 @@ pub const USAGE: &str = "usage: patine_app [mesh] [options]
                                 mask-levels=IN_LOW,IN_HIGH,GAMMA,OUT_LOW,OUT_HIGH,
                                 mask-invert=, material=ID, mask-procedural=ID,
                                 param=NAME:VALUE, projection=KIND,SCALE, paint-layer=,
-                                mask-paint=, height-force=V
+                                mask-paint=, height-force=V, resolution=N
   --tool brush|eraser           painting tool
   --brush KEY=VALUE             brush setting (repeatable): size=PX, flow=V, opacity=V,
                                 hardness=V, spacing=V, angle=DEG, smoothing=PX,
@@ -110,6 +110,8 @@ pub enum StartupEdit {
     MaskPaint,
     /// Set the height force of the current texture set.
     HeightForce(f32),
+    /// Set the resolution of the current texture set.
+    Resolution(u32),
 }
 
 /// A brush setting given on the command line.
@@ -342,6 +344,11 @@ impl StartupEdit {
             "paint-layer" => StartupEdit::PaintLayer,
             "mask-paint" => StartupEdit::MaskPaint,
             "height-force" => StartupEdit::HeightForce(value.parse().ok()?),
+            "resolution" => {
+                let pixels: u32 = value.parse().ok()?;
+                patine_core::project::Resolution::new(pixels)?;
+                StartupEdit::Resolution(pixels)
+            }
             _ => return None,
         })
     }
@@ -882,6 +889,11 @@ mod tests {
             }]
         );
         assert_eq!(options.edits, [StartupEdit::HeightForce(2.5)]);
+        assert_eq!(
+            parse(&["--edit", "resolution=4096"]).unwrap().edits,
+            [StartupEdit::Resolution(4096)]
+        );
+        assert!(parse(&["--edit", "resolution=1000"]).is_err());
         assert!(parse(&["--symmetry", "w"]).is_err());
         assert!(parse(&["--symmetry", "radial=17"]).is_err());
         assert!(parse(&["--brush", "follow-path=yes"]).is_err());

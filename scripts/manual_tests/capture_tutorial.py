@@ -103,6 +103,15 @@ M9_HEIGHT = [
     "--stroke", "620,380;900,380",
 ]
 
+# M10: the same hard stroke on the suitcase seen close up, at two resolutions.
+M10_BASE = [SUITCASE, "--capture-frames", "60", "--orbit", "30,20", "--zoom", "0.25"]
+M10_STROKE = [
+    "--edit", "paint-layer=",
+    "--brush", "size=60", "--brush", "hardness=1", "--brush", "flow=1",
+    "--brush", "color=0.75,0.12,0.08",
+    "--stroke", "760,170;860,300;1000,260;1100,380",
+]
+
 # name -> arguments (mesh first, if any)
 CAPTURES = {
     "interface_fr": [],
@@ -230,6 +239,8 @@ CAPTURES = {
         "--stroke", "620,300;760,330;900,300",
     ],
     "m9_height": M8_BASE + ["--tab", "texture-sets"] + M9_HEIGHT,
+    "m10_1k": M10_BASE + ["--edit", "resolution=1024"] + M10_STROKE,
+    "m10_4k": M10_BASE + ["--tab", "texture-sets", "--edit", "resolution=4096"] + M10_STROKE,
 }
 
 # Captures in a window other than 1600 x 900.

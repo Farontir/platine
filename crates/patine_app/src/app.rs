@@ -725,6 +725,14 @@ impl App {
                         let set = self.ui.texture_sets.selected;
                         Box::new(patine_core::commands::SetHeightForce::new(set, *force))
                     }
+                    StartupEdit::Resolution(pixels) => {
+                        let set = self.ui.texture_sets.selected;
+                        let resolution = patine_core::project::Resolution::new(*pixels)
+                            .context("a supported resolution (checked when parsing)")?;
+                        Box::new(patine_core::commands::SetTextureSetResolution::new(
+                            set, resolution,
+                        ))
+                    }
                     StartupEdit::PaintLayer => {
                         let Some(set) = document.project.texture_set(self.ui.texture_sets.selected)
                         else {
