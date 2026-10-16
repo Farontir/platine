@@ -292,3 +292,86 @@ proptest! {
         prop_assert_eq!(bits(&read), bits(&project));
     }
 }
+
+/// The identifiers of the paint layers and paint mask effects of `project`.
+fn paint_nodes(project: &Project) -> Vec<(u64, Arc<patine_core::stroke::StrokeLog>)> {
+    let mut nodes = Vec::new();
+    project.visit_layers(&mut |_, layer| {
+        if let LayerKind::Paint { strokes } = &layer.kind {
+            nodes.push((layer.id.0, strokes.clone()));
+        }
+        for entry in layer.mask.iter().flat_map(|mask| &mask.effects) {
+            if let patine_core::mask::MaskEffect::Paint { strokes } = &entry.effect {
+                nodes.push((entry.id.0, strokes.clone()));
+            }
+        }
+    });
+    nodes
+}
+
+#[test]
+fn raster_caches_round_trip_beside_the_document() {
+    let project = rich_project_v2();
+    let nodes = paint_nodes(&project);
+    assert!(!nodes.is_empty(), "the rich project paints");
+    let mut caches = file::Caches::new();
+    caches.insert(nodes[0].0, vec![1, 2, 3, 250]);
+    // A node the project does not have: not written.
+    caches.insert(987_654, vec![9; 16]);
+    let bytes = file::write_with_caches(&project, Cursor::new(Vec::new()), None, &caches)
+        .expect("write")
+        .into_inner();
+
+    let (read, read_caches) = file::read_with_caches(Cursor::new(bytes.clone())).expect("read");
+    assert_eq!(read, project);
+    assert_eq!(read_caches.len(), 1);
+    assert_eq!(read_caches.get(&nodes[0].0), Some(&vec![1, 2, 3, 250]));
+    // Readers that ignore caches read the same document.
+    assert_eq!(file::read(Cursor::new(bytes)).expect("read"), project);
+
+    // Without caches: none come back.
+    let plain = file::write(&project, Cursor::new(Vec::new()), None)
+        .expect("write")
+        .into_inner();
+    let (_, none) = file::read_with_caches(Cursor::new(plain)).expect("read");
+    assert!(none.is_empty());
+}
+
+#[test]
+fn caches_of_removed_nodes_are_left_out() {
+    let project = rich_project_v2();
+    let id = paint_nodes(&project)[0].0;
+    // A file whose cache entry names a node that is no longer there.
+    let bytes = edited(&project, |entries| {
+        entries.push((format!("cache/{}.bin", id + 1000), vec![1; 4]));
+        entries.push(("cache/not-a-number.bin".to_owned(), vec![1; 4]));
+    });
+    let (read, read_caches) = file::read_with_caches(Cursor::new(bytes)).expect("read");
+    assert_eq!(read, project);
+    assert!(read_caches.is_empty(), "{read_caches:?}");
+}
+
+#[test]
+fn stroke_log_fingerprints_follow_the_strokes() {
+    let project = rich_project_v2();
+    let (_, log) = paint_nodes(&project)
+        .into_iter()
+        .find(|(_, log)| !log.strokes.is_empty())
+        .expect("a painted node");
+    let same = patine_core::stroke::StrokeLog {
+        strokes: log
+            .strokes
+            .iter()
+            .map(|s| Arc::new((**s).clone()))
+            .collect(),
+    };
+    assert_eq!(log.fingerprint(), same.fingerprint());
+    let mut changed = same.clone();
+    let mut stroke = (*changed.strokes[0]).clone();
+    stroke.dabs[0].pressure *= 0.5;
+    changed.strokes[0] = Arc::new(stroke);
+    assert_ne!(log.fingerprint(), changed.fingerprint());
+    let mut fewer = same;
+    fewer.strokes.pop();
+    assert_ne!(log.fingerprint(), fewer.fingerprint());
+}

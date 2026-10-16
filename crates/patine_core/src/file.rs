@@ -8,7 +8,12 @@
 //! | `meshes/mesh.bin` | the processed [`MeshAsset`], postcard + zstd |
 //! | `strokes/<id>.bin` | the [`StrokeLog`] of each paint layer or mask effect, postcard + zstd |
 //! | `resources/<sha256>` | files imported by the user |
+//! | `cache/<id>.bin` | optional raster cache of a paint layer or mask effect (M10) |
 //! | `thumb.png` | optional thumbnail |
+//!
+//! Raster caches are derived data, opaque here: the compositor writes them, and reads
+//! them back only when they match the strokes; without them, strokes are replayed. They
+//! are not part of the document and do not change its format version.
 //!
 //! Entries are stored without zip compression: binaries are already compressed, and the
 //! manifest stays readable with any unzip tool.
@@ -21,6 +26,7 @@
 //! freeze the previous types in a `vN` module with their upgrade function, and add a
 //! fixture `tests/fixtures/projects/vN_*.patine` that the tests keep loading.
 
+use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{self, BufReader, BufWriter, Read, Seek, Write};
 use std::path::{Path, PathBuf};
@@ -140,6 +146,23 @@ fn stroke_entry(id: u64) -> String {
     format!("strokes/{id}.bin")
 }
 
+const CACHE_PREFIX: &str = "cache/";
+
+fn cache_entry(id: u64) -> String {
+    format!("{CACHE_PREFIX}{id}.bin")
+}
+
+/// The node identifier of a cache entry name, if it is one.
+fn cache_id(name: &str) -> Option<u64> {
+    name.strip_prefix(CACHE_PREFIX)?
+        .strip_suffix(".bin")?
+        .parse()
+        .ok()
+}
+
+/// Raster caches by node identifier (paint layer or paint mask effect), opaque bytes.
+pub type Caches = BTreeMap<u64, Vec<u8>>;
+
 fn resource_entry(hash: &crate::resource::ResourceHash) -> String {
     format!("resources/{hash}")
 }
@@ -209,6 +232,17 @@ pub fn write<W: Write + Seek>(
     writer: W,
     thumbnail: Option<&[u8]>,
 ) -> Result<W, FileError> {
+    write_with_caches(project, writer, thumbnail, &Caches::new())
+}
+
+/// [`write`], with the raster caches of paint nodes (those of nodes the project does
+/// not have are left out).
+pub fn write_with_caches<W: Write + Seek>(
+    project: &Project,
+    writer: W,
+    thumbnail: Option<&[u8]>,
+    caches: &Caches,
+) -> Result<W, FileError> {
     let manifest = ron::ser::to_string_pretty(
         &ManifestRef {
             format_version: FORMAT_VERSION,
@@ -233,6 +267,9 @@ pub fn write<W: Write + Seek>(
     for (id, strokes) in stroke_logs(project) {
         let entry = stroke_entry(id);
         put(&entry, &encode(strokes.as_ref(), &entry)?)?;
+        if let Some(cache) = caches.get(&id) {
+            put(&cache_entry(id), cache)?;
+        }
     }
     for (hash, resource) in &project.resources {
         put(&resource_entry(hash), &resource.bytes)?;
@@ -246,6 +283,16 @@ pub fn write<W: Write + Seek>(
 /// Saves `project` to `path`. The file is written next to its destination, then renamed
 /// over it: a failed save never damages the previous file.
 pub fn save(project: &Project, path: &Path, thumbnail: Option<&[u8]>) -> Result<(), FileError> {
+    save_with_caches(project, path, thumbnail, &Caches::new())
+}
+
+/// [`save`], with the raster caches of paint nodes.
+pub fn save_with_caches(
+    project: &Project,
+    path: &Path,
+    thumbnail: Option<&[u8]>,
+    caches: &Caches,
+) -> Result<(), FileError> {
     let file_name = path
         .file_name()
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
@@ -254,7 +301,7 @@ pub fn save(project: &Project, path: &Path, thumbnail: Option<&[u8]>) -> Result<
     let temporary = path.with_file_name(temporary_name);
     let result = (|| {
         let file = File::create(&temporary)?;
-        let mut writer = write(project, BufWriter::new(file), thumbnail)?;
+        let mut writer = write_with_caches(project, BufWriter::new(file), thumbnail, caches)?;
         writer.flush()?;
         let file = writer.into_inner().map_err(|error| error.into_error())?;
         file.sync_all()?;
@@ -306,8 +353,38 @@ fn parse_manifest(text: &str) -> Result<(Project, u32), FileError> {
 
 /// Reads a project file from `reader`, and validates the document.
 pub fn read<R: Read + Seek>(reader: R) -> Result<Project, FileError> {
+    read_archive(&mut ZipArchive::new(reader)?)
+}
+
+/// [`read`], with the raster caches the file holds for the project's paint nodes. A
+/// cache entry that cannot be read is left out: the strokes are replayed instead.
+pub fn read_with_caches<R: Read + Seek>(reader: R) -> Result<(Project, Caches), FileError> {
     let mut zip = ZipArchive::new(reader)?;
-    let manifest = match read_entry(&mut zip, MANIFEST) {
+    let project = read_archive(&mut zip)?;
+    let nodes: Vec<u64> = stroke_logs(&project)
+        .into_iter()
+        .map(|(id, _)| id)
+        .collect();
+    let names: Vec<(u64, String)> = zip
+        .file_names()
+        .filter_map(|name| {
+            let name = name.ok()?;
+            Some((cache_id(&name)?, name.into_owned()))
+        })
+        .filter(|(id, _)| nodes.contains(id))
+        .collect();
+    let mut caches = Caches::new();
+    for (id, name) in names {
+        // A damaged entry is only a missing cache: the strokes are replayed.
+        if let Ok(bytes) = read_entry(&mut zip, &name) {
+            caches.insert(id, bytes);
+        }
+    }
+    Ok((project, caches))
+}
+
+fn read_archive<R: Read + Seek>(zip: &mut ZipArchive<R>) -> Result<Project, FileError> {
+    let manifest = match read_entry(zip, MANIFEST) {
         Err(FileError::MissingEntry(_)) => return Err(FileError::NotAProject),
         other => other?,
     };
@@ -315,11 +392,11 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Project, FileError> {
         .map_err(|_| FileError::Manifest("not valid UTF-8".to_owned()))?;
     let (mut project, version) = parse_manifest(&text)?;
 
-    let mesh: MeshAsset = decode(&read_entry(&mut zip, MESH)?, MESH)?;
+    let mesh: MeshAsset = decode(&read_entry(zip, MESH)?, MESH)?;
     project.mesh = Arc::new(mesh);
     attach_strokes(&mut project, &mut |id, slot| {
         let entry = stroke_entry(id);
-        let bytes = read_entry(&mut zip, &entry)?;
+        let bytes = read_entry(zip, &entry)?;
         let log: StrokeLog = match version {
             1 => decode::<v1::StrokeLog>(&bytes, &entry)?.upgrade(),
             _ => decode(&bytes, &entry)?,
@@ -328,7 +405,7 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Project, FileError> {
         Ok(())
     })?;
     for (hash, resource) in &mut project.resources {
-        resource.bytes = Arc::from(read_entry(&mut zip, &resource_entry(hash))?);
+        resource.bytes = Arc::from(read_entry(zip, &resource_entry(hash))?);
     }
     project.validate()?;
     Ok(project)
@@ -337,6 +414,11 @@ pub fn read<R: Read + Seek>(reader: R) -> Result<Project, FileError> {
 /// Opens the project file at `path`.
 pub fn load(path: &Path) -> Result<Project, FileError> {
     read(BufReader::new(File::open(path)?))
+}
+
+/// Opens the project file at `path`, with its raster caches.
+pub fn load_with_caches(path: &Path) -> Result<(Project, Caches), FileError> {
+    read_with_caches(BufReader::new(File::open(path)?))
 }
 
 /// The thumbnail of the project file at `path`, if it has one.

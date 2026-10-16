@@ -28,6 +28,14 @@ impl StrokeLog {
     pub fn heap_size(&self) -> usize {
         self.strokes.iter().map(|stroke| stroke.heap_size()).sum()
     }
+
+    /// SHA-256 of the log's postcard bytes: equal logs have equal fingerprints, and any
+    /// change to a stroke (a dab, the brush, the camera...) changes it. Raster caches
+    /// use it to recognise the strokes they were made from.
+    pub fn fingerprint(&self) -> ResourceHash {
+        let bytes = postcard::to_allocvec(self).expect("a stroke log always serializes");
+        ResourceHash::of(&bytes)
+    }
 }
 
 impl PartialEq for StrokeLog {
