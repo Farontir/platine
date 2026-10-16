@@ -830,21 +830,42 @@ gpu_test!(
         let stroke = dynamic_stroke(camera, Symmetry { mirror: [true, false, false], radial: 2 }, 4242);
         let empty = vec![[0.0f32; 4]; (size * size) as usize];
         let value = [0.2, 0.6, 0.9, 1.0];
-        let replay = || {
+        let replay_in = |batch: usize| {
             let texture = content(&ctx, ContentLayout::Vector, size, &empty);
             let mut pool = TexturePool::new(u64::MAX);
             let mut encoder = ctx.device.create_command_encoder(&Default::default());
-            painter.replay_stroke(&ctx, &mut pool, &mut encoder, &stroke, &set, None, &[Content {
+            painter.replay_stroke_in_batches(&ctx, &mut pool, &mut encoder, &stroke, &set, None, &[Content {
                 texture: &texture,
                 layout: ContentLayout::Vector,
                 value,
                 values: None,
-            }]);
+            }], batch);
             ctx.queue.submit([encoder.finish()]);
             readback::read_texture(&ctx, &texture).expect("readback")
         };
+        let replay = || replay_in(patine_paint::raster::REPLAY_BATCH);
         let first = replay();
         assert!(first == replay(), "two replays differ");
+        // M10: the batches of a replay change nothing, down to one dab per dispatch.
+        assert!(stroke.dabs.len() > 7, "{} dabs: too few to split", stroke.dabs.len());
+        for batch in [1, 7, usize::MAX] {
+            assert!(replay_in(batch) == first, "replay in batches of {batch} differs");
+        }
+        // Nor do the dispatches a tile list is split into.
+        let single = Painter::new(&ctx).expect("shaders compile").with_tiles_per_dispatch(1);
+        let texture = content(&ctx, ContentLayout::Vector, size, &empty);
+        let mut pool = TexturePool::new(u64::MAX);
+        let mut encoder = ctx.device.create_command_encoder(&Default::default());
+        let before = single.passes();
+        single.replay_stroke(&ctx, &mut pool, &mut encoder, &stroke, &set, None, &[Content {
+            texture: &texture,
+            layout: ContentLayout::Vector,
+            value,
+            values: None,
+        }]);
+        ctx.queue.submit([encoder.finish()]);
+        assert!(single.passes() - before > 1, "the tiles were split");
+        assert!(readback::read_texture(&ctx, &texture).expect("readback") == first, "tile split differs");
 
         let texture = content(&ctx, ContentLayout::Vector, size, &empty);
         let live_content = Content { texture: &texture, layout: ContentLayout::Vector, value, values: None };

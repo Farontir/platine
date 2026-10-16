@@ -40,6 +40,14 @@ pub const DEPTH_IMAGE_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::R32Floa
 /// Side of the pages holding the tiles saved before a stroke.
 pub const PAGE: u32 = 1024;
 
+/// Dabs a replayed stroke rasterizes per dispatch, each batch over its own tiles: the
+/// cost of a dispatch stays that of a few frames of live painting, whatever the
+/// stroke's length and the resolution (driver timeouts).
+pub const REPLAY_BATCH: usize = 64;
+
+/// Most tiles of one dab dispatch; a longer list is split into several dispatches.
+pub const MAX_TILES_PER_DISPATCH: usize = 256;
+
 /// Uniforms of `shaders/paint/depth.wgsl`.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Pod, Zeroable)]
@@ -208,6 +216,8 @@ pub struct Painter {
     /// 1×1 values bound when a content takes a constant.
     no_values: wgpu::TextureView,
     passes: AtomicU64,
+    /// Most tiles of one dab dispatch ([`MAX_TILES_PER_DISPATCH`]).
+    tiles_per_dispatch: usize,
 }
 
 fn uniform_entry(binding: u32, visibility: wgpu::ShaderStages) -> wgpu::BindGroupLayoutEntry {
@@ -530,7 +540,15 @@ impl Painter {
             no_alpha,
             no_values,
             passes: AtomicU64::new(0),
+            tiles_per_dispatch: MAX_TILES_PER_DISPATCH,
         })
+    }
+
+    /// The painter with at most `tiles` tiles (at least 1) per dab dispatch instead of
+    /// [`MAX_TILES_PER_DISPATCH`], for tests.
+    pub fn with_tiles_per_dispatch(mut self, tiles: usize) -> Self {
+        self.tiles_per_dispatch = tiles.max(1);
+        self
     }
 
     /// Number of dab passes encoded so far ([`Painter::rasterize_dabs`] calls that did
@@ -775,7 +793,6 @@ impl Painter {
             wgpu::BufferUsages::UNIFORM,
         );
         let dab_buffer = buffer(ctx, "paint dabs", bytemuck::cast_slice(dabs), storage);
-        let tile_buffer = buffer(ctx, "paint tiles", bytemuck::cast_slice(tiles), storage);
         let copy_buffer = buffer(ctx, "paint copies", bytemuck::cast_slice(&copies), storage);
         let depth = target.depth.create_view(&wgpu::TextureViewDescriptor {
             dimension: Some(wgpu::TextureViewDimension::D2Array),
@@ -786,42 +803,6 @@ impl Painter {
             .as_ref()
             .map(|alpha| alpha.create_view(&Default::default()));
         let stroke = stroke.create_view(&Default::default());
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("paint dabs"),
-            layout: &self.dabs_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: uniforms.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: dab_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: tile_buffer.as_entire_binding(),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 3,
-                    resource: wgpu::BindingResource::TextureView(&depth),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 4,
-                    resource: wgpu::BindingResource::TextureView(
-                        alpha.as_ref().unwrap_or(&self.no_alpha),
-                    ),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 5,
-                    resource: wgpu::BindingResource::TextureView(&stroke),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 6,
-                    resource: copy_buffer.as_entire_binding(),
-                },
-            ],
-        });
         let surface = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("paint surface"),
             layout: &self.surface_layout,
@@ -840,16 +821,57 @@ impl Painter {
                 },
             ],
         });
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("paint dabs"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.dabs);
-        pass.set_bind_group(0, &bind_group, &[]);
-        pass.set_bind_group(1, &surface, &[]);
-        let groups = TILE / 8;
-        pass.dispatch_workgroups(groups, groups, tiles.len() as u32);
-        self.passes.fetch_add(1, Ordering::Relaxed);
+        // Long tile lists in several dispatches: each texel only reads and writes its own
+        // stroke texel, so the split changes nothing.
+        for tiles in tiles.chunks(self.tiles_per_dispatch) {
+            let tile_buffer = buffer(ctx, "paint tiles", bytemuck::cast_slice(tiles), storage);
+            let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                label: Some("paint dabs"),
+                layout: &self.dabs_layout,
+                entries: &[
+                    wgpu::BindGroupEntry {
+                        binding: 0,
+                        resource: uniforms.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 1,
+                        resource: dab_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 2,
+                        resource: tile_buffer.as_entire_binding(),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 3,
+                        resource: wgpu::BindingResource::TextureView(&depth),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 4,
+                        resource: wgpu::BindingResource::TextureView(
+                            alpha.as_ref().unwrap_or(&self.no_alpha),
+                        ),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 5,
+                        resource: wgpu::BindingResource::TextureView(&stroke),
+                    },
+                    wgpu::BindGroupEntry {
+                        binding: 6,
+                        resource: copy_buffer.as_entire_binding(),
+                    },
+                ],
+            });
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("paint dabs"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.dabs);
+            pass.set_bind_group(0, &bind_group, &[]);
+            pass.set_bind_group(1, &surface, &[]);
+            let groups = TILE / 8;
+            pass.dispatch_workgroups(groups, groups, tiles.len() as u32);
+            self.passes.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Composes the stroke of `target` onto `content` on `tiles`, over what the content
@@ -944,8 +966,9 @@ impl Painter {
         pool.release(target.buffer);
     }
 
-    /// Replays `stroke` onto `contents` at once: every dab, then one composition onto
-    /// the contents as they are. Returns the tiles touched.
+    /// Replays `stroke` onto `contents`: its dabs by batches of [`REPLAY_BATCH`], each over
+    /// its own tiles, then one composition onto the contents as they are. Returns the
+    /// tiles touched.
     #[allow(clippy::too_many_arguments)]
     pub fn replay_stroke(
         &self,
@@ -957,10 +980,47 @@ impl Painter {
         alpha: Option<&AlphaImage>,
         contents: &[Content<'_>],
     ) -> Vec<[u32; 2]> {
+        self.replay_stroke_in_batches(
+            ctx,
+            pool,
+            encoder,
+            stroke,
+            set,
+            alpha,
+            contents,
+            REPLAY_BATCH,
+        )
+    }
+
+    /// [`Painter::replay_stroke`] with batches of `batch` dabs (at least 1), for tests and
+    /// measurements.
+    #[allow(clippy::too_many_arguments)]
+    pub fn replay_stroke_in_batches(
+        &self,
+        ctx: &GpuContext,
+        pool: &mut TexturePool,
+        encoder: &mut wgpu::CommandEncoder,
+        stroke: &Stroke,
+        set: &SetSurface<'_>,
+        alpha: Option<&AlphaImage>,
+        contents: &[Content<'_>],
+        batch: usize,
+    ) -> Vec<[u32; 2]> {
         let target = self.begin_stroke(ctx, pool, encoder, stroke, set, alpha);
-        let dabs = gpu_dabs(stroke, 0..stroke.dabs.len());
-        let tiles = set.geometry.stroke_tiles(stroke, &dabs, set.size);
-        self.rasterize_dabs(ctx, pool, encoder, &target, set, &dabs, &tiles);
+        // Batch by batch, as live painting does: the same dabs in the same order on each
+        // texel, so the same content.
+        let mut touched = BTreeSet::new();
+        let mut start = 0;
+        while start < stroke.dabs.len() {
+            let end = start.saturating_add(batch.max(1)).min(stroke.dabs.len());
+            let dabs = gpu_dabs(stroke, start..end);
+            let batch = set.geometry.stroke_tiles(stroke, &dabs, set.size);
+            self.rasterize_dabs(ctx, pool, encoder, &target, set, &dabs, &batch);
+            touched.extend(batch.into_iter().map(|[x, y]| [y, x]));
+            start = end;
+        }
+        // In the order of `stroke_tiles`: rows, then columns.
+        let tiles: Vec<[u32; 2]> = touched.into_iter().map(|[y, x]| [x, y]).collect();
         for content in contents {
             self.composite(ctx, pool, encoder, &target, content, &tiles);
         }

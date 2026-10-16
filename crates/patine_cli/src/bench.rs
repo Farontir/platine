@@ -799,6 +799,10 @@ impl PaintBench {
             pool.memory() as f64 / 1e6,
             document.paint_memory() as f64 / 1e6
         );
+        // The painted document goes first: two 8K documents do not fit in GPU memory.
+        document.clear(&mut pool);
+        drop(pool);
+        ctx.device.poll(wgpu::PollType::wait_indefinitely())?;
         let start = Instant::now();
         let mut fresh_pool = TexturePool::new(u64::MAX);
         let mut fresh = GpuDocument::new();
