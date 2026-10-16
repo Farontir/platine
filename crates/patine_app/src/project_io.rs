@@ -9,10 +9,26 @@ use std::sync::mpsc::{Receiver, TryRecvError};
 
 use fluent_bundle::FluentArgs;
 use image::RgbaImage;
+use patine_compositor::cache::RasterCache;
 use patine_core::file::{self, FileError};
 use patine_core::project::Project;
 
 use crate::i18n::I18n;
+
+/// The raster caches read from a file, decoded; unreadable ones are left out with a
+/// warning (their strokes are replayed).
+pub fn decode_caches(caches: file::Caches) -> Vec<(u64, RasterCache)> {
+    caches
+        .into_iter()
+        .filter_map(|(id, bytes)| match RasterCache::decode(&bytes) {
+            Ok(cache) => Some((id, cache)),
+            Err(error) => {
+                tracing::warn!(node = id, %error, "raster cache unreadable: strokes replayed");
+                None
+            }
+        })
+        .collect()
+}
 
 /// Width of the thumbnail stored in project files.
 pub const THUMBNAIL_WIDTH: u32 = 256;
@@ -33,6 +49,8 @@ pub enum JobResult {
         path: PathBuf,
         /// The project.
         project: Box<Project>,
+        /// The raster caches the file holds, decoded, by paint node.
+        caches: Vec<(u64, RasterCache)>,
     },
     /// The job failed.
     Failed {
@@ -107,6 +125,7 @@ impl FileJobs {
         state: u64,
         path: Option<PathBuf>,
         thumbnail: Option<RgbaImage>,
+        caches: Vec<(u64, RasterCache)>,
         filter: String,
         suggested: String,
     ) {
@@ -118,11 +137,18 @@ impl FileJobs {
                 Some(path) => {
                     let start = std::time::Instant::now();
                     let png = thumbnail.as_ref().and_then(thumbnail_png);
-                    match file::save(&project, &path, png.as_deref()) {
+                    let caches: file::Caches = caches
+                        .iter()
+                        .map(|(id, cache)| (*id, cache.encode()))
+                        .collect();
+                    let cache_bytes: usize = caches.values().map(Vec::len).sum();
+                    match file::save_with_caches(&project, &path, png.as_deref(), &caches) {
                         Ok(()) => {
                             tracing::info!(
                                 path = %path.display(),
                                 ms = start.elapsed().as_millis() as u64,
+                                raster_caches = caches.len(),
+                                cache_kb = cache_bytes / 1024,
                                 "project saved"
                             );
                             JobResult::Saved { path, state }
@@ -156,16 +182,19 @@ impl FileJobs {
                 None => JobResult::Cancelled,
                 Some(path) => {
                     let start = std::time::Instant::now();
-                    match file::load(&path) {
-                        Ok(project) => {
+                    match file::load_with_caches(&path) {
+                        Ok((project, caches)) => {
+                            let caches = decode_caches(caches);
                             tracing::info!(
                                 path = %path.display(),
                                 ms = start.elapsed().as_millis() as u64,
+                                raster_caches = caches.len(),
                                 "project read"
                             );
                             JobResult::Opened {
                                 path,
                                 project: Box::new(project),
+                                caches,
                             }
                         }
                         Err(error) => JobResult::Failed {
@@ -297,6 +326,7 @@ mod tests {
             7,
             Some(path.clone()),
             Some(RgbaImage::new(64, 32)),
+            Vec::new(),
             String::new(),
             String::new(),
         );

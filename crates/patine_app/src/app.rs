@@ -372,6 +372,10 @@ pub struct App {
     orphans: Vec<Orphan>,
     /// The stroke being painted.
     stroke: Option<StrokeInProgress>,
+    /// Whether saving writes the raster caches of paint layers.
+    save_raster_caches: bool,
+    /// Raster caches of the project just opened, given to the GPU document at its sync.
+    pending_caches: Option<Vec<(u64, patine_compositor::cache::RasterCache)>>,
     /// Camera and last dab of the previous stroke, where a straight line starts.
     last_stroke_end: Option<(patine_core::stroke::StrokeCamera, [f32; 2])>,
 }
@@ -412,6 +416,8 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
         orphans: Vec::new(),
         stroke: None,
         last_stroke_end: None,
+        save_raster_caches: true,
+        pending_caches: None,
     };
     // Captures show the application as configured, without recovery prompts, unless an
     // autosave folder is given explicitly (to capture the recovery dialog).
@@ -423,10 +429,11 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
     app.apply_startup_environment()?;
     match app.startup.mesh.clone() {
         Some(path) if is_project_file(&path) => {
-            let project = patine_core::file::load(&path)
+            let (project, caches) = patine_core::file::load_with_caches(&path)
                 .with_context(|| format!("cannot open {}", path.display()))?;
             tracing::info!(path = %path.display(), "project opened");
             app.replace_document(Document::opened(project, path));
+            app.pending_caches = Some(project_io::decode_caches(caches));
         }
         Some(path) => {
             let imported = patine_mesh::import(&path, BuildOptions::default())
@@ -1023,6 +1030,7 @@ impl App {
             eraser: self.ui.tool.tool == crate::paint_tool::Tool::Eraser,
             mirror_x: self.ui.tool.symmetry.mirror[0],
             picker: self.ui.tool.tool == crate::paint_tool::Tool::Picker,
+            raster_caches: self.save_raster_caches,
         }
     }
 
@@ -1359,6 +1367,7 @@ impl App {
             return;
         }
         let thumbnail = self.thumbnail();
+        let caches = self.raster_caches();
         let Some(document) = &mut self.document else {
             self.after_save = None;
             return;
@@ -1376,9 +1385,39 @@ impl App {
             state,
             path,
             thumbnail,
+            caches,
             filter,
             document.name(),
         );
+    }
+
+    /// The raster caches of the open document's paint layers, read back from the GPU,
+    /// when saving them is on.
+    fn raster_caches(&self) -> Vec<(u64, patine_compositor::cache::RasterCache)> {
+        let (Some(gfx), Some(document)) = (&self.graphics, &self.document) else {
+            return Vec::new();
+        };
+        if !self.save_raster_caches {
+            return Vec::new();
+        }
+        let start = Instant::now();
+        match gfx
+            .gpu_document
+            .raster_caches(&gfx.gpu, &gfx.pool, &document.project)
+        {
+            Ok(caches) => {
+                tracing::info!(
+                    caches = caches.len(),
+                    ms = start.elapsed().as_millis() as u64,
+                    "raster caches read back"
+                );
+                caches
+            }
+            Err(error) => {
+                tracing::warn!(%error, "raster caches not saved");
+                Vec::new()
+            }
+        }
     }
 
     /// The last viewport image, for the project thumbnail.
@@ -1401,9 +1440,14 @@ impl App {
                     self.perform(action);
                 }
             }
-            JobResult::Opened { path, project } => {
+            JobResult::Opened {
+                path,
+                project,
+                caches,
+            } => {
                 tracing::info!(path = %path.display(), "project opened");
                 self.replace_document(Document::opened(*project, path));
+                self.pending_caches = Some(caches);
             }
             JobResult::Failed {
                 saving,
@@ -1438,6 +1482,7 @@ impl App {
             ActionId::Open => self.request(PendingAction::Open(None)),
             ActionId::Save => self.save(false),
             ActionId::SaveAs => self.save(true),
+            ActionId::ToggleRasterCaches => self.save_raster_caches = !self.save_raster_caches,
             ActionId::Quit => self.request(PendingAction::Quit),
             ActionId::ResetLayout => self.ui.dock = ui::default_layout(),
             ActionId::ToggleProfiler => {
@@ -1859,9 +1904,24 @@ impl App {
         match &self.document {
             Some(document) => {
                 let project = &document.project;
+                // The first sync of an opened project uses its raster caches.
+                let opened = self.pending_caches.take().map(|caches| {
+                    gfx.gpu_document.provide_caches(caches);
+                    let paints = gfx.gpu_document.paints();
+                    (paints.cache_loads(), paints.replays(), Instant::now())
+                });
                 let changed =
                     gfx.gpu_document
                         .sync(&gfx.gpu, &mut gfx.pool, &gfx.compositor, project);
+                if let Some((loads, replays, start)) = opened {
+                    let paints = gfx.gpu_document.paints();
+                    tracing::info!(
+                        from_caches = paints.cache_loads() - loads,
+                        strokes_replayed = paints.replays() - replays,
+                        ms = start.elapsed().as_millis() as u64,
+                        "paint layers ready"
+                    );
+                }
                 if !changed.is_empty()
                     || gfx.materials_inspect != inspect
                     || gfx.materials.len() != project.mesh.materials.len()

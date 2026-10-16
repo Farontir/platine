@@ -412,6 +412,7 @@ fn menu_bar(ui: &mut Ui, info: &FrameInfo<'_>, triggered: &mut Vec<ActionId>) {
         ui.separator();
         action_item(ui, info, ActionId::Save, triggered);
         action_item(ui, info, ActionId::SaveAs, triggered);
+        action_item(ui, info, ActionId::ToggleRasterCaches, triggered);
         ui.separator();
         action_item(ui, info, ActionId::Quit, triggered);
     });

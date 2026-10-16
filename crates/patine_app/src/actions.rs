@@ -16,6 +16,8 @@ pub enum ActionId {
     Save,
     /// Save the project to a new file.
     SaveAs,
+    /// Whether saving writes the raster caches of paint layers.
+    ToggleRasterCaches,
     /// Quit the application.
     Quit,
     /// Restore the default panel layout.
@@ -103,6 +105,8 @@ pub struct ActionContext {
     pub mirror_x: bool,
     /// Whether the picker is the active tool.
     pub picker: bool,
+    /// Whether saving writes the raster caches of paint layers.
+    pub raster_caches: bool,
 }
 
 /// Declaration of an action.
@@ -176,6 +180,15 @@ impl Default for ActionRegistry {
                     )),
                     enabled: |ctx| ctx.has_project && !ctx.busy,
                     checked: None,
+                    yields_to_text: false,
+                },
+                Action {
+                    id: ActionId::ToggleRasterCaches,
+                    name: "file.raster_caches",
+                    label_key: "action-file-raster-caches",
+                    shortcut: None,
+                    enabled: always,
+                    checked: Some(|ctx| ctx.raster_caches),
                     yields_to_text: false,
                 },
                 Action {
@@ -502,6 +515,7 @@ mod tests {
             ActionId::Open,
             ActionId::Save,
             ActionId::SaveAs,
+            ActionId::ToggleRasterCaches,
             ActionId::Quit,
             ActionId::ResetLayout,
             ActionId::ToggleProfiler,
