@@ -27,7 +27,7 @@ pub const CACHE_VERSION: u32 = 1;
 const ZSTD_LEVEL: i32 = 3;
 
 /// The painted tiles of one content channel.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CachedChannel {
     /// The channel.
     pub channel: Channel,
@@ -53,7 +53,7 @@ impl CachedChannel {
 }
 
 /// The raster cache of one paint layer or paint mask effect.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct RasterCache {
     /// [`cache_key`] of what the cache was made from.
     pub key: [u8; 32],
@@ -61,6 +61,15 @@ pub struct RasterCache {
     pub size: u32,
     /// The painted channels.
     pub channels: Vec<CachedChannel>,
+}
+
+/// What the stored cache holds before the texels (postcard).
+#[derive(Serialize, Deserialize)]
+struct Header {
+    key: [u8; 32],
+    size: u32,
+    /// Channel, layout (`vector`) and tiles of each channel; its texels follow, in order.
+    channels: Vec<(Channel, bool, Vec<[u32; 2]>)>,
 }
 
 /// Why a cache cannot be read.
@@ -72,6 +81,9 @@ pub enum CacheError {
     /// Not a raster cache.
     #[error("raster cache unreadable: {0}")]
     Format(#[from] postcard::Error),
+    /// The texels do not match the header.
+    #[error("raster cache truncated")]
+    Truncated,
 }
 
 /// The key of a cache of `channels` of a paint node of `set` holding `log`.
@@ -103,17 +115,60 @@ impl RasterCache {
             })
     }
 
-    /// The cache as stored in a project file: postcard, then zstd.
+    /// The cache as stored in a project file, compressed by zstd: the length of the
+    /// header (u32, little endian), the header (postcard), then the texels of each
+    /// channel as they are (a postcard sequence of bytes would be read byte by byte).
     pub fn encode(&self) -> Vec<u8> {
-        let bytes = postcard::to_allocvec(self).expect("a raster cache always serializes");
-        zstd::encode_all(bytes.as_slice(), ZSTD_LEVEL)
-            .expect("compressing into memory does not fail")
+        let header = Header {
+            key: self.key,
+            size: self.size,
+            channels: self
+                .channels
+                .iter()
+                .map(|c| (c.channel, c.vector, c.tiles.clone()))
+                .collect(),
+        };
+        let header = postcard::to_allocvec(&header).expect("a cache header always serializes");
+        let texels: usize = self.channels.iter().map(|c| c.texels.len()).sum();
+        let mut raw = Vec::with_capacity(4 + header.len() + texels);
+        raw.extend_from_slice(&(header.len() as u32).to_le_bytes());
+        raw.extend_from_slice(&header);
+        for channel in &self.channels {
+            raw.extend_from_slice(&channel.texels);
+        }
+        zstd::encode_all(raw.as_slice(), ZSTD_LEVEL).expect("compressing into memory does not fail")
     }
 
     /// A cache read from a project file.
     pub fn decode(bytes: &[u8]) -> Result<Self, CacheError> {
         let raw = zstd::decode_all(bytes)?;
-        Ok(postcard::from_bytes(&raw)?)
+        let (length, rest) = raw.split_at_checked(4).ok_or(CacheError::Truncated)?;
+        let length = u32::from_le_bytes(length.try_into().expect("4 bytes")) as usize;
+        let (header, mut texels) = rest.split_at_checked(length).ok_or(CacheError::Truncated)?;
+        let header: Header = postcard::from_bytes(header)?;
+        let mut channels = Vec::with_capacity(header.channels.len());
+        for (channel, vector, tiles) in header.channels {
+            let mut cached = CachedChannel {
+                channel,
+                vector,
+                tiles,
+                texels: Vec::new(),
+            };
+            let (own, rest) = texels
+                .split_at_checked(cached.tiles.len() * cached.tile_bytes())
+                .ok_or(CacheError::Truncated)?;
+            cached.texels = own.to_vec();
+            texels = rest;
+            channels.push(cached);
+        }
+        if !texels.is_empty() {
+            return Err(CacheError::Truncated);
+        }
+        Ok(Self {
+            key: header.key,
+            size: header.size,
+            channels,
+        })
     }
 }
 
@@ -238,4 +293,30 @@ pub(crate) fn upload_tiles(
             },
         );
     }
+}
+
+/// Applies `f` to every item on all the cores, keeping the order.
+fn parallel<T: Sync, U: Send>(items: &[T], f: impl Fn(&T) -> U + Sync) -> Vec<U> {
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let chunk = items.len().div_ceil(threads).max(1);
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = items
+            .chunks(chunk)
+            .map(|part| scope.spawn(|| part.iter().map(&f).collect::<Vec<U>>()))
+            .collect();
+        handles
+            .into_iter()
+            .flat_map(|handle| handle.join().expect("a cache thread does not panic"))
+            .collect()
+    })
+}
+
+/// [`RasterCache::encode`] of every cache, on all the cores.
+pub fn encode_all(caches: &[(u64, RasterCache)]) -> Vec<(u64, Vec<u8>)> {
+    parallel(caches, |(id, cache)| (*id, cache.encode()))
+}
+
+/// [`RasterCache::decode`] of every stored cache, on all the cores, in order.
+pub fn decode_all(stored: &[(u64, Vec<u8>)]) -> Vec<(u64, Result<RasterCache, CacheError>)> {
+    parallel(stored, |(id, bytes)| (*id, RasterCache::decode(bytes)))
 }

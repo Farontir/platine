@@ -18,9 +18,10 @@ use crate::i18n::I18n;
 /// The raster caches read from a file, decoded; unreadable ones are left out with a
 /// warning (their strokes are replayed).
 pub fn decode_caches(caches: file::Caches) -> Vec<(u64, RasterCache)> {
-    caches
+    let stored: Vec<(u64, Vec<u8>)> = caches.into_iter().collect();
+    patine_compositor::cache::decode_all(&stored)
         .into_iter()
-        .filter_map(|(id, bytes)| match RasterCache::decode(&bytes) {
+        .filter_map(|(id, decoded)| match decoded {
             Ok(cache) => Some((id, cache)),
             Err(error) => {
                 tracing::warn!(node = id, %error, "raster cache unreadable: strokes replayed");
@@ -137,9 +138,8 @@ impl FileJobs {
                 Some(path) => {
                     let start = std::time::Instant::now();
                     let png = thumbnail.as_ref().and_then(thumbnail_png);
-                    let caches: file::Caches = caches
-                        .iter()
-                        .map(|(id, cache)| (*id, cache.encode()))
+                    let caches: file::Caches = patine_compositor::cache::encode_all(&caches)
+                        .into_iter()
                         .collect();
                     let cache_bytes: usize = caches.values().map(Vec::len).sum();
                     match file::save_with_caches(&project, &path, png.as_deref(), &caches) {
