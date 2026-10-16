@@ -18,9 +18,13 @@
 //! - `patine_cli bench project <mesh> [--out file.patine]`: creates a project from a mesh,
 //!   saves it, opens it again, checks that it is identical, and prints the durations and
 //!   the file size. `--out` keeps the file.
+//! - `patine_cli channels <project> --out DIR [--resolution N] [--set NAME] [--software]`:
+//!   writes the final channels of the texture sets as 16-bit PNG files, at the working
+//!   resolution or at `N` (M10).
 //! - `patine_cli --version`
 
 mod bench;
+mod channels;
 
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -40,6 +44,7 @@ const USAGE: &str = "usage: patine_cli inspect <mesh> [--allow-missing-uvs]
                               [--symmetry N] [--mirror] [--preset NAME]
        patine_cli bench procedural [--layers N] [--resolution N] [--edits N]
                                    [--material ID] [--triplanar]
+       patine_cli channels <project> --out DIR [--resolution N] [--set NAME] [--software]
        patine_cli --version";
 
 fn ms(duration: Duration) -> String {
@@ -185,6 +190,7 @@ fn main() -> anyhow::Result<()> {
             println!("patine_cli {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
+        Some("channels") => channels::ChannelsCommand::parse(&args[1..])?.run(),
         Some("bench") if args.get(1).map(String::as_str) == Some("viewport") => {
             bench::ViewportBench::parse(&args[2..])?.run()
         }

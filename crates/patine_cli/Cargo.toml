@@ -19,6 +19,7 @@ patine_bake.workspace = true
 patine_export.workspace = true
 patine_assets.workspace = true
 anyhow.workspace = true
+image = { workspace = true, features = ["png"] }
 
 [lints]
 workspace = true

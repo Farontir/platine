@@ -2432,6 +2432,7 @@ name = "patine_cli"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "image",
  "patine_assets",
  "patine_bake",
  "patine_compositor",
