@@ -173,3 +173,30 @@ gpu_test!(
         assert!(pool.get(b).is_none() && pool.get(c).is_some());
     }
 );
+
+gpu_test!(
+    /// A texture released while recording is handed back to a recycled allocation of
+    /// the same description, never to another description nor after the flush.
+    fn released_textures_are_recycled_until_the_flush(ctx) {
+        let mut pool = TexturePool::new(u64::MAX);
+        let a = pool.allocate(&ctx, &desc(256), Residency::Pinned);
+        pool.release(a);
+        assert_eq!(pool.pending(), 1);
+        // Another size: a new texture.
+        let b = pool.allocate_recycled(&ctx, &desc(128), Residency::Pinned);
+        assert_eq!((pool.recycled(), pool.pending()), (0, 1));
+        // The same description: the released texture, counted again.
+        let c = pool.allocate_recycled(&ctx, &desc(256), Residency::Discardable);
+        assert_eq!((pool.recycled(), pool.pending()), (1, 0));
+        assert_ne!(a, c, "identifiers are never reused");
+        assert_eq!(pool.memory(), texture_bytes(&desc(256)) + texture_bytes(&desc(128)));
+        assert_eq!(pool.get(c).map(|t| t.width()), Some(256));
+        pool.release(c);
+        pool.release(b);
+        pool.flush();
+        // After the flush, nothing is left to recycle.
+        let d = pool.allocate_recycled(&ctx, &desc(256), Residency::Pinned);
+        assert_eq!(pool.recycled(), 1);
+        assert!(pool.get(d).is_some());
+    }
+);

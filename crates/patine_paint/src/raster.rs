@@ -709,7 +709,8 @@ impl Painter {
             texture
         });
 
-        let buffer = pool.allocate(
+        // Cleared below: the buffer of a stroke replayed earlier in the encoder will do.
+        let buffer = pool.allocate_recycled(
             ctx,
             &square(
                 Some("stroke buffer"),

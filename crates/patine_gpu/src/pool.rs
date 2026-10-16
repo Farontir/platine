@@ -15,6 +15,12 @@
 //! - released textures leave the accounting at once, but are only destroyed by the flush.
 //!
 //! The owner of the encoder calls the flush right after its submit.
+//!
+//! Textures released while recording wait for the flush: replaying hundreds of strokes
+//! in one encoder would pile up one stroke buffer per stroke. [`TexturePool::allocate_recycled`]
+//! hands such a texture back for a new use with the same description: commands run in
+//! the order they were recorded, so its earlier uses are over when the new one starts.
+//! Its content is then undefined, which only callers that clear or overwrite it accept.
 
 use std::collections::HashMap;
 
@@ -89,6 +95,19 @@ pub struct TexturePool {
     epoch: u64,
     /// Released or evicted, not yet destroyed: commands not submitted yet may use them.
     pending: Vec<wgpu::Texture>,
+    /// Textures handed back by [`TexturePool::allocate_recycled`] so far.
+    recycled: u64,
+}
+
+/// Whether `texture` was created from a descriptor equal to `desc` (labels aside).
+fn same_description(texture: &wgpu::Texture, desc: &wgpu::TextureDescriptor<'_>) -> bool {
+    texture.size() == desc.size
+        && texture.mip_level_count() == desc.mip_level_count
+        && texture.sample_count() == desc.sample_count
+        && texture.dimension() == desc.dimension
+        && texture.format() == desc.format
+        && texture.usage() == desc.usage
+        && desc.view_formats.is_empty()
 }
 
 impl TexturePool {
@@ -103,6 +122,7 @@ impl TexturePool {
             evicted: 0,
             epoch: 0,
             pending: Vec::new(),
+            recycled: 0,
         }
     }
 
@@ -131,6 +151,49 @@ impl TexturePool {
         self.memory += bytes;
         self.evict();
         id
+    }
+
+    /// Like [`TexturePool::allocate`], but may hand back a texture of the same
+    /// description released since the last flush instead of creating one: its content is
+    /// then undefined (not zero). Only for textures the caller clears or overwrites
+    /// entirely before reading them.
+    pub fn allocate_recycled(
+        &mut self,
+        ctx: &GpuContext,
+        desc: &wgpu::TextureDescriptor<'_>,
+        residency: Residency,
+    ) -> TextureId {
+        let Some(index) = self
+            .pending
+            .iter()
+            .position(|texture| same_description(texture, desc))
+        else {
+            return self.allocate(ctx, desc, residency);
+        };
+        let texture = self.pending.swap_remove(index);
+        self.recycled += 1;
+        let id = TextureId(self.next_id);
+        self.next_id += 1;
+        let bytes = texture_bytes(desc);
+        self.clock += 1;
+        self.entries.insert(
+            id,
+            Entry {
+                texture,
+                bytes,
+                residency,
+                last_use: self.clock,
+                epoch: self.epoch,
+            },
+        );
+        self.memory += bytes;
+        self.evict();
+        id
+    }
+
+    /// Textures handed back by [`TexturePool::allocate_recycled`] so far.
+    pub fn recycled(&self) -> u64 {
+        self.recycled
     }
 
     /// The texture `id`, marked as just used; `None` if it was released or evicted.
