@@ -10,6 +10,8 @@ publish.workspace = true
 [features]
 # Reload WGSL shaders from disk instead of using the embedded copies.
 hot-reload = ["patine_gpu/hot-reload"]
+# Installed builds on Windows: no console window; fatal errors show in a dialog.
+windows-gui = []
 
 [dependencies]
 patine_core.workspace = true

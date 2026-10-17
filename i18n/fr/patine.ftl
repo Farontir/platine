@@ -2,6 +2,7 @@
 # Chaque clé doit aussi exister dans i18n/en/patine.ftl (vérifié par un test).
 
 app-title = Patine
+app-fatal-error = Patine n'a pas pu démarrer.
 
 ## Menus
 menu-file = Fichier
