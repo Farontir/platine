@@ -168,6 +168,22 @@ gpu_test!(
 );
 
 gpu_test!(
+    fn primitive_index_picking_builds_on_dx12(ctx) {
+        // The pipeline used to be rejected by D3D12 (shader inputs that did not line up
+        // with the vertex outputs): every DX12 start fell back and logged an error. WARP
+        // and hardware DX12 accept it since.
+        if ctx.adapter_info().backend != wgpu::Backend::Dx12 || !ctx.capabilities().primitive_index {
+            return;
+        }
+        let viewport = Viewport::with_options(&ctx, ViewportOptions::small()).unwrap();
+        assert!(
+            !viewport.needs_flat_pick_buffers(),
+            "the primitive_index picking pipeline was rejected on DX12"
+        );
+    }
+);
+
+gpu_test!(
     fn picking_fallback_without_primitive_index(ctx) {
         for mesh in [primitives::cube(), primitives::uv_sphere(32, 16), primitives::two_cubes()] {
             check_picking(&ctx, &mesh, true);

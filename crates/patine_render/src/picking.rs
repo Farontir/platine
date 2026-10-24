@@ -154,8 +154,9 @@ impl Picker {
                 immediate_size: 0,
             });
         let indexed = if ctx.capabilities().primitive_index && !force_flat {
-            // Some drivers report the feature but reject the pipeline (WARP raises an
-            // internal error): fall back to the flat path instead of failing.
+            // A driver may report the feature but reject the pipeline: fall back to the
+            // flat path instead of failing. (D3D12 rejected it while the fragment stage
+            // read @builtin(position), see picking_indexed.wgsl.)
             let validation = ctx.device.push_error_scope(wgpu::ErrorFilter::Validation);
             let internal = ctx.device.push_error_scope(wgpu::ErrorFilter::Internal);
             let result = pipeline(
