@@ -129,6 +129,9 @@ struct Graphics {
     presented: bool,
     /// Frames skipped in a row because the surface gave no image.
     skipped_frames: u32,
+    /// The surface still has to take `config` (a configuration failed, see
+    /// [`configure_surface`]).
+    reconfigure: bool,
 }
 
 impl Graphics {
@@ -137,12 +140,13 @@ impl Graphics {
             name: "interface",
             window: &self.window,
             surface: &self.surface,
-            config: &self.config,
+            config: &mut self.config,
             gpu: &self.gpu,
             renderer: &mut self.renderer,
             started: self.started,
             presented: &mut self.presented,
             skipped_frames: &mut self.skipped_frames,
+            reconfigure: &mut self.reconfigure,
         }
     }
 }
@@ -165,6 +169,8 @@ struct Loading {
     presented: bool,
     /// Frames skipped in a row because the surface gave no image.
     skipped_frames: u32,
+    /// The surface still has to take `config` (see [`configure_surface`]).
+    reconfigure: bool,
     /// The window was made visible (after its first frame).
     shown: bool,
 }
@@ -175,12 +181,13 @@ impl Loading {
             name: "loading page",
             window: &self.window,
             surface: &self.surface,
-            config: &self.config,
+            config: &mut self.config,
             gpu: &self.gpu,
             renderer: &mut self.renderer,
             started: self.started,
             presented: &mut self.presented,
             skipped_frames: &mut self.skipped_frames,
+            reconfigure: &mut self.reconfigure,
         }
     }
 }
@@ -191,12 +198,13 @@ struct Target<'a> {
     name: &'static str,
     window: &'a Window,
     surface: &'a wgpu::Surface<'static>,
-    config: &'a wgpu::SurfaceConfiguration,
+    config: &'a mut wgpu::SurfaceConfiguration,
     gpu: &'a GpuContext,
     renderer: &'a mut egui_wgpu::Renderer,
     started: Instant,
     presented: &'a mut bool,
     skipped_frames: &'a mut u32,
+    reconfigure: &'a mut bool,
 }
 
 /// Budget of the texture pool. The document's channel textures are pinned; the budget
@@ -1224,6 +1232,7 @@ impl App {
             started,
             presented: false,
             skipped_frames: 0,
+            reconfigure: false,
             shown: false,
             window,
             surface,
@@ -1250,6 +1259,7 @@ impl App {
             gpu,
             egui_state,
             renderer,
+            reconfigure,
             ..
         } = loading;
         for (id, pixels) in &prepared.thumbnails {
@@ -1273,6 +1283,8 @@ impl App {
             started: Instant::now(),
             presented: false,
             skipped_frames: 0,
+            // The page's surface may still wait for its size: the interface retries.
+            reconfigure,
             tablet,
             window,
             surface,
@@ -2674,8 +2686,15 @@ impl App {
             started,
             presented,
             skipped_frames,
+            reconfigure,
         } = target;
         let (device, queue) = (&gpu.device, &gpu.queue);
+        if *reconfigure {
+            *reconfigure = !configure_surface(surface, gpu, config);
+            if *reconfigure {
+                window.request_redraw();
+            }
+        }
 
         // Texture updates must reach the renderer even when no frame is drawn.
         let textures = &mut full_output.textures_delta;
@@ -2690,7 +2709,7 @@ impl App {
             | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => Some(frame),
             wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
                 tracing::debug!("surface outdated or lost, reconfiguring");
-                surface.configure(device, config);
+                *reconfigure = !configure_surface(surface, gpu, config);
                 window.request_redraw();
                 None
             }
@@ -2777,32 +2796,41 @@ impl App {
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
         if let Some(gfx) = self.graphics.as_mut() {
-            resize_surface(&gfx.window, &gfx.surface, &gfx.gpu, &mut gfx.config, size);
+            resize_surface(gfx.target(), size);
         } else if let Some(loading) = self.loading.as_mut() {
-            resize_surface(
-                &loading.window,
-                &loading.surface,
-                &loading.gpu,
-                &mut loading.config,
-                size,
-            );
+            resize_surface(loading.target(), size);
         }
     }
 }
 
-/// Resizes the surface of `window` (not while minimized, at size 0).
-fn resize_surface(
-    window: &Window,
+/// Resizes the surface of `target` (not while minimized, at size 0).
+fn resize_surface(target: Target<'_>, size: PhysicalSize<u32>) {
+    target.config.width = size.width;
+    target.config.height = size.height;
+    if size.width > 0 && size.height > 0 {
+        *target.reconfigure = !configure_surface(target.surface, target.gpu, target.config);
+        target.window.request_redraw();
+    }
+}
+
+/// Configures `surface` with `config`; returns whether it took it.
+///
+/// The configuration waits for the GPU to finish its work, and fails if another thread
+/// submits meanwhile: the loading worker does, all along the loading page. The error
+/// is caught instead of ending the application, and the next frame tries again.
+fn configure_surface(
     surface: &wgpu::Surface<'static>,
     gpu: &GpuContext,
-    config: &mut wgpu::SurfaceConfiguration,
-    size: PhysicalSize<u32>,
-) {
-    config.width = size.width;
-    config.height = size.height;
-    if size.width > 0 && size.height > 0 {
-        surface.configure(&gpu.device, config);
-        window.request_redraw();
+    config: &wgpu::SurfaceConfiguration,
+) -> bool {
+    let scope = gpu.device.push_error_scope(wgpu::ErrorFilter::Validation);
+    surface.configure(&gpu.device, config);
+    match pollster::block_on(scope.pop()) {
+        None => true,
+        Some(error) => {
+            tracing::warn!(%error, "surface configuration failed, trying again next frame");
+            false
+        }
     }
 }
 
