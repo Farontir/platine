@@ -2373,7 +2373,7 @@ checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "patine_app"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "egui",
@@ -2412,7 +2412,7 @@ dependencies = [
 
 [[package]]
 name = "patine_assets"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "patine_core",
  "patine_gpu",
@@ -2420,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "patine_bake"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "patine_core",
  "patine_gpu",
@@ -2429,7 +2429,7 @@ dependencies = [
 
 [[package]]
 name = "patine_cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "image",
@@ -2447,7 +2447,7 @@ dependencies = [
 
 [[package]]
 name = "patine_compositor"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "glam",
@@ -2467,7 +2467,7 @@ dependencies = [
 
 [[package]]
 name = "patine_core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "postcard",
  "proptest",
@@ -2481,7 +2481,7 @@ dependencies = [
 
 [[package]]
 name = "patine_export"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "patine_core",
  "patine_gpu",
@@ -2489,7 +2489,7 @@ dependencies = [
 
 [[package]]
 name = "patine_gpu"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "half",
@@ -2505,7 +2505,7 @@ dependencies = [
 
 [[package]]
 name = "patine_mesh"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bevy_mikktspace",
  "bytemuck",
@@ -2520,7 +2520,7 @@ dependencies = [
 
 [[package]]
 name = "patine_paint"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "glam",
@@ -2537,7 +2537,7 @@ dependencies = [
 
 [[package]]
 name = "patine_procedural"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "glam",
@@ -2552,7 +2552,7 @@ dependencies = [
 
 [[package]]
 name = "patine_render"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "bytemuck",
  "glam",
