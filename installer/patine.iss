@@ -77,7 +77,7 @@ Name: "{autoprograms}\{#AppName}"; Filename: "{app}\{#AppExe}"
 Name: "{autodesktop}\{#AppName}"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon
 
 [Registry]
-Root: HKA; Subkey: "Software\Classes\.patine"; ValueType: string; ValueName: ""; ValueData: "Patine.Project"; Flags: uninsdeletevalue; Tasks: association
+Root: HKA; Subkey: "Software\Classes\.patine"; ValueType: string; ValueName: ""; ValueData: "Patine.Project"; Flags: uninsdeletevalue uninsdeletekeyifempty; Tasks: association
 Root: HKA; Subkey: "Software\Classes\Patine.Project"; ValueType: string; ValueName: ""; ValueData: "{cm:ProjectFile}"; Flags: uninsdeletekey; Tasks: association
 Root: HKA; Subkey: "Software\Classes\Patine.Project\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"; Tasks: association
 Root: HKA; Subkey: "Software\Classes\Patine.Project\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""; Tasks: association
