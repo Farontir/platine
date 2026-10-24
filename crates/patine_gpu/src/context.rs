@@ -51,7 +51,9 @@ const OPTIONAL_FEATURES: wgpu::Features = wgpu::Features::TEXTURE_ADAPTER_SPECIF
     .union(wgpu::Features::PRIMITIVE_INDEX);
 
 /// A wgpu instance, adapter, device and queue, shared by every GPU subsystem.
-#[derive(Debug)]
+///
+/// Cloning gives another handle to the same device, for example for a worker thread.
+#[derive(Clone, Debug)]
 pub struct GpuContext {
     /// The wgpu instance the adapter comes from.
     pub instance: wgpu::Instance,

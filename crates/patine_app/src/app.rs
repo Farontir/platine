@@ -36,6 +36,7 @@ use crate::document::{Document, DraftEnvironment, EnvironmentChange, environment
 use crate::environment_sync::EnvironmentSync;
 use crate::history_panel;
 use crate::i18n::{I18n, Language};
+use crate::loading::{Job, Loader, Prepared};
 use crate::logging::LogBuffer;
 use crate::new_project::{CreatedProject, NewProjectDialog};
 use crate::profiling::Profiler;
@@ -128,6 +129,74 @@ struct Graphics {
     presented: bool,
     /// Frames skipped in a row because the surface gave no image.
     skipped_frames: u32,
+}
+
+impl Graphics {
+    fn target(&mut self) -> Target<'_> {
+        Target {
+            name: "interface",
+            window: &self.window,
+            surface: &self.surface,
+            config: &self.config,
+            gpu: &self.gpu,
+            renderer: &mut self.renderer,
+            started: self.started,
+            presented: &mut self.presented,
+            skipped_frames: &mut self.skipped_frames,
+        }
+    }
+}
+
+/// The window while the loading page shows ([`crate::loading`]): what draws the page,
+/// and the worker preparing the rest of [`Graphics`].
+struct Loading {
+    window: Arc<Window>,
+    surface: wgpu::Surface<'static>,
+    config: wgpu::SurfaceConfiguration,
+    gpu: GpuContext,
+    gpu_name: String,
+    gpu_backend: String,
+    egui_state: egui_winit::State,
+    renderer: egui_wgpu::Renderer,
+    loader: Loader,
+    /// When the window was created.
+    started: Instant,
+    /// A frame has reached the window.
+    presented: bool,
+    /// Frames skipped in a row because the surface gave no image.
+    skipped_frames: u32,
+    /// The window was made visible (after its first frame).
+    shown: bool,
+}
+
+impl Loading {
+    fn target(&mut self) -> Target<'_> {
+        Target {
+            name: "loading page",
+            window: &self.window,
+            surface: &self.surface,
+            config: &self.config,
+            gpu: &self.gpu,
+            renderer: &mut self.renderer,
+            started: self.started,
+            presented: &mut self.presented,
+            skipped_frames: &mut self.skipped_frames,
+        }
+    }
+}
+
+/// What a frame of egui is drawn to: the window of the interface or of the loading page.
+struct Target<'a> {
+    /// What the window shows, for the log.
+    name: &'static str,
+    window: &'a Window,
+    surface: &'a wgpu::Surface<'static>,
+    config: &'a wgpu::SurfaceConfiguration,
+    gpu: &'a GpuContext,
+    renderer: &'a mut egui_wgpu::Renderer,
+    started: Instant,
+    presented: &'a mut bool,
+    skipped_frames: &'a mut u32,
 }
 
 /// Budget of the texture pool. The document's channel textures are pinned; the budget
@@ -352,6 +421,8 @@ pub struct App {
     /// Decoding of the environment shown by the viewport.
     environment_sync: EnvironmentSync,
     egui_ctx: egui::Context,
+    /// The window while the loading page shows; replaced by `graphics` once ready.
+    loading: Option<Loading>,
     graphics: Option<Graphics>,
     /// First fatal error; the event loop exits and `run` returns it.
     error: Option<anyhow::Error>,
@@ -405,6 +476,7 @@ pub fn run(logs: LogBuffer, profiler: Profiler, options: StartupOptions) -> anyh
         draft_environment: DraftEnvironment::default(),
         environment_sync: EnvironmentSync::default(),
         egui_ctx,
+        loading: None,
         graphics: None,
         error: None,
         capture: options
@@ -1048,9 +1120,13 @@ impl App {
         }
     }
 
-    fn create_graphics(&self, event_loop: &ActiveEventLoop) -> anyhow::Result<Graphics> {
-        // Each step is logged with its time: when the window stays blank on a user's
-        // machine, the log file shows the step it is stuck in.
+    /// Opens the window, connects to the GPU and starts building the rest under the
+    /// loading page ([`crate::loading`]).
+    ///
+    /// The window stays hidden until the page is drawn: it never shows blank.
+    fn create_loading(&mut self, event_loop: &ActiveEventLoop) -> anyhow::Result<Loading> {
+        // Each step is logged with its time: when the startup is slow on a user's
+        // machine, the log file shows the step it spends its time in.
         let started = Instant::now();
         let step = |name: &str| {
             tracing::info!(
@@ -1064,7 +1140,8 @@ impl App {
                 Some([width, height]) => PhysicalSize::new(width, height),
                 None => PhysicalSize::new(1600, 900),
             })
-            .with_min_inner_size(PhysicalSize::new(640, 360));
+            .with_min_inner_size(PhysicalSize::new(640, 360))
+            .with_visible(false);
         let window = Arc::new(
             event_loop
                 .create_window(attributes)
@@ -1115,25 +1192,39 @@ impl App {
             config.format,
             egui_wgpu::RendererOptions::default(),
         );
-        let viewport = Viewport::new(&gpu).context("failed to create the viewport")?;
-        step("viewport ready");
-        let uv_view = UvView::new(&gpu).context("failed to create the 2D view")?;
-        let compositor = Compositor::new(&gpu).context("failed to create the compositor")?;
-        step("compositor ready");
-        let white_mask = white_pixel(&gpu);
-        let gpu_mesh = self
-            .document
-            .as_ref()
-            .and_then(|document| upload_mesh(&gpu, &viewport, &document.project.mesh));
 
-        let tablet = Tablet::new(&window);
-        step("tablet ready");
+        // The environment to show, unless the viewport's studio sky is the one or an
+        // image picked on the command line is already being handed over.
+        let (wanted, resources) = match &self.document {
+            Some(document) => (&document.project.environment, &document.project.resources),
+            None => (
+                &self.draft_environment.settings,
+                &self.draft_environment.resources,
+            ),
+        };
+        let environment = (wanted.source != EnvironmentSource::Studio
+            && !self.environment_sync.loading())
+        .then(|| (wanted.source.clone(), resources.clone()));
+        let loader = Loader::start(
+            Job {
+                gpu: gpu.clone(),
+                pool_budget: POOL_BUDGET,
+                project: self
+                    .document
+                    .as_ref()
+                    .map(|document| document.project.clone()),
+                caches: self.pending_caches.take(),
+                environment,
+                started,
+            },
+            &self.egui_ctx,
+        );
 
-        Ok(Graphics {
+        Ok(Loading {
             started,
             presented: false,
             skipped_frames: 0,
-            tablet,
+            shown: false,
             window,
             surface,
             config,
@@ -1142,17 +1233,122 @@ impl App {
             gpu,
             egui_state,
             renderer,
-            viewport,
-            gpu_mesh,
+            loader,
+        })
+    }
+
+    /// Builds the graphics of the interface from the window of the loading page and what
+    /// the worker prepared.
+    fn finish_loading(&mut self, loading: Loading, prepared: Prepared) -> Graphics {
+        let Loading {
+            started,
+            window,
+            surface,
+            config,
+            gpu_name,
+            gpu_backend,
+            gpu,
+            egui_state,
+            renderer,
+            ..
+        } = loading;
+        for (id, pixels) in &prepared.thumbnails {
+            crate::library_panel::insert_thumbnail(
+                &mut self.ui.library,
+                &self.egui_ctx,
+                id,
+                pixels,
+            );
+        }
+        if let Some((source, result)) = prepared.environment {
+            self.environment_sync.shown(source, result.err());
+        }
+        let white_mask = white_pixel(&gpu);
+        let tablet = Tablet::new(&window);
+        tracing::info!(
+            elapsed_ms = started.elapsed().as_millis() as u64,
+            "startup: interface ready"
+        );
+        Graphics {
+            started: Instant::now(),
+            presented: false,
+            skipped_frames: 0,
+            tablet,
+            window,
+            surface,
+            config,
+            gpu_name,
+            gpu_backend,
+            gpu,
+            egui_state,
+            renderer,
+            viewport: prepared.viewport,
+            gpu_mesh: prepared.gpu_mesh,
             last_pick: None,
-            pool: TexturePool::new(POOL_BUDGET),
-            gpu_document: GpuDocument::new(),
-            compositor,
+            pool: prepared.pool,
+            gpu_document: prepared.gpu_document,
+            compositor: prepared.compositor,
             materials: Vec::new(),
             materials_inspect: None,
             white_mask,
-            uv_view,
-        })
+            uv_view: prepared.uv_view,
+        }
+    }
+
+    /// A frame of the loading page; once the worker is done, the interface takes over.
+    fn redraw_loading(&mut self, event_loop: &ActiveEventLoop) {
+        let Some(loading) = self.loading.as_mut() else {
+            return;
+        };
+        match loading.loader.poll() {
+            Some(Ok(prepared)) => {
+                let loading = self
+                    .loading
+                    .take()
+                    .expect("the loading state was just used");
+                let graphics = self.finish_loading(loading, *prepared);
+                graphics.window.request_redraw();
+                self.graphics = Some(graphics);
+                return;
+            }
+            Some(Err(error)) => {
+                tracing::error!("{error:#}");
+                self.error = Some(error);
+                event_loop.exit();
+                return;
+            }
+            None => {}
+        }
+        if loading.config.width == 0 || loading.config.height == 0 {
+            // Minimized: check the worker again a little later.
+            event_loop.set_control_flow(ControlFlow::WaitUntil(
+                Instant::now() + std::time::Duration::from_millis(100),
+            ));
+            return;
+        }
+        let raw_input = loading.egui_state.take_egui_input(&loading.window);
+        let progress = loading.loader.progress;
+        let gpu = format!("{} ({})", loading.gpu_name, loading.gpu_backend);
+        let i18n = &self.i18n;
+        let mut full_output = self.egui_ctx.run_ui(raw_input, |ui| {
+            crate::loading::show(ui, i18n, &progress, &gpu);
+        });
+        loading.egui_state.handle_platform_output(
+            &loading.window,
+            std::mem::take(&mut full_output.platform_output),
+        );
+        if let Some(Err(error)) =
+            Self::paint(loading.target(), &self.egui_ctx, &mut full_output, None)
+        {
+            tracing::error!("{error:#}");
+        }
+        // Shown after its first frame, so that it never appears blank.
+        if !loading.shown {
+            loading.shown = true;
+            loading.window.set_visible(true);
+        }
+        // The page animates and checks the worker every frame (vsync paced).
+        loading.window.request_redraw();
     }
 
     /// The environment shown now: the document's, or the draft without a project.
@@ -1709,104 +1905,22 @@ impl App {
     /// Renders one missing thumbnail of the Library panel per frame, while the panel is
     /// visible: materials lit by their normal, noises and patterns in gray.
     fn render_thumbnails(&mut self) {
-        use crate::library_panel::{THUMBNAIL_SIZE, thumbnail_pixels};
-        use patine_procedural::def::Category;
-        use patine_procedural::evaluate::{EvaluationUniforms, SurfaceInput};
-
         let visible = std::mem::take(&mut self.ui.library.visible);
         let Some(gfx) = self.graphics.as_ref() else {
             return;
         };
-        let thumbnails = &mut self.ui.library.thumbnails;
+        let library = &mut self.ui.library;
         let Some(def) = patine_procedural::library::all()
             .iter()
-            .find(|def| !thumbnails.contains_key(&def.id))
+            .find(|def| !library.thumbnails.contains_key(&def.id))
         else {
             return;
         };
         if !visible {
             return;
         }
-        let size = THUMBNAIL_SIZE;
-        // Every output of the procedural, in one pass, read back.
-        let render = || -> Option<Vec<Vec<[f32; 4]>>> {
-            let formats = patine_procedural::evaluate::output_formats(def);
-            let textures: Vec<wgpu::Texture> = formats
-                .iter()
-                .map(|format| {
-                    gfx.gpu.device.create_texture(&wgpu::TextureDescriptor {
-                        label: Some("thumbnail"),
-                        size: wgpu::Extent3d {
-                            width: size,
-                            height: size,
-                            depth_or_array_layers: 1,
-                        },
-                        mip_level_count: 1,
-                        sample_count: 1,
-                        dimension: wgpu::TextureDimension::D2,
-                        format: *format,
-                        usage: wgpu::TextureUsages::RENDER_ATTACHMENT
-                            | wgpu::TextureUsages::COPY_SRC,
-                        view_formats: &[],
-                    })
-                })
-                .collect();
-            let views: Vec<wgpu::TextureView> = textures
-                .iter()
-                .map(|texture| texture.create_view(&Default::default()))
-                .collect();
-            let targets: Vec<_> = views.iter().zip(formats).collect();
-            let uniforms = EvaluationUniforms::new(
-                &patine_core::layer::Projection::default(),
-                size,
-                [0.0; 3],
-                1.0,
-                true,
-            );
-            let mut encoder = gfx.gpu.device.create_command_encoder(&Default::default());
-            let result = gfx.compositor.procedurals().evaluate(
-                &gfx.gpu,
-                &mut encoder,
-                def,
-                &def.defaults(),
-                &uniforms,
-                SurfaceInput::Flat,
-                &targets,
-            );
-            if let Err(error) = result {
-                tracing::error!(id = %def.id, %error, "thumbnail failed");
-                return None;
-            }
-            gfx.gpu.queue.submit([encoder.finish()]);
-            textures
-                .iter()
-                .map(|texture| match texture.format() {
-                    wgpu::TextureFormat::Rgba16Float => {
-                        patine_gpu::readback::read_rgba16f(&gfx.gpu, texture).ok()
-                    }
-                    _ => patine_gpu::readback::read_r16f_level(&gfx.gpu, texture, 0, 0)
-                        .ok()
-                        .map(|values| values.into_iter().map(|v| [v, 0.0, 0.0, 0.0]).collect()),
-                })
-                .collect()
-        };
-        let pixels = render().and_then(|outputs| {
-            if def.category == Category::Material {
-                // Outputs in the order of their index: base color 0, normal 3.
-                Some(thumbnail_pixels(outputs.first()?, Some(outputs.get(3)?)))
-            } else {
-                Some(thumbnail_pixels(outputs.first()?, None))
-            }
-        });
-        // A failed thumbnail stays gray instead of being rendered again every frame.
-        let pixels = pixels.unwrap_or_else(|| vec![64; (size * size * 4) as usize]);
-        let image = egui::ColorImage::from_rgba_unmultiplied([size as usize; 2], &pixels);
-        let handle = self.egui_ctx.load_texture(
-            format!("thumbnail {}", def.id),
-            image,
-            egui::TextureOptions::LINEAR,
-        );
-        thumbnails.insert(def.id.clone(), handle);
+        let pixels = crate::library_panel::render_thumbnail(&gfx.gpu, &gfx.compositor, def);
+        crate::library_panel::insert_thumbnail(library, &self.egui_ctx, &def.id, &pixels);
         self.egui_ctx.request_repaint();
     }
 
@@ -2380,6 +2494,10 @@ impl App {
 
     fn redraw(&mut self, event_loop: &ActiveEventLoop) {
         puffin::profile_function!();
+        if self.loading.is_some() {
+            self.redraw_loading(event_loop);
+            return;
+        }
         if let Some(result) = self.file_jobs.poll() {
             self.finish_file_job(result);
         }
@@ -2489,7 +2607,7 @@ impl App {
             None => None,
         };
         let captured = Self::paint(
-            gfx,
+            gfx.target(),
             &self.egui_ctx,
             &mut full_output,
             capture_now.as_deref(),
@@ -2536,17 +2654,18 @@ impl App {
         }
     }
 
-    /// Draws egui to the window. With `capture`, the image is also saved to that PNG and
-    /// the result of the capture is returned.
+    /// Draws egui to the window of `target`. With `capture`, the image is also saved to
+    /// that PNG and the result of the capture is returned.
     fn paint(
-        gfx: &mut Graphics,
+        target: Target<'_>,
         egui_ctx: &egui::Context,
         full_output: &mut egui::FullOutput,
         capture: Option<&Path>,
     ) -> Option<anyhow::Result<()>> {
         let mut captured = None;
         puffin::profile_function!();
-        let Graphics {
+        let Target {
+            name,
             window,
             surface,
             config,
@@ -2555,8 +2674,7 @@ impl App {
             started,
             presented,
             skipped_frames,
-            ..
-        } = gfx;
+        } = target;
         let (device, queue) = (&gpu.device, &gpu.queue);
 
         // Texture updates must reach the renderer even when no frame is drawn.
@@ -2646,7 +2764,7 @@ impl App {
                 *presented = true;
                 tracing::info!(
                     elapsed_ms = started.elapsed().as_millis() as u64,
-                    "startup: first frame presented"
+                    "startup: first frame of the {name} presented"
                 );
             }
         }
@@ -2659,25 +2777,46 @@ impl App {
 
     fn resize(&mut self, size: PhysicalSize<u32>) {
         if let Some(gfx) = self.graphics.as_mut() {
-            gfx.config.width = size.width;
-            gfx.config.height = size.height;
-            if size.width > 0 && size.height > 0 {
-                gfx.surface.configure(&gfx.gpu.device, &gfx.config);
-                gfx.window.request_redraw();
-            }
+            resize_surface(&gfx.window, &gfx.surface, &gfx.gpu, &mut gfx.config, size);
+        } else if let Some(loading) = self.loading.as_mut() {
+            resize_surface(
+                &loading.window,
+                &loading.surface,
+                &loading.gpu,
+                &mut loading.config,
+                size,
+            );
         }
+    }
+}
+
+/// Resizes the surface of `window` (not while minimized, at size 0).
+fn resize_surface(
+    window: &Window,
+    surface: &wgpu::Surface<'static>,
+    gpu: &GpuContext,
+    config: &mut wgpu::SurfaceConfiguration,
+    size: PhysicalSize<u32>,
+) {
+    config.width = size.width;
+    config.height = size.height;
+    if size.width > 0 && size.height > 0 {
+        surface.configure(&gpu.device, config);
+        window.request_redraw();
     }
 }
 
 impl ApplicationHandler for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
-        if self.graphics.is_some() {
+        if self.graphics.is_some() || self.loading.is_some() {
             return;
         }
-        match self.create_graphics(event_loop) {
-            Ok(graphics) => {
-                graphics.window.request_redraw();
-                self.graphics = Some(graphics);
+        match self.create_loading(event_loop) {
+            Ok(loading) => {
+                self.loading = Some(loading);
+                // A hidden window gets no redraw request (Windows): the first frame of
+                // the page is drawn now, and shows the window.
+                self.redraw_loading(event_loop);
             }
             Err(error) => {
                 tracing::error!("{error:#}");
@@ -2693,8 +2832,13 @@ impl ApplicationHandler for App {
             if response.repaint {
                 gfx.window.request_redraw();
             }
+        } else if let Some(loading) = self.loading.as_mut() {
+            // Sizes and scale for the page; it redraws every frame anyway.
+            let _ = loading.egui_state.on_window_event(&loading.window, &event);
         }
         match event {
+            // Nothing can have changed yet under the loading page: quit at once.
+            WindowEvent::CloseRequested if self.loading.is_some() => event_loop.exit(),
             WindowEvent::CloseRequested => {
                 self.request(PendingAction::Quit);
                 if let Some(gfx) = &self.graphics {
@@ -2716,6 +2860,8 @@ impl ApplicationHandler for App {
             event_loop.set_control_flow(ControlFlow::Wait);
             if let Some(gfx) = &self.graphics {
                 gfx.window.request_redraw();
+            } else if let Some(loading) = &self.loading {
+                loading.window.request_redraw();
             }
         }
         // Wake up for the next autosave even when nothing happens.
@@ -2732,7 +2878,7 @@ impl ApplicationHandler for App {
 }
 
 /// Uploads `mesh` with the picking buffers the viewport needs on this device.
-fn upload_mesh(
+pub(crate) fn upload_mesh(
     gpu: &GpuContext,
     viewport: &Viewport,
     mesh: &patine_core::mesh::MeshAsset,

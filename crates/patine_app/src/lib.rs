@@ -15,6 +15,7 @@ pub mod history_panel;
 pub mod i18n;
 pub mod layers_panel;
 pub mod library_panel;
+pub mod loading;
 pub mod logging;
 pub mod masks;
 pub mod new_project;

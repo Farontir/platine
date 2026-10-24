@@ -2,16 +2,19 @@
 //! thumbnail each. Double-clicking a material adds it as a fill layer above the selection;
 //! double-clicking a noise or a pattern adds it to the mask of the selected layer.
 //!
-//! Thumbnails are rendered by the application (`App::render_thumbnails`), one per frame
-//! while the panel is visible; the panel shows a placeholder until then.
+//! Thumbnails are rendered under the loading page ([`render_thumbnail`]); one missing
+//! afterwards is rendered by the application (`App::render_thumbnails`), one per frame
+//! while the panel is visible, the panel showing a placeholder until then.
 
 use std::collections::HashMap;
 
 use egui::{RichText, Sense, Ui};
+use patine_compositor::compositor::Compositor;
 use patine_core::command::Command;
 use patine_core::ids::IdSequence;
 use patine_core::layer::{BlendMode, Layer};
 use patine_core::project::{Project, TextureSetId};
+use patine_gpu::{GpuContext, wgpu};
 use patine_procedural::def::{Category, ProceduralDef};
 use patine_procedural::library::{self, MATERIAL_CHANNELS};
 
@@ -223,6 +226,99 @@ pub fn thumbnail_pixels(base: &[[f32; 4]], normal: Option<&[[f32; 4]]>) -> Vec<u
             }
         })
         .collect()
+}
+
+/// Renders the RGBA8 thumbnail of `def` at [`THUMBNAIL_SIZE`]²: every output of the
+/// procedural in one pass, read back. A failed thumbnail is gray, so that it is not
+/// rendered again.
+///
+/// The first thumbnail of a procedural compiles its shader, which can take seconds:
+/// the loading page renders them all before the interface shows.
+pub fn render_thumbnail(gpu: &GpuContext, compositor: &Compositor, def: &ProceduralDef) -> Vec<u8> {
+    use patine_procedural::evaluate::{EvaluationUniforms, SurfaceInput};
+
+    let size = THUMBNAIL_SIZE;
+    let render = || -> Option<Vec<Vec<[f32; 4]>>> {
+        let formats = patine_procedural::evaluate::output_formats(def);
+        let textures: Vec<wgpu::Texture> = formats
+            .iter()
+            .map(|format| {
+                gpu.device.create_texture(&wgpu::TextureDescriptor {
+                    label: Some("thumbnail"),
+                    size: wgpu::Extent3d {
+                        width: size,
+                        height: size,
+                        depth_or_array_layers: 1,
+                    },
+                    mip_level_count: 1,
+                    sample_count: 1,
+                    dimension: wgpu::TextureDimension::D2,
+                    format: *format,
+                    usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::COPY_SRC,
+                    view_formats: &[],
+                })
+            })
+            .collect();
+        let views: Vec<wgpu::TextureView> = textures
+            .iter()
+            .map(|texture| texture.create_view(&Default::default()))
+            .collect();
+        let targets: Vec<_> = views.iter().zip(formats).collect();
+        let uniforms = EvaluationUniforms::new(
+            &patine_core::layer::Projection::default(),
+            size,
+            [0.0; 3],
+            1.0,
+            true,
+        );
+        let mut encoder = gpu.device.create_command_encoder(&Default::default());
+        let result = compositor.procedurals().evaluate(
+            gpu,
+            &mut encoder,
+            def,
+            &def.defaults(),
+            &uniforms,
+            SurfaceInput::Flat,
+            &targets,
+        );
+        if let Err(error) = result {
+            tracing::error!(id = %def.id, %error, "thumbnail failed");
+            return None;
+        }
+        gpu.queue.submit([encoder.finish()]);
+        textures
+            .iter()
+            .map(|texture| match texture.format() {
+                wgpu::TextureFormat::Rgba16Float => {
+                    patine_gpu::readback::read_rgba16f(gpu, texture).ok()
+                }
+                _ => patine_gpu::readback::read_r16f_level(gpu, texture, 0, 0)
+                    .ok()
+                    .map(|values| values.into_iter().map(|v| [v, 0.0, 0.0, 0.0]).collect()),
+            })
+            .collect()
+    };
+    let pixels = render().and_then(|outputs| {
+        if def.category == Category::Material {
+            // Outputs in the order of their index: base color 0, normal 3.
+            Some(thumbnail_pixels(outputs.first()?, Some(outputs.get(3)?)))
+        } else {
+            Some(thumbnail_pixels(outputs.first()?, None))
+        }
+    });
+    pixels.unwrap_or_else(|| vec![64; (size * size * 4) as usize])
+}
+
+/// Adds the thumbnail `pixels` of the procedural `id` to the panel.
+pub fn insert_thumbnail(state: &mut LibraryState, ctx: &egui::Context, id: &str, pixels: &[u8]) {
+    let side = THUMBNAIL_SIZE as usize;
+    let image = egui::ColorImage::from_rgba_unmultiplied([side; 2], pixels);
+    let handle = ctx.load_texture(
+        format!("thumbnail {id}"),
+        image,
+        egui::TextureOptions::LINEAR,
+    );
+    state.thumbnails.insert(id.to_owned(), handle);
 }
 
 #[cfg(test)]

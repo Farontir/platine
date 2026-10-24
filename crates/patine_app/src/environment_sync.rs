@@ -46,7 +46,8 @@ impl std::fmt::Debug for EnvironmentSync {
     }
 }
 
-fn decode(
+/// The decoding of `source`, to run on a worker thread.
+pub(crate) fn decode(
     source: &EnvironmentSource,
     resources: &BTreeMap<ResourceHash, Resource>,
 ) -> Box<dyn FnOnce() -> Result<EquirectImage, String> + Send> {
@@ -77,6 +78,14 @@ impl EnvironmentSync {
     /// Whether an image is being decoded.
     pub fn loading(&self) -> bool {
         self.task.is_some()
+    }
+
+    /// Records that the viewport already shows `source` (processed under the loading
+    /// page), or failed to with `error`.
+    pub fn shown(&mut self, source: EnvironmentSource, error: Option<String>) {
+        self.requested = source;
+        self.task = None;
+        self.error = error;
     }
 
     /// Records that `image`, already decoded, shows `source` (an HDRI the user just
