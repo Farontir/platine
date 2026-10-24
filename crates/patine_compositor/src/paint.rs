@@ -125,6 +125,18 @@ impl StrokeUndo {
     }
 }
 
+/// Identity of a stroke: the address of its `Arc`, kept alive by [`Raster::strokes`]
+/// while the key is in use. An address rather than a pointer, so that the raster (and
+/// the GPU document) can be built on a worker thread.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct StrokeKey(usize);
+
+impl StrokeKey {
+    pub(crate) fn of(stroke: &Arc<Stroke>) -> Self {
+        Self(Arc::as_ptr(stroke) as usize)
+    }
+}
+
 /// The rasterized strokes of one paint layer or paint mask effect.
 #[derive(Debug)]
 pub(crate) struct Raster {
@@ -134,7 +146,7 @@ pub(crate) struct Raster {
     pub(crate) strokes: Vec<Arc<Stroke>>,
     pub(crate) contents: BTreeMap<Channel, PaintContent>,
     /// Tiles from before each stroke that can be undone without a replay, by stroke.
-    pub(crate) undo: HashMap<*const Stroke, StrokeUndo>,
+    pub(crate) undo: HashMap<StrokeKey, StrokeUndo>,
     /// Tiles the strokes touched (`[x, y]`), kept through undo: what a raster cache
     /// saves.
     pub(crate) painted: BTreeSet<[u32; 2]>,
@@ -426,7 +438,7 @@ impl PaintRasters {
     pub(crate) fn adopt(&mut self, target: PaintTarget, stroke: Arc<Stroke>, undo: StrokeUndo) {
         if let Some(raster) = self.rasters.get_mut(&target) {
             raster.painted.extend(undo.tiles.iter().copied());
-            raster.undo.insert(Arc::as_ptr(&stroke), undo);
+            raster.undo.insert(StrokeKey::of(&stroke), undo);
             raster.strokes.push(stroke);
         }
     }
@@ -513,7 +525,7 @@ impl PaintRasters {
             let mut full = false;
             while raster.strokes.len() > prefix {
                 let stroke = raster.strokes.pop().expect("longer than the prefix");
-                match raster.undo.remove(&Arc::as_ptr(&stroke)) {
+                match raster.undo.remove(&StrokeKey::of(&stroke)) {
                     Some(undo) if undo.alive(pool) => {
                         for (channel, snapshot) in &undo.before {
                             if let Some(content) = raster.contents.get(channel)
@@ -593,7 +605,7 @@ impl PaintRasters {
                         })
                         .collect();
                     raster.undo.insert(
-                        Arc::as_ptr(stroke),
+                        StrokeKey::of(stroke),
                         StrokeUndo {
                             tiles: tiles.clone(),
                             before,
