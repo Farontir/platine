@@ -3,6 +3,7 @@
 
 app-title = Patine
 app-fatal-error = Patine n'a pas pu démarrer.
+app-log-file = Le journal de cette session est dans { $path }. Joignez-le à votre signalement.
 
 ## Menus
 menu-file = Fichier

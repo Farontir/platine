@@ -23,7 +23,8 @@ impl fmt::Display for AdapterChoice {
 }
 
 impl AdapterChoice {
-    fn backends(self) -> wgpu::Backends {
+    /// The backends this choice is looked for in.
+    pub fn backends(self) -> wgpu::Backends {
         match self {
             AdapterChoice::Hardware => wgpu::Backends::PRIMARY,
             // WARP is only exposed through DX12, lavapipe through Vulkan.
@@ -67,8 +68,17 @@ impl GpuContext {
     ///
     /// `WGPU_BACKEND` and the other wgpu environment variables still apply.
     pub fn create_instance(choice: AdapterChoice) -> wgpu::Instance {
+        Self::create_instance_with(choice.backends())
+    }
+
+    /// Creates an instance limited to `backends`, for example to work around a driver
+    /// that fails with the default API. [`AdapterChoice::backends`] gives the backends
+    /// an adapter choice is looked for in.
+    ///
+    /// `WGPU_BACKEND` and the other wgpu environment variables still apply.
+    pub fn create_instance_with(backends: wgpu::Backends) -> wgpu::Instance {
         let mut desc = wgpu::InstanceDescriptor::new_without_display_handle();
-        desc.backends = choice.backends();
+        desc.backends = backends;
         wgpu::Instance::new(desc.with_env())
     }
 

@@ -5,6 +5,7 @@
 use std::path::PathBuf;
 
 use patine_core::channel::Channel;
+use patine_gpu::{AdapterChoice, wgpu};
 use patine_render::camera::Projection;
 use patine_render::settings::{Background, DisplayMode, ToneMapper};
 use thiserror::Error;
@@ -16,6 +17,9 @@ use crate::ui::Panel;
 pub const USAGE: &str = "usage: patine_app [mesh] [options]
   --language fr|en              interface language
   --window WxH                  window size in pixels
+  --gpu auto|vulkan|dx12|software
+                                graphics API, or the software renderer (slow): works
+                                around a graphics driver that fails with the default
   --tab PANEL                   bring a panel to front: viewport-3d, view-2d, texture-sets,
                                 layers, properties, library, display, history, console
   --hdri PATH|studio            environment
@@ -354,6 +358,33 @@ impl StartupEdit {
     }
 }
 
+/// Graphics API or renderer to start on.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum GpuOption {
+    /// The most capable GPU, on Vulkan or DirectX 12.
+    #[default]
+    Auto,
+    /// The most capable GPU, on Vulkan only.
+    Vulkan,
+    /// The most capable GPU, on DirectX 12 only.
+    Dx12,
+    /// The software renderer: WARP on Windows, lavapipe on Linux. Slow, but independent
+    /// of the graphics driver.
+    Software,
+}
+
+impl GpuOption {
+    /// The adapter to request, and the backends to look for it in.
+    pub fn adapter(self) -> (AdapterChoice, wgpu::Backends) {
+        match self {
+            GpuOption::Auto => (AdapterChoice::Hardware, AdapterChoice::Hardware.backends()),
+            GpuOption::Vulkan => (AdapterChoice::Hardware, wgpu::Backends::VULKAN),
+            GpuOption::Dx12 => (AdapterChoice::Hardware, wgpu::Backends::DX12),
+            GpuOption::Software => (AdapterChoice::Software, AdapterChoice::Software.backends()),
+        }
+    }
+}
+
 /// A dialog to open at startup.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StartupDialog {
@@ -372,6 +403,8 @@ pub struct StartupOptions {
     pub language: Option<Language>,
     /// Window size.
     pub window: Option<[u32; 2]>,
+    /// Graphics API or renderer.
+    pub gpu: GpuOption,
     /// Panels to bring to front, in order.
     pub tabs: Vec<Panel>,
     /// Environment file; `Some(None)` for the procedural studio sky.
@@ -509,6 +542,16 @@ impl StartupOptions {
                     let (w, h) = v.split_once('x').ok_or_else(|| invalid(&v))?;
                     let parse = |s: &str| s.parse::<u32>().map_err(|_| invalid(&v));
                     options.window = Some([parse(w)?, parse(h)?]);
+                }
+                "--gpu" => {
+                    let v = value()?;
+                    options.gpu = match v.as_str() {
+                        "auto" => GpuOption::Auto,
+                        "vulkan" => GpuOption::Vulkan,
+                        "dx12" => GpuOption::Dx12,
+                        "software" => GpuOption::Software,
+                        _ => return Err(invalid(&v)),
+                    };
                 }
                 "--tab" => {
                     let v = value()?;
@@ -687,6 +730,13 @@ mod tests {
         assert_eq!(options.mesh, Some(PathBuf::from("work.patine")));
         assert_eq!(options.autosave_interval, Some(10));
         assert!(parse(&["--autosave-interval", "0"]).is_err());
+        assert_eq!(parse(&[]).unwrap().gpu, GpuOption::Auto);
+        assert_eq!(parse(&["--gpu", "dx12"]).unwrap().gpu, GpuOption::Dx12);
+        assert_eq!(
+            parse(&["--gpu", "software"]).unwrap().gpu.adapter().0,
+            AdapterChoice::Software
+        );
+        assert!(parse(&["--gpu", "opengl"]).is_err());
         let options = parse(&[
             "--edit",
             "rotation=90",

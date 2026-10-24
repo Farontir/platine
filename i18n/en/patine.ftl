@@ -3,6 +3,7 @@
 
 app-title = Patine
 app-fatal-error = Patine could not start.
+app-log-file = The log of this session is in { $path }. Attach it to your report.
 
 ## Menus
 menu-file = File

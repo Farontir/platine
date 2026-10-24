@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::Context as _;
-use patine_gpu::{AdapterChoice, GpuContext, wgpu};
+use patine_gpu::{GpuContext, wgpu};
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalSize;
 use winit::event::WindowEvent;
@@ -122,6 +122,12 @@ struct Graphics {
     white_mask: wgpu::TextureView,
     /// Renderer of the 2D view.
     uv_view: UvView,
+    /// When the window was created: the first presented frame logs its delay.
+    started: Instant,
+    /// A frame has reached the window.
+    presented: bool,
+    /// Frames skipped in a row because the surface gave no image.
+    skipped_frames: u32,
 }
 
 /// Budget of the texture pool. The document's channel textures are pinned; the budget
@@ -1043,6 +1049,15 @@ impl App {
     }
 
     fn create_graphics(&self, event_loop: &ActiveEventLoop) -> anyhow::Result<Graphics> {
+        // Each step is logged with its time: when the window stays blank on a user's
+        // machine, the log file shows the step it is stuck in.
+        let started = Instant::now();
+        let step = |name: &str| {
+            tracing::info!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "startup: {name}"
+            );
+        };
         let attributes = Window::default_attributes()
             .with_title(self.i18n.tr("app-title"))
             .with_inner_size(match self.startup.window {
@@ -1055,18 +1070,18 @@ impl App {
                 .create_window(attributes)
                 .context("failed to create the window")?,
         );
+        step("window created");
 
-        let instance = GpuContext::create_instance(AdapterChoice::Hardware);
+        let (choice, backends) = self.startup.gpu.adapter();
+        tracing::info!(option = ?self.startup.gpu, ?backends, "requesting the GPU");
+        let instance = GpuContext::create_instance_with(backends);
         let surface = instance
             .create_surface(Arc::clone(&window))
             .context("failed to create the window surface")?;
-        let gpu = pollster::block_on(GpuContext::request(
-            instance,
-            AdapterChoice::Hardware,
-            Some(&surface),
-        ))?;
+        let gpu = pollster::block_on(GpuContext::request(instance, choice, Some(&surface)))?;
         let info = gpu.adapter_info();
         tracing::info!(capabilities = ?gpu.capabilities(), "GPU ready");
+        step("device created");
 
         let size = window.inner_size();
         let mut config = surface
@@ -1084,6 +1099,7 @@ impl App {
             config.usage |= wgpu::TextureUsages::COPY_SRC;
         }
         surface.configure(&gpu.device, &config);
+        tracing::info!(format = ?config.format, width = config.width, height = config.height, "surface configured");
 
         let max_texture_side = gpu.device.limits().max_texture_dimension_2d as usize;
         let egui_state = egui_winit::State::new(
@@ -1100,8 +1116,10 @@ impl App {
             egui_wgpu::RendererOptions::default(),
         );
         let viewport = Viewport::new(&gpu).context("failed to create the viewport")?;
+        step("viewport ready");
         let uv_view = UvView::new(&gpu).context("failed to create the 2D view")?;
         let compositor = Compositor::new(&gpu).context("failed to create the compositor")?;
+        step("compositor ready");
         let white_mask = white_pixel(&gpu);
         let gpu_mesh = self
             .document
@@ -1109,8 +1127,12 @@ impl App {
             .and_then(|document| upload_mesh(&gpu, &viewport, &document.project.mesh));
 
         let tablet = Tablet::new(&window);
+        step("tablet ready");
 
         Ok(Graphics {
+            started,
+            presented: false,
+            skipped_frames: 0,
             tablet,
             window,
             surface,
@@ -2530,6 +2552,9 @@ impl App {
             config,
             gpu,
             renderer,
+            started,
+            presented,
+            skipped_frames,
             ..
         } = gfx;
         let (device, queue) = (&gpu.device, &gpu.queue);
@@ -2551,11 +2576,28 @@ impl App {
                 window.request_redraw();
                 None
             }
+            wgpu::CurrentSurfaceTexture::Occluded => {
+                tracing::debug!("window occluded, skipping frame");
+                None
+            }
             other => {
-                tracing::debug!(?other, "skipping frame");
+                // A surface that never gives an image leaves the window blank: say so,
+                // without flooding the log, and try again.
+                *skipped_frames += 1;
+                if skipped_frames.is_power_of_two() {
+                    tracing::warn!(
+                        ?other,
+                        skipped = *skipped_frames,
+                        "no image from the window surface, skipping frame"
+                    );
+                }
+                window.request_redraw();
                 None
             }
         };
+        if frame.is_some() {
+            *skipped_frames = 0;
+        }
 
         if let Some(frame) = frame {
             let primitives = egui_ctx.tessellate(
@@ -2600,6 +2642,13 @@ impl App {
             }
             window.pre_present_notify();
             queue.present(frame);
+            if !*presented {
+                *presented = true;
+                tracing::info!(
+                    elapsed_ms = started.elapsed().as_millis() as u64,
+                    "startup: first frame presented"
+                );
+            }
         }
 
         for id in textures.free.drain() {
