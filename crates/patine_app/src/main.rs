@@ -33,10 +33,11 @@ fn main() -> anyhow::Result<()> {
                 .unwrap_or_default();
             Err(anyhow::anyhow!("panic: {message}"))
         });
-    if let Err(error) = &result
-        && cfg!(feature = "windows-gui")
-    {
-        report(error, log_file.as_deref());
+    if let Err(error) = &result {
+        tracing::error!("fatal error: {error:#}");
+        if cfg!(feature = "windows-gui") {
+            report(error, log_file.as_deref());
+        }
     }
     result
 }
