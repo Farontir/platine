@@ -66,6 +66,7 @@ Name: "association"; Description: "{cm:AssociateProjects}"; GroupDescription: "{
 [Files]
 Source: "{#SourceDir}\{#AppExe}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\patine_cli.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceDir}\dxcompiler.dll"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\assets\*"; DestDir: "{app}\assets"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#SourceDir}\README.md"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#SourceDir}\LICENSE-MIT"; DestDir: "{app}"; Flags: ignoreversion

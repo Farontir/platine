@@ -8,6 +8,9 @@ Follows the normal and build dependencies of patine_app and patine_cli for the t
 root or one folder down (fonts/, a vendored library...). A crate without such a file is
 listed with its declared license and authors; the texts of the MIT and Apache-2.0
 licenses close the file.
+
+`--component TITLE LICENSE_FILE...` adds a shipped file that is not a crate, such as
+dxcompiler.dll on Windows.
 """
 
 import argparse
@@ -92,6 +95,14 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--target", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument(
+        "--component",
+        nargs="+",
+        action="append",
+        default=[],
+        metavar=("TITLE", "LICENSE_FILE"),
+        help="a shipped file that is not a crate (a DLL...), with its license files",
+    )
     args = parser.parse_args()
 
     meta = metadata(args.target)
@@ -128,6 +139,12 @@ def main():
             for path in files:
                 with open(path, encoding="utf-8", errors="replace") as text:
                     out.write(f"[{os.path.relpath(path, directory)}]\n")
+                    out.write(text.read().strip() + "\n\n")
+        for title, *paths in args.component:
+            out.write("-" * 79 + "\n" + title + "\n" + "-" * 79 + "\n\n")
+            for path in paths:
+                with open(path, encoding="utf-8", errors="replace") as text:
+                    out.write(f"[{os.path.basename(path)}]\n")
                     out.write(text.read().strip() + "\n\n")
         license_texts(out)
     print(f"{len(packages)} crates written to {args.out}", file=sys.stderr)

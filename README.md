@@ -62,6 +62,8 @@ Les exécutables ne sont pas signés. Au premier lancement, Windows SmartScreen 
 
 **Configuration** : une carte graphique compatible Vulkan ou DirectX 12. Les tests de performance sont faits sur une RTX 3080 Ti et une RTX A2000 portable. Une texture 4K coûte 128 Mo de mémoire graphique par canal couleur.
 
+**En cas de problème** : le journal de chaque session est dans `%APPDATA%\Patine\logs\patine.log` sous Windows (`~/.local/share/patine/logs` sous Linux). Joignez-le à votre [issue](https://github.com/Farontir/platine/issues). Si la carte graphique pose problème, `patine_app --gpu dx12`, `--gpu vulkan` ou `--gpu software` (rendu logiciel, lent) changent d'API.
+
 ## Prise en main
 
 1. **Fichier › Nouveau projet…** (Ctrl+N), puis choisir un mesh. Tous les modèles CC0 de [Poly Haven](https://polyhaven.com/models) conviennent.

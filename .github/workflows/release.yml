@@ -36,15 +36,31 @@ jobs:
           echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Build
         run: cargo build --release --locked -p patine_app -p patine_cli --features patine_app/windows-gui
+      # wgpu compiles shaders for DirectX 12 with dxcompiler.dll when it sits beside the
+      # executable, and falls back to FXC otherwise: FXC freezes the application for a
+      # minute or more on the first frames (white window on GPUs without Vulkan). Only
+      # dxcompiler.dll is shipped (open source, NCSA and MIT); dxil.dll is not needed.
+      - name: DirectX shader compiler
+        shell: bash
+        run: |
+          curl -sSfL -o dxc.zip "https://github.com/microsoft/DirectXShaderCompiler/releases/download/$DXC_VERSION/dxc_2026_09_29.zip"
+          echo "$DXC_SHA256  dxc.zip" | sha256sum -c -
+          mkdir -p dxc && unzip -q dxc.zip -d dxc
+        env:
+          DXC_VERSION: v1.9.2609
+          DXC_SHA256: ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1
       - name: Stage
         shell: bash
         run: |
           stage=dist/Patine
           mkdir -p "$stage"
           cp target/release/patine_app.exe target/release/patine_cli.exe "$stage/"
+          cp dxc/bin/x64/dxcompiler.dll "$stage/"
           cp -r assets "$stage/"
           cp README.md LICENSE-MIT LICENSE-APACHE "$stage/"
-          python scripts/release/third_party_licenses.py --target x86_64-pc-windows-msvc --out "$stage/THIRD-PARTY-LICENSES.txt"
+          python scripts/release/third_party_licenses.py --target x86_64-pc-windows-msvc --out "$stage/THIRD-PARTY-LICENSES.txt" \
+            --component "DirectX Shader Compiler v1.9.2609 (dxcompiler.dll), https://github.com/microsoft/DirectXShaderCompiler" \
+            dxc/LICENSE-LLVM.txt dxc/LICENCE-MIT.txt
       - name: Check that the application starts
         shell: bash
         run: dist/Patine/patine_cli.exe --version
