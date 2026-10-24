@@ -40,12 +40,16 @@ jobs:
       # executable, and falls back to FXC otherwise: FXC freezes the application for a
       # minute or more on the first frames (white window on GPUs without Vulkan). Only
       # dxcompiler.dll is shipped (open source, NCSA and MIT); dxil.dll is not needed.
+      # The archive stores its paths with backslashes: unzip warns and exits with 1, so it is
+      # expanded with PowerShell.
       - name: DirectX shader compiler
-        shell: bash
+        shell: pwsh
         run: |
-          curl -sSfL -o dxc.zip "https://github.com/microsoft/DirectXShaderCompiler/releases/download/$DXC_VERSION/dxc_2026_09_29.zip"
-          echo "$DXC_SHA256  dxc.zip" | sha256sum -c -
-          mkdir -p dxc && unzip -q dxc.zip -d dxc
+          Invoke-WebRequest -Uri "https://github.com/microsoft/DirectXShaderCompiler/releases/download/$env:DXC_VERSION/dxc_2026_09_29.zip" -OutFile dxc.zip
+          $hash = (Get-FileHash dxc.zip -Algorithm SHA256).Hash
+          if ($hash -ne $env:DXC_SHA256) { Write-Error "dxc.zip: SHA-256 $hash, expected $env:DXC_SHA256"; exit 1 }
+          Expand-Archive dxc.zip -DestinationPath dxc
+          if (-not (Test-Path dxc\bin\x64\dxcompiler.dll)) { Write-Error "dxcompiler.dll missing from the archive"; exit 1 }
         env:
           DXC_VERSION: v1.9.2609
           DXC_SHA256: ad31b1fc8443175d204f77a611fdb3ef2ec42759bdc2f1167368de24a4a7e7f1
